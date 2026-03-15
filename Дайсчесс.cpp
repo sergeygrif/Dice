@@ -3944,11 +3944,28 @@ static AI_FORCEINLINE void cancelPendingNN(PendingNN& p) {
         }
     }
 
-    p.ownerT = nullptr;
-    p.waitGroup = nullptr;
+    // IMPORTANT:
+    // do NOT clear ownerT / waitGroup here.
+    // Caller may still need completePendingNNJob(p).
     p.leaf = nullptr;
     p.ml.n = 0;
     p.trace.reset();
+    p.policyIdx.fill(INVALID_POLICY_IDX);
+}
+
+static AI_FORCEINLINE void abortPendingNNInferFailure(
+    PendingNN& p,
+    MCTSTable* fallbackOwner,
+    const char* where)
+{
+    (void)where;
+    MCTSTable* owner = p.ownerT ? p.ownerT : fallbackOwner;
+    if (owner) {
+        owner->abort.store(true, std::memory_order_release);
+    }
+
+    cancelPendingNN(p);
+    completePendingNNJob(p);
 }
 
 static AI_FORCEINLINE void backprop(TTNode* leaf, float v, Trace& tr) {
@@ -5759,14 +5776,8 @@ struct InferenceServerTrain : ITrainInferenceServer {
 
     bool busyFlag = false;
 
-    std::vector<float> neutralPol;
-    std::vector<float> neutralLogits;
-
     explicit InferenceServerTrain(MCTSTable& tab, BackendBinding be)
-        : T(tab), backend(be) {
-        neutralPol.assign((size_t)POLICY_SIZE, 0.0f);
-        neutralLogits.assign((size_t)AI_MAX_MOVES, 0.0f);
-    }
+        : T(tab), backend(be) {}
 
     void start() {
         {
@@ -5904,6 +5915,15 @@ private:
                 }
             }
 
+            if (!ok) {
+                std::cerr << "[InferenceServerTrain] inferBatchGather failed, abort batch B=" << B << "\n";
+                for (int i = 0; i < B; ++i) {
+                    PendingNN& job = *jobs[(size_t)i];
+                    abortPendingNNInferFailure(job, &T, "InferenceServerTrain");
+                }
+                return;
+            }
+
             for (int i = 0; i < B; ++i) {
                 PendingNN& job = *jobs[(size_t)i];
                 MCTSTable* TOwner = job.ownerT ? job.ownerT : &T;
@@ -5914,10 +5934,8 @@ private:
                     continue;
                 }
 
-                float v = ok ? values[(size_t)i] : 0.5f;
-                const float* lg = ok
-                    ? (logits.data() + (size_t)i * (size_t)AI_MAX_MOVES)
-                    : neutralLogits.data();
+                float v = values[(size_t)i];
+                const float* lg = logits.data() + (size_t)i * (size_t)AI_MAX_MOVES;
 
                 expandLeafWithGatheredLogits(*TOwner, job, v, lg);
                 completePendingNNJob(job);
@@ -5939,6 +5957,15 @@ private:
                 }
             }
 
+            if (!ok) {
+                std::cerr << "[InferenceServerTrain] inferBatch failed, abort batch B=" << B << "\n";
+                for (int i = 0; i < B; ++i) {
+                    PendingNN& job = *jobs[(size_t)i];
+                    abortPendingNNInferFailure(job, &T, "InferenceServerTrain");
+                }
+                return;
+            }
+
             for (int i = 0; i < B; ++i) {
                 PendingNN& job = *jobs[(size_t)i];
                 MCTSTable* TOwner = job.ownerT ? job.ownerT : &T;
@@ -5949,10 +5976,8 @@ private:
                     continue;
                 }
 
-                float v = ok ? values[(size_t)i] : 0.5f;
-                const float* pol = ok
-                    ? (policy.data() + (size_t)i * (size_t)POLICY_SIZE)
-                    : neutralPol.data();
+                float v = values[(size_t)i];
+                const float* pol = policy.data() + (size_t)i * (size_t)POLICY_SIZE;
 
                 expandLeafWithOutputs(*TOwner, job, v, pol);
                 completePendingNNJob(job);
@@ -6051,14 +6076,8 @@ struct SharedInferenceServerTrain : ITrainInferenceServer {
 
     bool busyFlag = false;
 
-    std::vector<float> neutralPol;
-    std::vector<float> neutralLogits;
-
     explicit SharedInferenceServerTrain(BackendBinding be)
-        : backend(be) {
-        neutralPol.assign((size_t)POLICY_SIZE, 0.0f);
-        neutralLogits.assign((size_t)AI_MAX_MOVES, 0.0f);
-    }
+        : backend(be) {}
 
     void start() {
         {
@@ -6196,6 +6215,15 @@ private:
                 }
             }
 
+            if (!ok) {
+                std::cerr << "[SharedInferenceServerTrain] inferBatchGather failed, abort batch B=" << B << "\n";
+                for (int i = 0; i < B; ++i) {
+                    PendingNN& job = *jobs[(size_t)i];
+                    abortPendingNNInferFailure(job, nullptr, "SharedInferenceServerTrain");
+                }
+                return;
+            }
+
             for (int i = 0; i < B; ++i) {
                 PendingNN& job = *jobs[(size_t)i];
                 MCTSTable* T = job.ownerT;
@@ -6206,10 +6234,8 @@ private:
                     continue;
                 }
 
-                float v = ok ? values[(size_t)i] : 0.5f;
-                const float* lg = ok
-                    ? (logits.data() + (size_t)i * (size_t)AI_MAX_MOVES)
-                    : neutralLogits.data();
+                float v = values[(size_t)i];
+                const float* lg = logits.data() + (size_t)i * (size_t)AI_MAX_MOVES;
 
                 expandLeafWithGatheredLogits(*T, job, v, lg);
                 completePendingNNJob(job);
@@ -6231,6 +6257,15 @@ private:
                 }
             }
 
+            if (!ok) {
+                std::cerr << "[SharedInferenceServerTrain] inferBatch failed, abort batch B=" << B << "\n";
+                for (int i = 0; i < B; ++i) {
+                    PendingNN& job = *jobs[(size_t)i];
+                    abortPendingNNInferFailure(job, nullptr, "SharedInferenceServerTrain");
+                }
+                return;
+            }
+
             for (int i = 0; i < B; ++i) {
                 PendingNN& job = *jobs[(size_t)i];
                 MCTSTable* T = job.ownerT;
@@ -6241,10 +6276,8 @@ private:
                     continue;
                 }
 
-                float v = ok ? values[(size_t)i] : 0.5f;
-                const float* pol = ok
-                    ? (policy.data() + (size_t)i * (size_t)POLICY_SIZE)
-                    : neutralPol.data();
+                float v = values[(size_t)i];
+                const float* pol = policy.data() + (size_t)i * (size_t)POLICY_SIZE;
 
                 expandLeafWithOutputs(*T, job, v, pol);
                 completePendingNNJob(job);
@@ -6986,8 +7019,11 @@ static bool ensureExpandedTrain(MCTSTable& T,
     }
 
     if (!ok) {
-        v = 0.5f;
-        logitsLocal.fill(0.0f);
+        std::cerr << "[ensureExpandedTrain] inferBatchGather failed for root key="
+                  << rootPos.key << "\n";
+        T.abort.store(true, std::memory_order_release);
+        cancelPendingNN(p); // releases expanded==2 back to 0
+        return false;
     }
 
     expandLeafWithGatheredLogits(T, p, v, logitsLocal.data());
@@ -7002,8 +7038,11 @@ static bool ensureExpandedTrain(MCTSTable& T,
     }
 
     if (!ok) {
-        v = 0.5f;
-        std::fill(pol.begin(), pol.end(), 0.0f);
+        std::cerr << "[ensureExpandedTrain] inferBatch failed for root key="
+                  << rootPos.key << "\n";
+        T.abort.store(true, std::memory_order_release);
+        cancelPendingNN(p); // releases expanded==2 back to 0
+        return false;
     }
 
     expandLeafWithOutputs(T, p, v, pol.data());
