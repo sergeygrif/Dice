@@ -4876,45 +4876,50 @@ auto worker = [&](unsigned tid) {
             if (T.abort.load(std::memory_order_relaxed)) break;
             if (stop.load(std::memory_order_relaxed)) break;
 
-            auto p = allocPendingNN();
-            bool needNN = false;
+PendingNN localPending;
+resetPendingNN(localPending);
 
-            bool ok = runOneSim(T, rootPos, path, mask,
-                                *p, needNN,
-                                jitterBase + (uint32_t)k * 1337u);
+bool needNN = false;
 
-            if (!ok) {
-                simFail.fetch_add(1, std::memory_order_relaxed);
-                if (T.abort.load(std::memory_order_relaxed)) break;
-                continue;
-            }
+bool ok = runOneSim(T, rootPos, path, mask,
+                    localPending, needNN,
+                    jitterBase + (uint32_t)k * 1337u);
 
-            didUsefulWork = true;
-            simOK.fetch_add(1, std::memory_order_relaxed);
+if (!ok) {
+    simFail.fetch_add(1, std::memory_order_relaxed);
+    if (T.abort.load(std::memory_order_relaxed)) break;
+    continue;
+}
 
-            if (needNN) {
-                nnExp.fetch_add(1, std::memory_order_relaxed);
+didUsefulWork = true;
+simOK.fetch_add(1, std::memory_order_relaxed);
 
-                // Extra throttle immediately before submit.
-                throttleOnNNQueue_NoSleep(nnServer.size(), queueSpins);
+if (needNN) {
+    nnExp.fetch_add(1, std::memory_order_relaxed);
 
-                if (stop.load(std::memory_order_relaxed) ||
-                    T.abort.load(std::memory_order_relaxed)) {
-                    cancelPendingNN(*p);
-                    simFail.fetch_add(1, std::memory_order_relaxed);
-                    break;
-                }
+    // Extra throttle immediately before submit.
+    throttleOnNNQueue_NoSleep(nnServer.size(), queueSpins);
 
-                if (!nnServer.submit(std::move(p), &stop, &T.abort)) {
-                    if (p) {
-                        cancelPendingNN(*p);
-                        freePendingNN(std::move(p));
-                    }
-                    simFail.fetch_add(1, std::memory_order_relaxed);
-                    if (T.abort.load(std::memory_order_relaxed)) break;
-                    continue;
-                }
-            }
+    if (stop.load(std::memory_order_relaxed) ||
+        T.abort.load(std::memory_order_relaxed)) {
+        cancelPendingNN(localPending);
+        simFail.fetch_add(1, std::memory_order_relaxed);
+        break;
+    }
+
+    auto p = allocPendingNN();
+    *p = localPending; // copy only when NN submit is really needed
+
+    if (!nnServer.submit(std::move(p), &stop, &T.abort)) {
+        if (p) {
+            cancelPendingNN(*p);
+            freePendingNN(std::move(p));
+        }
+        simFail.fetch_add(1, std::memory_order_relaxed);
+        if (T.abort.load(std::memory_order_relaxed)) break;
+        continue;
+    }
+}
         }
 
         if (!didUsefulWork) {
@@ -6306,52 +6311,62 @@ void workerMain(unsigned tid) {
 
                 if (!tryClaimSimBudget(simsLeft)) break;
 
-                auto p = allocPendingNN();
-                bool needNN = false;
+PendingNN localPending;
+resetPendingNN(localPending);
 
-                bool ok = runOneSim(*TT, *rp, *pth, *msk,
-                                    *p, needNN,
-                                    jitterBase + (uint32_t)(k++) * 1337u);
+bool needNN = false;
 
-                if (!ok) {
-                    refundSimBudget(simsLeft);
+bool ok = runOneSim(*TT, *rp, *pth, *msk,
+                    localPending, needNN,
+                    jitterBase + (uint32_t)(k++) * 1337u);
 
-                    if (fatal.load(std::memory_order_relaxed)) break;
-                    if (TT->abort.load(std::memory_order_relaxed)) break;
-                    if (cancelJob.load(std::memory_order_relaxed)) break;
+if (!ok) {
+    refundSimBudget(simsLeft);
 
-                    cpuRelax();
-                    continue;
-                }
+    if (fatal.load(std::memory_order_relaxed)) break;
+    if (TT->abort.load(std::memory_order_relaxed)) break;
+    if (cancelJob.load(std::memory_order_relaxed)) break;
 
-                noteProgress();
+    cpuRelax();
+    continue;
+}
 
-                if (needNN && server) {
-                    throttleOnNNQueue_NoSleep(server->size(), queueSpins);
+noteProgress();
 
-                    if (fatal.load(std::memory_order_relaxed) ||
-                        cancelJob.load(std::memory_order_relaxed) ||
-                        TT->abort.load(std::memory_order_relaxed)) {
-                        cancelPendingNN(*p);
-                        break;
-                    }
+if (needNN && server) {
+    throttleOnNNQueue_NoSleep(server->size(), queueSpins);
 
-                    if (!server->submit(std::move(p), &cancelJob, &TT->abort)) {
-                        if (p) {
-                            cancelPendingNN(*p);
-                            freePendingNN(std::move(p));
-                        }
+    if (fatal.load(std::memory_order_relaxed) ||
+        cancelJob.load(std::memory_order_relaxed) ||
+        TT->abort.load(std::memory_order_relaxed)) {
+        cancelPendingNN(localPending);
+        break;
+    }
 
-                        if (!fatal.load(std::memory_order_relaxed) &&
-                            !cancelJob.load(std::memory_order_relaxed) &&
-                            !TT->abort.load(std::memory_order_relaxed)) {
-                            refundSimBudget(simsLeft);
-                        }
-                        break;
-                    }
+    auto p = allocPendingNN();
+    *p = localPending; // allocate only on real NN leaf
 
-                    noteProgress();
-                }
+    if (!server->submit(std::move(p), &cancelJob, &TT->abort)) {
+        if (p) {
+            cancelPendingNN(*p);
+            freePendingNN(std::move(p));
+        }
+
+        if (!fatal.load(std::memory_order_relaxed) &&
+            !cancelJob.load(std::memory_order_relaxed) &&
+            !TT->abort.load(std::memory_order_relaxed)) {
+            refundSimBudget(simsLeft);
+        }
+        break;
+    }
+
+    noteProgress();
+}
+else if (needNN && !server) {
+    cancelPendingNN(localPending);
+    refundSimBudget(simsLeft);
+    break;
+}
             }
 
             workersBusy.fetch_sub(1, std::memory_order_relaxed);
