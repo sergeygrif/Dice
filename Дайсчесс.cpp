@@ -6566,12 +6566,12 @@ struct SelfPlayContext {
         , server(T, backend) {
     }
 
-    void start() {
+    void start(unsigned forcedThreads = 0) {
         server.start();
 
         // Heuristic: limit threads to avoid excessive contention (tune if you want).
         unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-        unsigned n = std::min(hw, 8u);
+        unsigned n = forcedThreads ? forcedThreads : std::min(hw, 8u);
         pool.start(n);
     }
 
@@ -6663,8 +6663,9 @@ static ArenaStats runArenaMatch(int games, int simsPerPos) {
     SelfPlayContext curCtx((1u << 19), (1u << 23), g_trt, g_trtMutex);
     SelfPlayContext oldCtx((1u << 19), (1u << 23), g_trt_old, g_trtOldMutex);
 
-    curCtx.start();
-    oldCtx.start();
+    // Arena should be light: main self-play is paused, so 2 threads per side is enough.
+    curCtx.start(2);
+    oldCtx.start(2);
 
     const int pairs = games / 2;
 
@@ -7784,6 +7785,21 @@ static void safeRefitBarrier(SelfPlayContext& sp) {
     waitForNoInferenceInFlight();
 }
 
+static bool restartSelfPlayContextAfterArena(SelfPlayContext& sp) {
+    try {
+        sp.start();
+        return true;
+    }
+    catch (const std::exception& e) {
+        std::cerr << "[arena] failed to restart main self-play context: "
+                  << e.what() << "\n";
+    }
+    catch (...) {
+        std::cerr << "[arena] failed to restart main self-play context: unknown exception\n";
+    }
+    return false;
+}
+
 
 
 void Training(int targetGames) {
@@ -7841,6 +7857,8 @@ void Training(int targetGames) {
     // One self-play context for the whole training
     SelfPlayContext sp((1u << 20), (1u << 24), g_trt, g_trtMutex);
     sp.start();
+    bool spRunning = true;
+    bool stopTraining = false;
 
     // -------------------------------
     // SCHEDULER
@@ -7965,45 +7983,72 @@ void Training(int targetGames) {
         }
 
         while (games >= nextArenaAt) {
-            safeRefitBarrier(sp);
+            // Полностью ставим основной self-play на паузу на время арены:
+            // убираем лишние worker threads / inference server activity.
+            if (spRunning) {
+                safeRefitBarrier(sp);
+                sp.stop();
+                spRunning = false;
+            }
 
-            // current TRT должен точно соответствовать текущему model
+            bool arenaOk = true;
+
+            // current TRT должен точно соответствовать текущему EMA model
             if (!syncCurrentRunnerFromModel(emaModel)) {
                 std::cerr << "[arena] failed to sync current TRT from EMA model.\n";
-                break;
+                arenaOk = false;
             }
 
-            if (!g_trtOldReady) {
+            if (arenaOk && !g_trtOldReady) {
                 if (!snapshotCurrentIntoOld(emaModel, oldModel, planFile)) {
                     std::cerr << "[arena] failed to prepare old TRT snapshot.\n";
-                    break;
+                    arenaOk = false;
                 }
             }
 
-            std::cout << "\n[arena] start: current vs old, games=1000, sims=200, triggerGames="
-                      << nextArenaAt << "\n";
+            if (arenaOk) {
+                std::cout << "\n[arena] start: current vs old, games=1000, sims=200, triggerGames="
+                          << nextArenaAt << "\n";
 
-            ArenaStats ar = runArenaMatch(/*games=*/1000, /*simsPerPos=*/200);
+                ArenaStats ar = runArenaMatch(/*games=*/1000, /*simsPerPos=*/200);
 
-            std::cout << "[arena] done: W/D/L = "
-                      << ar.curWins << "/" << ar.draws << "/" << ar.oldWins
-                      << "  score=" << ar.currentScore() << "\n";
+                std::cout << "[arena] done: W/D/L = "
+                          << ar.curWins << "/" << ar.draws << "/" << ar.oldWins
+                          << "  score=" << ar.currentScore() << "\n";
 
-            // promotion rule: если current > old, old := current
-            if (ar.currentScore() > 0.5) {
-                if (snapshotCurrentIntoOld(emaModel, oldModel, planFile)) {
-                    std::cout << "[arena] promoted current EMA -> old snapshot in memory\n";
+                // promotion rule: если current > old, old := current
+                if (ar.currentScore() > 0.5) {
+                    if (snapshotCurrentIntoOld(emaModel, oldModel, planFile)) {
+                        std::cout << "[arena] promoted current EMA -> old snapshot in memory\n";
+                    }
+                    else {
+                        std::cerr << "[arena] promotion failed\n";
+                    }
                 }
                 else {
-                    std::cerr << "[arena] promotion failed\n";
+                    std::cout << "[arena] old snapshot kept\n";
                 }
             }
             else {
-                std::cout << "[arena] old snapshot kept\n";
+                std::cerr << "[arena] skipped due to setup failure.\n";
             }
 
+            // ВАЖНО: всегда поднимаем основной self-play обратно после арены.
+            if (!restartSelfPlayContextAfterArena(sp)) {
+                stopTraining = true;
+                break;
+            }
+            spRunning = true;
+
+            // Даже если arena setup failed, не зацикливаемся на том же пороге.
             nextArenaAt += 10000;
+
+            if (!arenaOk) {
+                break;
+            }
         }
+
+        if (stopTraining) break;
 
         // ===========================
         // 4) SAVE / STATS
@@ -8043,8 +8088,11 @@ void Training(int targetGames) {
     // ==========================================
     // 5) CLEAN STOP & FINAL SAVE + FINAL REBUILD
     // ==========================================
-    safeRefitBarrier(sp);
-    sp.stop();
+    if (spRunning) {
+        safeRefitBarrier(sp);
+        sp.stop();
+        spRunning = false;
+    }
 
     std::cout << "\n[Завершение] Собрано " << targetGames << " партий. Сохранение финальных весов...\n";
     {
