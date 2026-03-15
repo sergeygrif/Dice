@@ -1,5 +1,6 @@
 // policy_gather.cu
 #include <cuda_runtime.h>
+#include <math_constants.h>
 
 #ifndef POLICY_SIZE
 #define POLICY_SIZE (73 * 64)   // 4672
@@ -18,12 +19,12 @@ __global__ void gatherPolicyKernelBatched(const float* __restrict__ policy,
     if (tid >= total) return;
 
     // idx/out layout: [B * AI_MAX_MOVES]
-    const int b = tid / AI_MAX_MOVES;     // batch index
-    const int k = idx[tid];              // 0..4671 (local CHW index)
+    const int b = tid / AI_MAX_MOVES;
+    const int k = idx[tid];
 
-    // Safety: avoid OOB if k corrupted
+    // invalid / padded index => -inf, so softmax gives zero probability
     if ((unsigned)k >= (unsigned)POLICY_SIZE) {
-        out[tid] = 0.0f;                 // or -INFINITY if you pad with -1
+        out[tid] = -CUDART_INF_F;
         return;
     }
 
