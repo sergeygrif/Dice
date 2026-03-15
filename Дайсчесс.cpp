@@ -21,6 +21,7 @@
 #include <memory>
 #include <deque>
 #include <torch/torch.h>
+#include <ATen/autocast_mode.h>
 #if defined(_MSC_VER)
 #include <intrin.h>
 #if defined(_M_X64) || defined(_M_IX86)
@@ -301,10 +302,10 @@ struct TTEdge {
         return valueSum.load(std::memory_order_relaxed);
     }
 
-    AI_FORCEINLINE void addVisitAndValue(float v) {
-        visits.fetch_add(1, std::memory_order_relaxed);
-        atomicAddDouble(valueSum, (double)v);
-    }
+   AI_FORCEINLINE void addVisitAndValue(float v) {
+    atomicAddDouble(valueSum, (double)v);
+    visits.fetch_add(1, std::memory_order_release);
+}
 };
 
 struct TTNode {
@@ -327,9 +328,9 @@ struct TTNode {
         return valueSum.load(std::memory_order_relaxed);
     }
     AI_FORCEINLINE void addVisitAndValue(float v) {
-        visits.fetch_add(1, std::memory_order_relaxed);
-        atomicAddDouble(valueSum, (double)v);
-    }
+    atomicAddDouble(valueSum, (double)v);
+    visits.fetch_add(1, std::memory_order_release);
+}
     AI_FORCEINLINE void publish(uint64_t k, uint32_t begin, uint8_t count,
         int term, int isChance) {
         key = k;
@@ -1389,8 +1390,7 @@ static void printBoardViz(const Position& pos) {
         }
         cout << " |\n";
     }
-    cout << "side " << pos.side << "\n";
-    cout << "dice " << diceIntToFen(pos.dice) << "\n";
+
 
 }
 
@@ -1894,7 +1894,7 @@ void makeRandom(Position& pos,TTNode* node) {
     uint64_t pawns = pos.color[pos.side] & pos.piece[0];
     int dist = 6;
     pos.key ^= ZDice[pos.dice];
-    pos.dice = Dice[(pos.key+visits)%216];
+pos.dice = Dice[Range(Random)];
     if (pawns) {
         if (pos.side == 0)dist = clz64(pawns) >> 3;   // MSVC-safe
         else dist = ctz64(pawns) >> 3;            // MSVC-safe
@@ -1988,10 +1988,10 @@ static constexpr int POLICY_P = 73;
 static constexpr float BN_EPS = 1e-5f;
 
 // SE (affine)
-static constexpr int SE_CHANNELS = 16;   // для C=128 обычно 8..16; 16 сильнее
+static constexpr int SE_CHANNELS = 16;   // РґР»СЏ C=128 РѕР±С‹С‡РЅРѕ 8..16; 16 СЃРёР»СЊРЅРµРµ
 
 // Heads
-static constexpr int HEAD_POLICY_C = 32; // 32 для 10x128 — стандартный хороший выбор
+static constexpr int HEAD_POLICY_C = 32; // 32 РґР»СЏ 10x128 вЂ” СЃС‚Р°РЅРґР°СЂС‚РЅС‹Р№ С…РѕСЂРѕС€РёР№ РІС‹Р±РѕСЂ
 static constexpr int HEAD_VALUE_C = 32;
 static constexpr int HEAD_VALUE_FC = 256;
 static constexpr int POLICY_SIZE = 8 * 8 * POLICY_P; // 4672
@@ -2182,13 +2182,24 @@ static TrtLogger g_trtLogger;
 // ============================================================
 
 struct WeightStore {
-    std::vector<std::vector<float>> blocks;
+    std::vector<std::vector<float>> fBlocks;
+    std::vector<std::vector<int32_t>> iBlocks;
 
     nvinfer1::Weights add(std::vector<float>&& v) {
-        blocks.push_back(std::move(v));
-        auto& b = blocks.back();
+        fBlocks.push_back(std::move(v));
+        auto& b = fBlocks.back();
         nvinfer1::Weights w{};
         w.type = nvinfer1::DataType::kFLOAT;
+        w.values = b.data();
+        w.count = (int64_t)b.size();
+        return w;
+    }
+
+    nvinfer1::Weights addI32(std::vector<int32_t>&& v) {
+        iBlocks.push_back(std::move(v));
+        auto& b = iBlocks.back();
+        nvinfer1::Weights w{};
+        w.type = nvinfer1::DataType::kINT32;
         w.values = b.data();
         w.count = (int64_t)b.size();
         return w;
@@ -2199,6 +2210,13 @@ struct WeightStore {
         return add(std::move(v));
     }
 };
+
+static AI_FORCEINLINE nvinfer1::Dims dims1(int n) {
+    nvinfer1::Dims d{};
+    d.nbDims = 1;
+    d.d[0] = n;
+    return d;
+}
 
 static void fillHe(std::vector<float>& w, int fanIn, std::mt19937& rng) {
     std::normal_distribution<float> nd(0.0f, std::sqrt(2.0f / (float)fanIn));
@@ -2349,27 +2367,31 @@ static nvinfer1::ITensor* addSEBlockAffineNamed(nvinfer1::INetworkDefinition& ne
         s2 = c->getOutput(0);
     }
 
-    // IMPORTANT: EXPLICIT_BATCH => s2 is 4D: [N,2C,1,1]
-    // Slice along channel axis (dim=1)
-    // Your profile is fixed to TRT_MAX_BATCH for MIN/OPT/MAX => we can use TRT_MAX_BATCH here.
-    // If you later make batch truly dynamic, you'll need dynamic slice (shape tensors) instead.
-    const Dims4 stride{ 1,1,1,1 };
+    std::vector<int32_t> idxW((size_t)C), idxB((size_t)C);
+    for (int i = 0; i < C; ++i) {
+        idxW[(size_t)i] = i;
+        idxB[(size_t)i] = C + i;
+    }
 
-    auto* slW = net.addSlice(*s2,
-        Dims4{ 0,   0, 0, 0 },
-        Dims4{ TRT_MAX_BATCH, C, 1, 1 },
-        stride);
-    auto* slB = net.addSlice(*s2,
-        Dims4{ 0,   C, 0, 0 },
-        Dims4{ TRT_MAX_BATCH, C, 1, 1 },
-        stride);
-    if (!slW || !slB) return nullptr;
+    auto Widx = store.addI32(std::move(idxW));
+    auto Bidx = store.addI32(std::move(idxB));
 
-    slW->setName((prefix + ".se.sliceW").c_str());
-    slB->setName((prefix + ".se.sliceB").c_str());
+    auto* cW = net.addConstant(dims1(C), Widx);
+    auto* cB = net.addConstant(dims1(C), Bidx);
+    if (!cW || !cB) return nullptr;
 
-    ITensor* Wt = slW->getOutput(0); // [N,C,1,1]
-    ITensor* Bt = slB->getOutput(0); // [N,C,1,1]
+    cW->setName((prefix + ".se.idxW").c_str());
+    cB->setName((prefix + ".se.idxB").c_str());
+
+    auto* gW = net.addGather(*s2, *cW->getOutput(0), 1);
+    auto* gB = net.addGather(*s2, *cB->getOutput(0), 1);
+    if (!gW || !gB) return nullptr;
+
+    gW->setName((prefix + ".se.gatherW").c_str());
+    gB->setName((prefix + ".se.gatherB").c_str());
+
+    ITensor* Wt = gW->getOutput(0); // [N,C,1,1]
+    ITensor* Bt = gB->getOutput(0); // [N,C,1,1]
 
     ITensor* Z = addSigmoid(net, *Wt); // [N,C,1,1]
     if (!Z) return nullptr;
@@ -2477,8 +2499,8 @@ static bool buildAndSavePlan(const std::string& planFile) {
     IOptimizationProfile* prof = builder->createOptimizationProfile();
     if (!prof) return false;
 
-    prof->setDimensions("input", OptProfileSelector::kMIN, Dims4{ TRT_MAX_BATCH, NN_SQ_PLANES, 8, 8 });
-    prof->setDimensions("input", OptProfileSelector::kOPT, Dims4{ TRT_MAX_BATCH, NN_SQ_PLANES, 8, 8 });
+    prof->setDimensions("input", OptProfileSelector::kMIN, Dims4{ 1, NN_SQ_PLANES, 8, 8 });
+    prof->setDimensions("input", OptProfileSelector::kOPT, Dims4{ 64, NN_SQ_PLANES, 8, 8 });
     prof->setDimensions("input", OptProfileSelector::kMAX, Dims4{ TRT_MAX_BATCH, NN_SQ_PLANES, 8, 8 });
     if (!prof->isValid()) return false;
     if (config->addOptimizationProfile(prof) < 0) return false;
@@ -2714,6 +2736,7 @@ struct TrtRunner {
 #endif
 
     int maxBatch = TRT_MAX_BATCH;
+    int currentShapeB = -1;
 
     // Pinned host buffers
     float* hInputPinned = nullptr; // 256 * 1600
@@ -2732,24 +2755,44 @@ struct TrtRunner {
     cudaGraph_t     graph = nullptr;
     cudaGraphExec_t graphExec = nullptr;
 
-    AI_FORCEINLINE size_t inBytesFull() const {
-        return (size_t)maxBatch * (size_t)NN_INPUT_SIZE * sizeof(float);
+    AI_FORCEINLINE size_t inBytes(int B) const {
+        return (size_t)B * (size_t)NN_INPUT_SIZE * sizeof(float);
     }
-    AI_FORCEINLINE size_t polBytesFull() const {
-        return (size_t)maxBatch * (size_t)POLICY_SIZE * sizeof(float);
+    AI_FORCEINLINE size_t polBytes(int B) const {
+        return (size_t)B * (size_t)POLICY_SIZE * sizeof(float);
     }
-    AI_FORCEINLINE size_t valBytesFull() const {
-        return (size_t)maxBatch * sizeof(float);
+    AI_FORCEINLINE size_t valBytes(int B) const {
+        return (size_t)B * sizeof(float);
     }
 
 #if AI_HAVE_CUDA_KERNELS
-    AI_FORCEINLINE size_t gatherIdxBytesFull() const {
-        return (size_t)maxBatch * (size_t)AI_MAX_MOVES * sizeof(int);
+    AI_FORCEINLINE size_t gatherIdxBytes(int B) const {
+        return (size_t)B * (size_t)AI_MAX_MOVES * sizeof(int);
     }
-    AI_FORCEINLINE size_t gatherLogitsBytesFull() const {
-        return (size_t)maxBatch * (size_t)AI_MAX_MOVES * sizeof(float);
+    AI_FORCEINLINE size_t gatherLogitsBytes(int B) const {
+        return (size_t)B * (size_t)AI_MAX_MOVES * sizeof(float);
     }
 #endif
+
+    AI_FORCEINLINE size_t inBytesFull() const { return inBytes(maxBatch); }
+    AI_FORCEINLINE size_t polBytesFull() const { return polBytes(maxBatch); }
+    AI_FORCEINLINE size_t valBytesFull() const { return valBytes(maxBatch); }
+#if AI_HAVE_CUDA_KERNELS
+    AI_FORCEINLINE size_t gatherIdxBytesFull() const { return gatherIdxBytes(maxBatch); }
+    AI_FORCEINLINE size_t gatherLogitsBytesFull() const { return gatherLogitsBytes(maxBatch); }
+#endif
+
+    bool ensureShape(int B) {
+        if (!ctx) return false;
+        if (currentShapeB == B) return true;
+
+        if (!ctx->setInputShape("input", nvinfer1::Dims4{ B, NN_SQ_PLANES, 8, 8 })) {
+            std::cerr << "TensorRT: setInputShape(" << B << ",25,8,8) failed.\n";
+            return false;
+        }
+        currentShapeB = B;
+        return true;
+    }
 
     // Host accessors
     AI_FORCEINLINE const float* policyHostPtr(int i) const {
@@ -2763,6 +2806,24 @@ struct TrtRunner {
         return hGatherLogitsPinned + (size_t)i * (size_t)AI_MAX_MOVES;
     }
 #endif
+
+    void copyValuesTo(float* outValue, int B) const {
+        if (!outValue || B <= 0) return;
+        std::memcpy(outValue, hValuePinned, valBytes(B));
+    }
+
+#if AI_HAVE_CUDA_KERNELS
+    void copyGatherLogitsTo(float* outLogits, int B) const {
+        if (!outLogits || B <= 0) return;
+        std::memcpy(outLogits, hGatherLogitsPinned, gatherLogitsBytes(B));
+    }
+#endif
+
+    void copyPolicyTo(float* outPolicy, int B) const {
+        if (!outPolicy || B <= 0) return;
+        std::memcpy(outPolicy, hPolicyPinned,
+            (size_t)B * (size_t)POLICY_SIZE * sizeof(float));
+    }
     bool setupAuxStreams() {
         if (!engine || !ctx) return false;
 
@@ -2799,6 +2860,7 @@ struct TrtRunner {
     }
     bool captureCudaGraphFixed256() {
         if (!ctx || !stream) return false;
+        if (!ensureShape(TRT_MAX_BATCH)) return false;
 
         // Ensure aux streams are attached before warmup/capture
         if (nbAuxStreams > 0 && (int)auxStreams.size() == nbAuxStreams) {
@@ -2817,7 +2879,7 @@ struct TrtRunner {
         std::memset(hInputPinned, 0, inBytesFull());
         std::memset(hValuePinned, 0, valBytesFull());
 #if AI_HAVE_CUDA_KERNELS
-        std::memset(hGatherIdxPinned, 0, gatherIdxBytesFull());
+        std::fill_n(hGatherIdxPinned, (size_t)TRT_MAX_BATCH * (size_t)AI_MAX_MOVES, -1);
         std::memset(hGatherLogitsPinned, 0, gatherLogitsBytesFull());
 #endif
 
@@ -2855,7 +2917,7 @@ struct TrtRunner {
                 total,
                 stream);
 
-            // по желанию на время отладки:
+            // РїРѕ Р¶РµР»Р°РЅРёСЋ РЅР° РІСЂРµРјСЏ РѕС‚Р»Р°РґРєРё:
             CUDA_CHECK(cudaGetLastError());
         }
 
@@ -2945,9 +3007,9 @@ struct TrtRunner {
         // Profile 0 (only one)
         if (!ctx->setOptimizationProfileAsync(0, stream)) return false;
 
-        // Fixed shape
-        if (!ctx->setInputShape("input", nvinfer1::Dims4{ maxBatch, NN_SQ_PLANES, 8, 8 })) {
-            std::cerr << "TensorRT: setInputShape(256,25,8,8) failed.\n";
+        currentShapeB = -1;
+        if (!ensureShape(TRT_MAX_BATCH)) {
+            std::cerr << "TensorRT: initial setInputShape failed.\n";
             return false;
         }
 
@@ -2971,15 +3033,15 @@ struct TrtRunner {
             shutdown();
         }
 
-        std::cout << "Файл TensorRT плана '" << planFile << "' не найден/не грузится — собираю движок...\n";
+        std::cout << "Р¤Р°Р№Р» TensorRT РїР»Р°РЅР° '" << planFile << "' РЅРµ РЅР°Р№РґРµРЅ/РЅРµ РіСЂСѓР·РёС‚СЃСЏ вЂ” СЃРѕР±РёСЂР°СЋ РґРІРёР¶РѕРє...\n";
         if (!buildAndSavePlan(planFile)) {
-            std::cerr << "Не удалось собрать и сохранить TensorRT plan '" << planFile << "'.\n";
+            std::cerr << "РќРµ СѓРґР°Р»РѕСЃСЊ СЃРѕР±СЂР°С‚СЊ Рё СЃРѕС…СЂР°РЅРёС‚СЊ TensorRT plan '" << planFile << "'.\n";
             return false;
         }
-        std::cout << "Собран и сохранён '" << planFile << "'. Загружаю...\n";
+        std::cout << "РЎРѕР±СЂР°РЅ Рё СЃРѕС…СЂР°РЅС‘РЅ '" << planFile << "'. Р—Р°РіСЂСѓР¶Р°СЋ...\n";
 
         if (!initFromPlan(planFile)) {
-            std::cerr << "Не удалось загрузить TensorRT plan после сборки.\n";
+            std::cerr << "РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ TensorRT plan РїРѕСЃР»Рµ СЃР±РѕСЂРєРё.\n";
             shutdown();
             return false;
         }
@@ -3025,26 +3087,28 @@ struct TrtRunner {
         if (runtime) { delete runtime; runtime = nullptr; }
     }
 
-    // Fixed-batch execution. Assumes pinned buffers already filled (input, and optional gather idx).
-    bool runFixed256AndSync() {
-        if (!ctx || !stream) return false;
+    bool runBatchAndSync(int B) {
+        if (!ctx || !stream || B <= 0 || B > maxBatch) return false;
 
-        if (graphReady && graphExec) {
+        // Fast path: captured graph only for exact 256
+        if (B == TRT_MAX_BATCH && graphReady && graphExec) {
+            if (!ensureShape(TRT_MAX_BATCH)) return false;
             CUDA_CHECK(cudaGraphLaunch(graphExec, stream));
             CUDA_CHECK(cudaStreamSynchronize(stream));
             return true;
         }
 
-        // Ensure aux streams are set for non-graph enqueue path too
+        if (!ensureShape(B)) return false;
+
         if (nbAuxStreams > 0 && (int)auxStreams.size() == nbAuxStreams) {
             ctx->setAuxStreams(auxStreams.data(), (int32_t)auxStreams.size());
         }
 
-        CUDA_CHECK(cudaMemcpyAsync(dInput, hInputPinned, inBytesFull(),
+        CUDA_CHECK(cudaMemcpyAsync(dInput, hInputPinned, inBytes(B),
             cudaMemcpyHostToDevice, stream));
 
 #if AI_HAVE_CUDA_KERNELS
-        CUDA_CHECK(cudaMemcpyAsync(dGatherIdx, hGatherIdxPinned, gatherIdxBytesFull(),
+        CUDA_CHECK(cudaMemcpyAsync(dGatherIdx, hGatherIdxPinned, gatherIdxBytes(B),
             cudaMemcpyHostToDevice, stream));
 #endif
 
@@ -3052,25 +3116,23 @@ struct TrtRunner {
 
 #if AI_HAVE_CUDA_KERNELS
         {
-            const int total = TRT_MAX_BATCH * AI_MAX_MOVES;
+            const int total = B * AI_MAX_MOVES;
             launchGatherPolicyKernel((const float*)dPolicy,
                 (const int*)dGatherIdx,
                 (float*)dGatherLogits,
                 total,
                 stream);
-
-            // по желанию на время отладки:
             CUDA_CHECK(cudaGetLastError());
         }
 
-        CUDA_CHECK(cudaMemcpyAsync(hGatherLogitsPinned, dGatherLogits, gatherLogitsBytesFull(),
+        CUDA_CHECK(cudaMemcpyAsync(hGatherLogitsPinned, dGatherLogits, gatherLogitsBytes(B),
             cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaMemcpyAsync(hValuePinned, dValue, valBytesFull(),
+        CUDA_CHECK(cudaMemcpyAsync(hValuePinned, dValue, valBytes(B),
             cudaMemcpyDeviceToHost, stream));
 #else
-        CUDA_CHECK(cudaMemcpyAsync(hPolicyPinned, dPolicy, polBytesFull(),
+        CUDA_CHECK(cudaMemcpyAsync(hPolicyPinned, dPolicy, polBytes(B),
             cudaMemcpyDeviceToHost, stream));
-        CUDA_CHECK(cudaMemcpyAsync(hValuePinned, dValue, valBytesFull(),
+        CUDA_CHECK(cudaMemcpyAsync(hValuePinned, dValue, valBytes(B),
             cudaMemcpyDeviceToHost, stream));
 #endif
 
@@ -3089,21 +3151,11 @@ struct TrtRunner {
             positionToNNInput(posArr[i], *dst);
         }
 
-        // pad
-        if (B < maxBatch) {
-            const float* src = hInputPinned;
-            for (int i = B; i < maxBatch; ++i) {
-                std::memcpy(hInputPinned + (size_t)i * (size_t)NN_INPUT_SIZE,
-                    src, (size_t)NN_INPUT_SIZE * sizeof(float));
-            }
-        }
-
 #if AI_HAVE_CUDA_KERNELS
-        // If caller didn't provide legal-move indices, just zero them.
-        std::memset(hGatherIdxPinned, 0, gatherIdxBytesFull());
+        std::fill_n(hGatherIdxPinned, (size_t)B * (size_t)AI_MAX_MOVES, -1);
 #endif
 
-        bool ok = runFixed256AndSync();
+        bool ok = runBatchAndSync(B);
         if (!ok) return false;
 
         for (int i = 0; i < B; ++i) hValuePinned[(size_t)i] = clamp01(hValuePinned[(size_t)i]);
@@ -3159,20 +3211,21 @@ static AI_FORCEINLINE void cpuRelax() {
 // -------------------------------
 // Time-based backoff wait helpers
 // -------------------------------
-static constexpr int64_t AI_LOCK_WAIT_US = 2000;   // 2ms (как было)
+static constexpr int64_t AI_LOCK_WAIT_US = 2000;   // 2ms (РєР°Рє Р±С‹Р»Рѕ)
 static constexpr int64_t AI_EXPAND_WAIT_US = 100000;
+static constexpr int64_t AI_SUBMIT_WAIT_US = 200;  // short timed wait for cancelable submit
 
 static AI_FORCEINLINE void backoffWait(int& spins) {
     cpuRelax();
     ++spins;
 
-    // ВАЖНО: никаких sleep_for(microseconds) — на многих ОС это вырождается в ~1ms.
-    // Yield делаем редко, чтобы не терять throughput.
+    // Р’РђР–РќРћ: РЅРёРєР°РєРёС… sleep_for(microseconds) вЂ” РЅР° РјРЅРѕРіРёС… РћРЎ СЌС‚Рѕ РІС‹СЂРѕР¶РґР°РµС‚СЃСЏ РІ ~1ms.
+    // Yield РґРµР»Р°РµРј СЂРµРґРєРѕ, С‡С‚РѕР±С‹ РЅРµ С‚РµСЂСЏС‚СЊ throughput.
     if (spins == 256 || spins == 1024 || spins == 4096) {
         std::this_thread::yield();
     }
     if (spins > 16384) {
-        // если очень долго — начинаем yield чаще, но всё равно без сна
+        // РµСЃР»Рё РѕС‡РµРЅСЊ РґРѕР»РіРѕ вЂ” РЅР°С‡РёРЅР°РµРј yield С‡Р°С‰Рµ, РЅРѕ РІСЃС‘ СЂР°РІРЅРѕ Р±РµР· СЃРЅР°
         std::this_thread::yield();
     }
 }
@@ -3317,8 +3370,12 @@ struct MCTSTable {
         const uint32_t wantTag = makeTag32(key);
 
         uint64_t idx = key & mask;
-
         int probe = 0;
+
+        using Clock = std::chrono::steady_clock;
+        const auto waitBudget = std::chrono::microseconds(AI_LOCK_WAIT_US);
+        Clock::time_point lockStart{};
+        uint64_t lockStartIdx = ~0ull;
         int lockSpins = 0;
 
         while (probe < PROBE_LIMIT) {
@@ -3328,7 +3385,7 @@ struct MCTSTable {
             const uint32_t mg = metaGen(m);
             const uint32_t mt = metaTag(m);
 
-            // Slot from older generation => treat as empty; try to claim it
+            // older generation => treat as empty, try to claim
             if (AI_UNLIKELY(mg != g)) {
                 uint64_t expected = m;
                 const uint64_t lockedMeta = packMeta(g, TAG_LOCKED32);
@@ -3351,39 +3408,32 @@ struct MCTSTable {
                     return &n;
                 }
 
-                // Someone raced us; re-read same slot
                 cpuRelax();
-                continue;
-            }
-
-            // Same generation
-            if (mt == wantTag) {
-                if (AI_LIKELY(s.node.key == key)) return &s.node;
-                // Rare tag collision -> keep probing
+                continue; // retry same slot
             }
 
             if (mt == TAG_LOCKED32) {
-                using Clock = std::chrono::steady_clock;
-                Clock::time_point lockStart = Clock::time_point{};
-                uint64_t lockStartIdx = ~0ull;
-
-                // фиксируем "начало ожидания" для конкретного слота idx
                 if (lockStartIdx != idx) {
                     lockStartIdx = idx;
                     lockStart = Clock::now();
                     lockSpins = 0;
                 }
 
-                // ждём, но ограниченно по времени
-                if (Clock::now() - lockStart > std::chrono::microseconds(AI_LOCK_WAIT_US)) {
-                    // НИКАКОГО abort: просто сдаёмся на эту попытку (симуляция может повториться)
+                if (Clock::now() - lockStart > waitBudget) {
                     return nullptr;
                 }
 
                 backoffWait(lockSpins);
-                continue; // IMPORTANT: не двигаем idx и не увеличиваем probe
+                continue; // IMPORTANT: same slot, no probe++
             }
+
+            lockStartIdx = ~0ull;
             lockSpins = 0;
+
+            if (mt == wantTag) {
+                if (AI_LIKELY(s.node.key == key)) return &s.node;
+                // rare tag collision -> keep probing
+            }
 
             if (mt == TAG_EMPTY32) {
                 uint64_t expected = packMeta(g, TAG_EMPTY32);
@@ -3407,12 +3457,10 @@ struct MCTSTable {
                     return &n;
                 }
 
-                // Someone raced us; re-read same slot
                 cpuRelax();
-                continue;
+                continue; // retry same slot
             }
 
-            // Occupied by other key => go next slot (THIS is what counts as "probe")
             idx = (idx + 1) & mask;
             ++probe;
         }
@@ -3427,8 +3475,12 @@ struct MCTSTable {
         const uint32_t wantTag = makeTag32(key);
 
         uint64_t idx = key & mask;
-
         int probe = 0;
+
+        using Clock = std::chrono::steady_clock;
+        const auto waitBudget = std::chrono::microseconds(AI_LOCK_WAIT_US);
+        Clock::time_point lockStart{};
+        uint64_t lockStartIdx = ~0ull;
         int lockSpins = 0;
 
         while (probe < PROBE_LIMIT) {
@@ -3440,49 +3492,53 @@ struct MCTSTable {
             const uint32_t mt = metaTag(m);
 
             if (mt == TAG_LOCKED32) {
-                using Clock = std::chrono::steady_clock;
-                static thread_local Clock::time_point lockStart = Clock::time_point{};
-                static thread_local uint64_t lockStartIdx = ~0ull;
-
                 if (lockStartIdx != idx) {
                     lockStartIdx = idx;
                     lockStart = Clock::now();
                     lockSpins = 0;
                 }
 
-                if (Clock::now() - lockStart > std::chrono::microseconds(AI_LOCK_WAIT_US)) {
+                if (Clock::now() - lockStart > waitBudget) {
                     return nullptr;
                 }
 
                 backoffWait(lockSpins);
-                continue;
+                continue; // IMPORTANT: same slot, no probe++
             }
+
+            lockStartIdx = ~0ull;
             lockSpins = 0;
 
             if (mt == wantTag) {
                 if (AI_LIKELY(s.node.key == key)) return &s.node;
+                // rare tag collision -> probe РґР°Р»СЊС€Рµ
             }
+
             if (mt == TAG_EMPTY32) return nullptr;
 
             idx = (idx + 1) & mask;
             ++probe;
         }
+
         return nullptr;
     }
 };
 
 static AI_FORCEINLINE float nodeQ(const TTNode& n) {
-    uint32_t v = n.visits.load(std::memory_order_relaxed);
+    uint32_t v = n.visits.load(std::memory_order_acquire);
     if (!v) return 0.5f;
-    return clamp01((float)(n.sum() / (double)v));
-}
-static AI_FORCEINLINE float edgeQ(const TTEdge& e) {
-    uint32_t v = e.visits.load(std::memory_order_relaxed);
-    if (!v) return -1.0f;
-    return clamp01((float)(e.sum() / (double)v));
+    double s = n.valueSum.load(std::memory_order_relaxed);
+    return clamp01((float)(s / (double)v));
 }
 
-// Выбор PV: сначала max visits, затем max Q, затем max prior.
+static AI_FORCEINLINE float edgeQ(const TTEdge& e) {
+    uint32_t v = e.visits.load(std::memory_order_acquire);
+    if (!v) return -1.0f;
+    double s = e.valueSum.load(std::memory_order_relaxed);
+    return clamp01((float)(s / (double)v));
+}
+
+// Р’С‹Р±РѕСЂ PV: СЃРЅР°С‡Р°Р»Р° max visits, Р·Р°С‚РµРј max Q, Р·Р°С‚РµРј max prior.
 static AI_FORCEINLINE int selectBestPVEdge(const TTNode& n, const TTEdge* e0) {
     int bestI = 0;
     uint32_t bestV = 0;
@@ -3507,81 +3563,9 @@ static AI_FORCEINLINE int selectBestPVEdge(const TTNode& n, const TTEdge* e0) {
     return bestI;
 }
 
-// Перевод "value для side-to-move" -> "value для белых"
-static AI_FORCEINLINE float toWhitePerspective(float qSideToMove, int sideToMove) {
-    // sideToMove: 0=white, 1=black
-    return (sideToMove == 0) ? qSideToMove : (1.0f - qSideToMove);
-}
 
-static float evalOnePVNoExpandWhite(MCTSTable& T,
-    const Position& rootPos,
-    const std::array<int, 64>& mask,
-    int maxDepth = 256) {
-    Position pos = rootPos;
 
-    for (int depth = 0; depth < maxDepth; ++depth) {
-        TTNode* n = T.findNodeNoInsert(pos.key);
-        if (!n) return 0.5f;
 
-        uint8_t ex = n->expanded.load(std::memory_order_acquire);
-        if (ex != 1) {
-            // Не ждём, не расширяем — просто используем то, что есть.
-            float q = nodeQ(*n);
-            return toWhitePerspective(q, pos.side);
-        }
-
-        if (n->terminal) {
-            // В твоей логике terminal бэкапится как v=1.0 (выигрыш side-to-move).
-            float q = 1.0f;
-            return toWhitePerspective(q, pos.side);
-        }
-
-        if (n->edgeCount == 0) {
-            if (n->chance) {
-                // Chance-узел: кидаем "кости" как в основном дереве.
-                makeRandom(pos,n);
-                continue;
-            }
-            else {
-                // Узел без ходов, но не chance: берём средний Q узла.
-                float q = nodeQ(*n);
-                return toWhitePerspective(q, pos.side);
-            }
-        }
-
-        // Decision-узел: идём по PV
-        TTEdge* e0 = T.edgePtr(n->edgeBegin);
-        int bi = selectBestPVEdge(*n, e0);
-        int m = e0[bi].move;
-
-        makeMove(pos, mask, m);
-    }
-
-    // Если упёрлись в maxDepth — оценим текущий узел как есть
-    TTNode* n = T.findNodeNoInsert(pos.key);
-    if (!n) return 0.5f;
-    float q = nodeQ(*n);
-    return toWhitePerspective(q, pos.side);
-}
-
-static float evalPVForOneSecondNoExpandWhite(MCTSTable& T,
-    const Position& rootPos,
-    const std::array<int, 64>& mask,
-    double sec = 1.0) {
-    const auto t0 = std::chrono::steady_clock::now();
-    const auto tEnd = t0 + std::chrono::duration<double>(sec);
-
-    double sum = 0.0;
-    uint64_t cnt = 0;
-
-    while (std::chrono::steady_clock::now() < tEnd) {
-        float vW = evalOnePVNoExpandWhite(T, rootPos, mask, /*maxDepth*/256);
-        sum += (double)vW;
-        ++cnt;
-    }
-    if (!cnt) return 0.5f;
-    return (float)(sum / (double)cnt);
-}
 
 static AI_FORCEINLINE float cpuctFromVisits(uint32_t parentVisits, bool isRoot) {
     constexpr float C_INIT = 1.25f;
@@ -3597,8 +3581,10 @@ static AI_FORCEINLINE int selectPUCT(const TTNode& n,
     uint32_t parentVisits,
     float parentQ,
     uint32_t rngJitter) {
-    constexpr float FPU_REDUCTION = 0.07f;
+    constexpr float FPU_C = 0.01f;
+
     const float sqrtN = std::sqrt((float)(parentVisits + 1u));
+    const float sqrtParent = std::sqrt((float)parentVisits);
 
     float best = -1e30f;
     int bestI = 0;
@@ -3607,18 +3593,21 @@ static AI_FORCEINLINE int selectPUCT(const TTNode& n,
     for (int i = 0; i < cnt; ++i) {
         const TTEdge& e = e0[i];
         uint32_t ev = e.visits.load(std::memory_order_relaxed);
+        const float p = e.prior();
 
-        float q;
-        if (ev) q = clamp01(e.sum() / (float)ev);
-        else    q = clamp01(parentQ - FPU_REDUCTION);
+const float fpu = clamp01(parentQ - 0.08f);
+        const float q = ev ? clamp01((float)(e.sum() / (double)ev)) : fpu;
 
-        float u = cpuct * e.prior() * (sqrtN / (1.0f + (float)ev));
+        const float u = cpuct * p * (sqrtN / (1.0f + (float)ev));
 
-        float jit = (float)((rngJitter + (uint32_t)i * 2654435761u) & 1023u)
+        const float jit = (float)((rngJitter + (uint32_t)i * 2654435761u) & 1023u)
             * (1.0f / 1023.0f) * 1e-6f;
 
-        float s = q + u + jit;
-        if (s > best) { best = s; bestI = i; }
+        const float s = q + u + jit;
+        if (s > best) {
+            best = s;
+            bestI = i;
+        }
     }
     (void)n;
     return bestI;
@@ -3627,9 +3616,9 @@ static AI_FORCEINLINE int selectPUCT(const TTNode& n,
 static constexpr int MCTS_MAX_DEPTH = 256;
 
 // Classic virtual loss
-static constexpr uint32_t VLOSS_N = 1;     // обычно 1; 2-3 имеет смысл только при очень многих потоках
-static constexpr float    VLOSS_VALUE = 0.0f; // value в шкале [0..1]; 0.0 = "loss for side-to-move"
-static constexpr bool     VLOSS_BUMP_NODE_VISITS = false; // опционально
+static constexpr uint32_t VLOSS_N = 1;     // РѕР±С‹С‡РЅРѕ 1; 2-3 РёРјРµРµС‚ СЃРјС‹СЃР» С‚РѕР»СЊРєРѕ РїСЂРё РѕС‡РµРЅСЊ РјРЅРѕРіРёС… РїРѕС‚РѕРєР°С…
+static constexpr float    VLOSS_VALUE = 0.0f; // value РІ С€РєР°Р»Рµ [0..1]; 0.0 = "loss for side-to-move"
+static constexpr bool     VLOSS_BUMP_NODE_VISITS = false; // РѕРїС†РёРѕРЅР°Р»СЊРЅРѕ
 
 struct TraceStep {
     TTNode* node = nullptr;
@@ -3643,16 +3632,70 @@ struct Trace {
     int n = 0;
     TraceStep st[MCTS_MAX_DEPTH];
 
+    AI_FORCEINLINE Trace() = default;
+
+    // copy only used prefix [0..n)
+    AI_FORCEINLINE Trace(const Trace& o) : n(o.n) {
+        if (n > 0) {
+            std::memcpy(st, o.st, (size_t)n * sizeof(TraceStep));
+        }
+    }
+
+    AI_FORCEINLINE Trace& operator=(const Trace& o) {
+        if (this != &o) {
+            n = o.n;
+            if (n > 0) {
+                std::memcpy(st, o.st, (size_t)n * sizeof(TraceStep));
+            }
+        }
+        return *this;
+    }
+
+    // move = same cheap prefix copy, no heap
+    AI_FORCEINLINE Trace(Trace&& o) noexcept : n(o.n) {
+        if (n > 0) {
+            std::memcpy(st, o.st, (size_t)n * sizeof(TraceStep));
+        }
+        o.n = 0;
+    }
+
+    AI_FORCEINLINE Trace& operator=(Trace&& o) noexcept {
+        if (this != &o) {
+            n = o.n;
+            if (n > 0) {
+                std::memcpy(st, o.st, (size_t)n * sizeof(TraceStep));
+            }
+            o.n = 0;
+        }
+        return *this;
+    }
+
     AI_FORCEINLINE void reset() { n = 0; }
 
-    AI_FORCEINLINE TraceStep& push(TTNode* node, TTEdge* edge, bool flip, bool vloss) {
-        if (n >= MCTS_MAX_DEPTH) {
-            st[MCTS_MAX_DEPTH - 1] = { node, edge, flip, false };
-            return st[MCTS_MAX_DEPTH - 1];
+    AI_FORCEINLINE void copyFrom(const Trace& o) {
+        n = o.n;
+        if (n > 0) {
+            std::memcpy(st, o.st, (size_t)n * sizeof(TraceStep));
         }
-        st[n] = { node, edge, flip, vloss };
-        return st[n++];
     }
+
+AI_FORCEINLINE TraceStep& push(TTNode* node, TTEdge* edge, bool flip, bool vloss) {
+    assert(n >= 0 && n < MCTS_MAX_DEPTH);
+
+    if (AI_UNLIKELY((unsigned)n >= (unsigned)MCTS_MAX_DEPTH)) {
+        std::cerr << "[FATAL] Trace overflow: n=" << n
+                  << " MCTS_MAX_DEPTH=" << MCTS_MAX_DEPTH << "\n";
+        std::abort();
+    }
+
+    TraceStep& s = st[n];
+    s.node = node;
+    s.edge = edge;
+    s.flip = flip;
+    s.vloss = vloss;
+    ++n;
+    return s;
+}
 };
 
 struct PendingNN {
@@ -3660,24 +3703,55 @@ struct PendingNN {
     Position pos;
     MoveList ml;
     Trace trace;
-    bool isRoot = false;
+
+    // precomputed CHW policy indices for ml.m[0..ml.n)
+    std::array<uint16_t, AI_MAX_MOVES> policyIdx{};
 };
+
+static constexpr uint16_t INVALID_POLICY_IDX = 0xFFFFu;
+static AI_FORCEINLINE float pendingPolicyLogitFromFullCHW(
+    const PendingNN& p,
+    int i,
+    const float* polChSq) {
+    const uint16_t k = p.policyIdx[(size_t)i];
+
+    if (AI_UNLIKELY(k == INVALID_POLICY_IDX || (unsigned)k >= (unsigned)POLICY_SIZE)) {
+        // Р”РѕР»Р¶РЅРѕ Р±С‹С‚СЊ РЅРµРІРѕР·РјРѕР¶РЅРѕ, РЅРѕ РµСЃР»Рё mapping СЃР»РѕРјР°Р»СЃСЏ вЂ”
+        // РґР°С‘Рј РїРѕС‡С‚Рё -inf, С‡С‚РѕР±С‹ softmax РґР°Р» ~0.
+        return -1e30f;
+    }
+
+    return polChSq[(size_t)k];
+}
+static AI_FORCEINLINE void fillPendingPolicyIdx(PendingNN& p) {
+    const int n = p.ml.n;
+
+    for (int i = 0; i < n; ++i) {
+        const int k = policyIndexCHWCanonical(p.ml.m[i], p.pos);
+        p.policyIdx[(size_t)i] =
+            ((unsigned)k < (unsigned)POLICY_SIZE) ? (uint16_t)k : INVALID_POLICY_IDX;
+    }
+
+    for (int i = n; i < AI_MAX_MOVES; ++i) {
+        p.policyIdx[(size_t)i] = INVALID_POLICY_IDX;
+    }
+}
 
 static AI_FORCEINLINE void applyVirtualLoss(TraceStep& s) {
     if (!s.vloss) return;
 
     if (VLOSS_BUMP_NODE_VISITS && s.node) {
         s.node->visits.fetch_add(VLOSS_N, std::memory_order_relaxed);
-        // valueSum узла НЕ трогаем (классика)
+        // valueSum СѓР·Р»Р° РќР• С‚СЂРѕРіР°РµРј (РєР»Р°СЃСЃРёРєР°)
     }
 
     if (s.edge) {
         s.edge->visits.fetch_add(VLOSS_N, std::memory_order_relaxed);
-        // “loss” в [0..1] шкале => добавляем W как будто вернулся VLOSS_VALUE
+        // вЂњlossвЂќ РІ [0..1] С€РєР°Р»Рµ => РґРѕР±Р°РІР»СЏРµРј W РєР°Рє Р±СѓРґС‚Рѕ РІРµСЂРЅСѓР»СЃСЏ VLOSS_VALUE
         if (VLOSS_VALUE != 0.0f) {
             atomicAddDouble(s.edge->valueSum, (double)VLOSS_VALUE * (double)VLOSS_N);
         }
-        // если VLOSS_VALUE=0.0f, valueSum можно не трогать вообще
+        // РµСЃР»Рё VLOSS_VALUE=0.0f, valueSum РјРѕР¶РЅРѕ РЅРµ С‚СЂРѕРіР°С‚СЊ РІРѕРѕР±С‰Рµ
     }
 }
 
@@ -3701,6 +3775,23 @@ static AI_FORCEINLINE void rollbackVirtualLoss(Trace& tr) {
 
         s.vloss = false;
     }
+}
+
+static AI_FORCEINLINE void cancelPendingNN(PendingNN& p) {
+    // undo virtual loss first
+    rollbackVirtualLoss(p.trace);
+
+    // release leaf if we claimed expansion but never sent it to NN thread
+    if (p.leaf) {
+        uint8_t ex = p.leaf->expanded.load(std::memory_order_acquire);
+        if (ex == 2) {
+            p.leaf->expanded.store(0, std::memory_order_release);
+        }
+    }
+
+    p.leaf = nullptr;
+    p.ml.n = 0;
+    p.trace.reset();
 }
 
 static AI_FORCEINLINE void backprop(TTNode* leaf, float v, Trace& tr) {
@@ -3824,6 +3915,119 @@ static void applyRootDirichletNoiseArr(float* priors, int n) {
     renormProbsArr(priors, n);
 }
 
+struct RootNoiseBackup {
+    TTEdge* e0 = nullptr;
+    int n = 0;
+    std::array<uint16_t, AI_MAX_MOVES> priorQ{};
+};
+
+static void applyTemporaryRootNoise(MCTSTable& T,
+    const Position& rootPos,
+    bool enabled,
+    RootNoiseBackup& bk) {
+    bk.e0 = nullptr;
+    bk.n = 0;
+
+    if (!enabled) return;
+
+    TTNode* root = T.findNodeNoInsert(rootPos.key);
+    if (!root) return;
+    if (root->expanded.load(std::memory_order_acquire) != 1) return;
+    if (root->edgeCount < 2) return;
+
+    bk.e0 = T.edgePtr(root->edgeBegin);
+    bk.n = (int)root->edgeCount;
+
+    std::array<float, AI_MAX_MOVES> noisy{};
+    for (int i = 0; i < bk.n; ++i) {
+        bk.priorQ[(size_t)i] = bk.e0[i].priorRaw();
+        noisy[(size_t)i] = bk.e0[i].prior();
+    }
+
+    applyRootDirichletNoiseArr(noisy.data(), bk.n);
+
+    for (int i = 0; i < bk.n; ++i) {
+        bk.e0[i].setPrior(noisy[(size_t)i]);
+    }
+}
+
+static void restoreTemporaryRootNoise(RootNoiseBackup& bk) {
+    if (!bk.e0 || bk.n <= 0) return;
+
+    for (int i = 0; i < bk.n; ++i) {
+        bk.e0[i].setPriorRaw(bk.priorQ[(size_t)i]);
+    }
+
+    bk.e0 = nullptr;
+    bk.n = 0;
+}
+
+struct RootNoiseGuard {
+    RootNoiseBackup bk;
+
+    RootNoiseGuard(MCTSTable& T,
+                   const Position& rootPos,
+                   bool enabled) {
+        applyTemporaryRootNoise(T, rootPos, enabled, bk);
+    }
+
+    ~RootNoiseGuard() noexcept {
+        restoreTemporaryRootNoise(bk);
+    }
+
+    RootNoiseGuard(const RootNoiseGuard&) = delete;
+    RootNoiseGuard& operator=(const RootNoiseGuard&) = delete;
+};
+
+struct AtomicStopGuard {
+    std::atomic<bool>* flag = nullptr;
+
+    explicit AtomicStopGuard(std::atomic<bool>& f) : flag(&f) {}
+
+    ~AtomicStopGuard() noexcept {
+        if (flag) flag->store(true, std::memory_order_relaxed);
+    }
+
+    void release() noexcept { flag = nullptr; }
+
+    AtomicStopGuard(const AtomicStopGuard&) = delete;
+    AtomicStopGuard& operator=(const AtomicStopGuard&) = delete;
+};
+
+struct ThreadJoinGuard {
+    std::vector<std::thread>* threads = nullptr;
+
+    explicit ThreadJoinGuard(std::vector<std::thread>& v) : threads(&v) {}
+
+    ~ThreadJoinGuard() noexcept {
+        if (!threads) return;
+        for (auto& th : *threads) {
+            if (th.joinable()) th.join();
+        }
+    }
+
+    void release() noexcept { threads = nullptr; }
+
+    ThreadJoinGuard(const ThreadJoinGuard&) = delete;
+    ThreadJoinGuard& operator=(const ThreadJoinGuard&) = delete;
+};
+
+struct InferenceServer;
+
+struct InferenceServerStopGuard {
+    InferenceServer* srv = nullptr;
+
+    explicit InferenceServerStopGuard(InferenceServer& s) : srv(&s) {}
+
+    ~InferenceServerStopGuard() noexcept;
+
+    void release() noexcept { srv = nullptr; }
+
+    InferenceServerStopGuard(const InferenceServerStopGuard&) = delete;
+    InferenceServerStopGuard& operator=(const InferenceServerStopGuard&) = delete;
+};
+
+
 // ============================================================
 // Old expansion: policy logits in CHW [pl][sq] (4672 floats)
 // New: priors stored in std::array<float,255>, no heap.
@@ -3849,19 +4053,14 @@ static void expandLeafWithOutputs(MCTSTable& T,
         return;
     }
 
-    // Build priors from full policy logits (CHW)
+    // Build priors from full policy logits (CHW) using precomputed indices
     std::array<float, AI_MAX_MOVES> priors{};
     for (int i = 0; i < cnt; ++i) {
-        const int m = p.ml.m[i];
-        const int k = policyIndexCHWCanonical(m, p.pos); // 0..4671
-        priors[(size_t)i] = polChSq[(size_t)k];
+        priors[(size_t)i] = pendingPolicyLogitFromFullCHW(p, i, polChSq);
     }
 
     // Softmax over legal moves
     softmaxLocalArr(priors.data(), cnt);
-
-    // Optional Dirichlet noise at root
-    if (p.isRoot) applyRootDirichletNoiseArr(priors.data(), cnt);
 
     // Clamp priors, renorm, store ONCE
     for (int i = 0; i < cnt; ++i) {
@@ -3909,7 +4108,6 @@ static void expandLeafWithOutputs(MCTSTable& T,
     publishReady(p.leaf, p.pos.key, begin, (uint8_t)cntU, 0, 0);
 }
 
-
 // ============================================================
 // Gathered-logits expansion: logits already in move order [0..ml.n)
 // New: priors stored in std::array<float,255>, no heap.
@@ -3942,8 +4140,6 @@ static void expandLeafWithGatheredLogits(MCTSTable& T,
     // Softmax over legal moves
     softmaxLocalArr(priors.data(), cnt);
 
-    // Optional Dirichlet noise at root
-    if (p.isRoot) applyRootDirichletNoiseArr(priors.data(), cnt);
 
     // Clamp priors, renorm, store ONCE
     for (int i = 0; i < cnt; ++i) {
@@ -3997,7 +4193,6 @@ static void expandLeafWithGatheredLogits(MCTSTable& T,
 bool TrtRunner::inferBatchGather(const PendingNN* jobs, int B) {
     if (!ctx || B <= 0 || B > maxBatch) return false;
 
-    // 1) Encode positions into pinned input
     for (int i = 0; i < B; ++i) {
         auto* dst = reinterpret_cast<NNInput*>(
             hInputPinned + (size_t)i * (size_t)NN_INPUT_SIZE
@@ -4005,56 +4200,25 @@ bool TrtRunner::inferBatchGather(const PendingNN* jobs, int B) {
         positionToNNInput(jobs[i].pos, *dst);
     }
 
-    // 2) Pad positions (duplicate slot 0)
-    if (B < maxBatch) {
-        const float* src = hInputPinned; // slot 0
-        for (int i = B; i < maxBatch; ++i) {
-            std::memcpy(hInputPinned + (size_t)i * (size_t)NN_INPUT_SIZE,
-                src,
-                (size_t)NN_INPUT_SIZE * sizeof(float));
-        }
-    }
-
 #if AI_HAVE_CUDA_KERNELS
-    // 3) Build gather indices in move-order for each position
     for (int i = 0; i < B; ++i) {
-        const MoveList& ml = jobs[i].ml;
         int* idxBase = hGatherIdxPinned + (size_t)i * (size_t)AI_MAX_MOVES;
+        std::fill_n(idxBase, AI_MAX_MOVES, -1);
 
-        // zero all indices (TRT gather kernel will read up to AI_MAX_MOVES)
-        std::memset(idxBase, 0, (size_t)AI_MAX_MOVES * sizeof(int));
-
-        const int n = ml.n;
+        const int n = jobs[i].ml.n;
         for (int j = 0; j < n; ++j) {
-            const int m = ml.m[j];
-            int k = policyIndexCHWCanonical(m, jobs[i].pos); // CHW: plane*64 + fromSq
-
-            // safety
-            if ((unsigned)k >= (unsigned)POLICY_SIZE) k = 0;
-            idxBase[j] = k;
+            const uint16_t k = jobs[i].policyIdx[(size_t)j];
+            idxBase[j] = (k == INVALID_POLICY_IDX) ? -1 : (int)k;
         }
     }
-
-    // 4) Pad indices too (duplicate slot 0)
-    if (B < maxBatch) {
-        const int* src = hGatherIdxPinned; // slot 0
-        for (int i = B; i < maxBatch; ++i) {
-            std::memcpy(hGatherIdxPinned + (size_t)i * (size_t)AI_MAX_MOVES,
-                src,
-                (size_t)AI_MAX_MOVES * sizeof(int));
-        }
-    }
-#else
-    // No kernels: nothing to do (fallback path uses full policy)
 #endif
 
-    // 5) Run fixed-256 execution (CUDA Graph if captured) + sync
-    bool ok = runFixed256AndSync();
+    bool ok = runBatchAndSync(B);
     if (!ok) return false;
 
-    for (int i = 0; i < B; ++i) {
+    for (int i = 0; i < B; ++i)
         hValuePinned[(size_t)i] = clamp01(hValuePinned[(size_t)i]);
-    }
+
     return true;
 }
 
@@ -4063,58 +4227,92 @@ bool TrtRunner::inferBatchGather(const PendingNN* jobs, int B) {
 // ============================================================
 
 struct InferenceServer {
+    static constexpr int NN_QUEUE_CAP = 8 * TRT_MAX_BATCH; // 2048 for TRT_MAX_BATCH=256
+
     MCTSTable& T;
 
     std::atomic<bool> stop{ false };
     std::atomic<int>  qSize{ 0 };
 
     std::mutex m;
-    std::condition_variable cv;
+    std::condition_variable cvNotEmpty;
+    std::condition_variable cvNotFull;
+    std::condition_variable cvIdle;
 
-    std::deque<PendingNN> q;   // FIFO
+    std::deque<PendingNN> q;
     std::thread th;
+
+    bool busyFlag = false; // protected by m
 
     std::vector<float> neutralPol;     // [POLICY_SIZE]
     std::vector<float> neutralLogits;  // [AI_MAX_MOVES]
 
     explicit InferenceServer(MCTSTable& tab) : T(tab) {
         q.clear();
-        // reserve() not available for deque
         neutralPol.assign((size_t)POLICY_SIZE, 0.0f);
         neutralLogits.assign((size_t)AI_MAX_MOVES, 0.0f);
     }
 
     void start() {
-        stop.store(false, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lk(m);
+            stop.store(false, std::memory_order_relaxed);
+            busyFlag = false;
+            q.clear();
+            qSize.store(0, std::memory_order_relaxed);
+        }
         th = std::thread([this] { this->run(); });
     }
 
     void stopAndDrain() {
-        stop.store(true, std::memory_order_relaxed);
-        cv.notify_all();
+        {
+            std::lock_guard<std::mutex> lk(m);
+            stop.store(true, std::memory_order_relaxed);
+        }
+        cvNotEmpty.notify_all();
+        cvNotFull.notify_all();
+        cvIdle.notify_all();
+
         if (th.joinable()) th.join();
     }
 
-    int size() const { return qSize.load(std::memory_order_relaxed); }
+    int size() const {
+        return qSize.load(std::memory_order_relaxed);
+    }
 
-    void submit(PendingNN&& job) {
-        {
-            std::lock_guard<std::mutex> lk(m);
+    void waitIdle() {
+        std::unique_lock<std::mutex> lk(m);
+        cvIdle.wait(lk, [&] {
+            return q.empty() && !busyFlag;
+        });
+    }
 
-            // Pure FIFO:
-            q.emplace_back(std::move(job));
+    bool submit(PendingNN&& job,
+                const std::atomic<bool>* extCancel = nullptr,
+                const std::atomic<bool>* extAbort  = nullptr) {
+        auto cancelled = [&]() -> bool {
+            return stop.load(std::memory_order_relaxed) ||
+                   (extCancel && extCancel->load(std::memory_order_relaxed)) ||
+                   (extAbort && extAbort->load(std::memory_order_relaxed));
+        };
 
-            // Optional: mild root priority (still no starvation in practice)
-            // if (job.isRoot) q.emplace_front(std::move(job));
-            // else            q.emplace_back(std::move(job));
+        std::unique_lock<std::mutex> lk(m);
 
-            qSize.fetch_add(1, std::memory_order_relaxed);
+        while ((int)q.size() >= NN_QUEUE_CAP && !cancelled()) {
+            cvNotFull.wait_for(lk, std::chrono::microseconds(AI_SUBMIT_WAIT_US));
         }
-        cv.notify_one();
+
+        if (cancelled()) return false;
+
+        q.emplace_back(std::move(job));
+        qSize.store((int)q.size(), std::memory_order_relaxed);
+
+        lk.unlock();
+        cvNotEmpty.notify_one();
+        return true;
     }
 
 private:
-    // pop up to wantB (caller holds lock)
     int popBatchUnlocked(std::vector<PendingNN>& batch, int wantB) {
         batch.clear();
         batch.reserve((size_t)wantB);
@@ -4125,80 +4323,111 @@ private:
             q.pop_front();
             ++n;
         }
-        if (n) qSize.fetch_sub(n, std::memory_order_relaxed);
+
+        qSize.store((int)q.size(), std::memory_order_relaxed);
         return n;
     }
 
     void run() {
         std::vector<PendingNN> batch;
+        std::vector<PendingNN> add;
         batch.reserve((size_t)TRT_MAX_BATCH);
+        add.reserve((size_t)TRT_MAX_BATCH);
 
-        for (;;) {
-            // 1) wait for at least 1 job (or stop)
-            {
-                std::unique_lock<std::mutex> lk(m);
-                cv.wait(lk, [&] {
-                    return stop.load(std::memory_order_relaxed) || !q.empty();
-                    });
-
-                if (stop.load(std::memory_order_relaxed) && q.empty()) break;
-
-                (void)popBatchUnlocked(batch, TRT_MAX_BATCH);
-            }
-
-            // 2) small fill window to reach 256 if more jobs arrive
-            const auto tFillEnd = std::chrono::steady_clock::now() + std::chrono::microseconds(200);
-            while ((int)batch.size() < TRT_MAX_BATCH &&
-                std::chrono::steady_clock::now() < tFillEnd) {
-
-                std::unique_lock<std::mutex> lk(m);
-                if (q.empty()) {
-                    cv.wait_until(lk, tFillEnd, [&] {
-                        return stop.load(std::memory_order_relaxed) || !q.empty();
-                        });
-                }
-                if (q.empty()) break;
-
-                std::vector<PendingNN> add;
-                const int need = TRT_MAX_BATCH - (int)batch.size();
-                (void)popBatchUnlocked(add, need);
-                lk.unlock();
-
-                for (auto& j : add) batch.emplace_back(std::move(j));
-            }
-
-            const int B = (int)batch.size();
-            if (B <= 0) continue;
+        auto processBatch = [&](std::vector<PendingNN>& jobs) {
+            const int B = (int)jobs.size();
+            if (B <= 0) return;
 
 #if AI_HAVE_CUDA_KERNELS
-            bool ok = g_trt.inferBatchGather(batch.data(), B);
+            bool ok = g_trt.inferBatchGather(jobs.data(), B);
             for (int i = 0; i < B; ++i) {
                 float v = ok ? g_trt.valueHost(i) : 0.5f;
                 const float* logits = ok ? g_trt.gatherLogitsHostPtr(i) : neutralLogits.data();
-                expandLeafWithGatheredLogits(T, batch[(size_t)i], v, logits);
+                expandLeafWithGatheredLogits(T, jobs[(size_t)i], v, logits);
             }
 #else
             std::vector<Position> posBatch((size_t)B);
-            for (int i = 0; i < B; ++i) posBatch[(size_t)i] = batch[(size_t)i].pos;
+            for (int i = 0; i < B; ++i) posBatch[(size_t)i] = jobs[(size_t)i].pos;
 
             bool ok = g_trt.inferBatch(posBatch.data(), B);
             for (int i = 0; i < B; ++i) {
                 float v = ok ? g_trt.valueHost(i) : 0.5f;
                 const float* pol = ok ? g_trt.policyHostPtr(i) : neutralPol.data();
-                expandLeafWithOutputs(T, batch[(size_t)i], v, pol);
+                expandLeafWithOutputs(T, jobs[(size_t)i], v, pol);
             }
 #endif
+        };
+
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> lk(m);
+
+                busyFlag = false;
+                if (q.empty()) cvIdle.notify_all();
+
+                cvNotEmpty.wait(lk, [&] {
+                    return stop.load(std::memory_order_relaxed) || !q.empty();
+                });
+
+                if (stop.load(std::memory_order_relaxed) && q.empty()) break;
+
+                busyFlag = true;
+                (void)popBatchUnlocked(batch, TRT_MAX_BATCH);
+            }
+
+            // queue shrank -> wake blocked producers
+            cvNotFull.notify_all();
+
+            // small fill window to improve batch utilization
+            const auto tFillEnd =
+                std::chrono::steady_clock::now() + std::chrono::microseconds(200);
+
+            while ((int)batch.size() < TRT_MAX_BATCH &&
+                   std::chrono::steady_clock::now() < tFillEnd) {
+                std::unique_lock<std::mutex> lk(m);
+
+                if (q.empty()) {
+                    cvNotEmpty.wait_until(lk, tFillEnd, [&] {
+                        return stop.load(std::memory_order_relaxed) || !q.empty();
+                    });
+                }
+
+                if (q.empty()) break;
+
+                add.clear();
+                const int need = TRT_MAX_BATCH - (int)batch.size();
+                (void)popBatchUnlocked(add, need);
+                lk.unlock();
+
+                cvNotFull.notify_all();
+
+                for (auto& j : add) batch.emplace_back(std::move(j));
+            }
+
+            processBatch(batch);
         }
 
-        // drain not needed: loop already drains until q empty after stop=true
+        {
+            std::lock_guard<std::mutex> lk(m);
+            busyFlag = false;
+            qSize.store((int)q.size(), std::memory_order_relaxed);
+            if (q.empty()) cvIdle.notify_all();
+        }
+
+        cvNotFull.notify_all();
     }
 };
-
+inline InferenceServerStopGuard::~InferenceServerStopGuard() noexcept {
+    if (!srv) return;
+    try {
+        srv->stopAndDrain();
+    } catch (...) {
+    }
+}
 static void ensureRootExpanded(MCTSTable& T,
     const Position& rootPos,
     const std::array<uint64_t, 4>& path,
     const std::array<int, 64>& mask,
-    bool rootNoise,
     MoveList& ml,
     int term) {
     TTNode* root = T.getNode(rootPos.key);
@@ -4238,7 +4467,7 @@ static void ensureRootExpanded(MCTSTable& T,
     p.pos = rootPos;
     p.ml = ml;
     p.trace.reset();
-    p.isRoot = rootNoise;
+    fillPendingPolicyIdx(p);
 
     float v = 0.5f;
 
@@ -4266,7 +4495,6 @@ static bool runOneSim(MCTSTable& T,
     const Position& rootPos,
     const std::array<uint64_t, 4>& path,
     const std::array<int, 64>& mask,
-    bool rootNoise,
     PendingNN& outPending,
     bool& outNeedNN,
     uint32_t rngJitter) {
@@ -4354,7 +4582,7 @@ static bool runOneSim(MCTSTable& T,
             outPending.pos = pos;
             outPending.ml = ml;
             outPending.trace = tr;
-            outPending.isRoot = (isRoot && rootNoise);
+            fillPendingPolicyIdx(outPending);
             return true;
         }
 
@@ -4395,25 +4623,80 @@ static bool runOneSim(MCTSTable& T,
         isRoot = false;
     }
 }
+static AI_FORCEINLINE char promoChar(int promo) {
+    switch (promo) {
+    case 1: return 'n';
+    case 2: return 'b';
+    case 3: return 'r';
+    case 4: return 'q';
+    default: return 0;
+    }
+}
 
+static std::string moveToStr(int move) {
+    int from = move & 63;
+    int to = (move >> 6) & 63;
+    int promo = (move >> 12) & 7;
+
+    std::string s = sqName(from) + sqName(to);
+    char pc = promoChar(promo);
+    if (pc) s.push_back(pc);
+    return s;
+}
+static void extractBestPVUntilChance(MCTSTable& T,
+    const Position& rootPos,
+    const std::array<int, 64>& mask,
+    std::vector<int>& outPV,
+    int maxDepth = 256) {
+    outPV.clear();
+
+    Position pos = rootPos;
+
+    for (int depth = 0; depth < maxDepth; ++depth) {
+        TTNode* n = T.findNodeNoInsert(pos.key);
+        if (!n) break;
+
+        uint8_t ex = n->expanded.load(std::memory_order_acquire);
+        if (ex != 1) break;
+
+        if (n->terminal) break;
+
+        // chance-СѓР·РµР»: РѕСЃС‚Р°РЅРѕРІРёС‚СЊСЃСЏ Р”Рћ makeRandom()
+        if (n->chance) break;
+
+        if (n->edgeCount == 0) break;
+
+        TTEdge* e0 = T.edgePtr(n->edgeBegin);
+        int bi = selectBestPVEdge(*n, e0);
+        int m = e0[bi].move;
+
+        outPV.push_back(m);
+        makeMove(pos, mask, m);
+    }
+}
 void mctsBatchedMT(Position& rootPos,
     std::array<uint64_t, 4>& path,
     std::array<int, 64>& mask,
     double timeSec,
-    bool rootNoise,
     float& outEvalWhite,
-    std::vector<moveState>& outRootMoves) {
+    std::vector<moveState>& outRootMoves,
+    std::vector<int>& outPVBeforeRoll) {
     MoveList ml;
     int term;
     genLegal(rootPos, path, mask, ml, term);
+
+    outPVBeforeRoll.clear();
+
     if (term) {
         outEvalWhite = 1 - rootPos.side;
-        outRootMoves.push_back({ ml.m[0],outEvalWhite,0 });
+        outRootMoves.clear();
+        outRootMoves.push_back({ ml.m[0], outEvalWhite, 0 });
+        outPVBeforeRoll.push_back(ml.m[0]);
         return;
     }
 
-    const size_t nodePow2 = 1ull << 25;
-    const size_t edgeCap = 1ull << 27;
+    const size_t nodePow2 = 1ull << 21;
+    const size_t edgeCap = 1ull << 25;
 
     MCTSTable T(nodePow2, edgeCap);
 
@@ -4421,20 +4704,24 @@ void mctsBatchedMT(Position& rootPos,
     if (!rootNode) {
         outEvalWhite = 0.5f;
         outRootMoves.clear();
+        outPVBeforeRoll.clear();
         return;
     }
 
-    ensureRootExpanded(T, rootPos, path, mask, rootNoise, ml, term);
+    ensureRootExpanded(T, rootPos, path, mask, ml, term);
 
-    // If overflow already happened during root expansion, stop immediately.
     if (T.abort.load(std::memory_order_acquire)) {
         outEvalWhite = 0.5f;
         outRootMoves.clear();
+        outPVBeforeRoll.clear();
         return;
     }
 
+
+
     InferenceServer nnServer(T);
     nnServer.start();
+    InferenceServerStopGuard nnServerGuard(nnServer);
 
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
     const unsigned threads = std::max(1u, hw / 2);
@@ -4443,71 +4730,88 @@ void mctsBatchedMT(Position& rootPos,
     const auto tEnd = t0 + std::chrono::duration<double>(timeSec);
 
     std::atomic<bool> stop{ false };
+    AtomicStopGuard stopGuard(stop);
+
     std::atomic<uint64_t> simOK{ 0 }, simFail{ 0 }, nnExp{ 0 };
 
-    auto worker = [&](unsigned tid) {
-        uint32_t jitterBase = (uint32_t)(0x9E3779B9u * (tid + 1));
-        std::vector<PendingNN> pend;
-        pend.reserve((size_t)std::max(1, g_nnBatch));
+auto worker = [&](unsigned tid) {
+    uint32_t jitterBase = (uint32_t)(0x9E3779B9u * (tid + 1));
 
-        uint64_t iter = 0;
-        for (;;) {
-            if (stop.load(std::memory_order_relaxed)) break;
+    uint64_t iter = 0;
+    int queueSpins = 0;
+
+    for (;;) {
+        if (stop.load(std::memory_order_relaxed)) break;
+        if (T.abort.load(std::memory_order_relaxed)) break;
+
+        if ((iter++ & 63ull) == 0ull) {
+            if (std::chrono::steady_clock::now() >= tEnd) break;
+        }
+
+        bool didUsefulWork = false;
+
+        const int B = std::max(1, g_nnBatch);
+        for (int k = 0; k < B; ++k) {
             if (T.abort.load(std::memory_order_relaxed)) break;
+            if (stop.load(std::memory_order_relaxed)) break;
 
-            if (nnServer.size() > 4096) {
-                static thread_local int throttleSpins2 = 0;
-                throttleOnNNQueue_NoSleep(999999, throttleSpins2); // extreme
+            // Front-pressure: let NN server drain before making more leaves.
+            throttleOnNNQueue_NoSleep(nnServer.size(), queueSpins);
+
+            if (T.abort.load(std::memory_order_relaxed)) break;
+            if (stop.load(std::memory_order_relaxed)) break;
+
+            PendingNN p;
+            bool needNN = false;
+
+            bool ok = runOneSim(T, rootPos, path, mask,
+                                p, needNN,
+                                jitterBase + (uint32_t)k * 1337u);
+
+            if (!ok) {
+                simFail.fetch_add(1, std::memory_order_relaxed);
+                if (T.abort.load(std::memory_order_relaxed)) break;
                 continue;
             }
 
-            if ((iter++ & 63ull) == 0ull) {
-                if (std::chrono::steady_clock::now() >= tEnd) break;
-            }
+            didUsefulWork = true;
+            simOK.fetch_add(1, std::memory_order_relaxed);
 
-            pend.clear();
+            if (needNN) {
+                nnExp.fetch_add(1, std::memory_order_relaxed);
 
-            const int B = std::max(1, g_nnBatch);
-            for (int k = 0; k < B; ++k) {
-                if (T.abort.load(std::memory_order_relaxed)) break;
+                // Extra throttle immediately before submit.
+                throttleOnNNQueue_NoSleep(nnServer.size(), queueSpins);
 
-                PendingNN p;
-                bool needNN = false;
-                static thread_local int throttleSpins = 0;
-                int qs = nnServer.size();
-                throttleOnNNQueue_NoSleep(qs, throttleSpins);
+                if (stop.load(std::memory_order_relaxed) ||
+                    T.abort.load(std::memory_order_relaxed)) {
+                    cancelPendingNN(p);
+                    simFail.fetch_add(1, std::memory_order_relaxed);
+                    break;
+                }
 
-                // если очередь совсем огромная — не генерим новые leaf'ы прямо сейчас
-                if (qs > 2000) continue;
-                bool ok = runOneSim(T, rootPos, path, mask, rootNoise,
-                    p, needNN,
-                    jitterBase + (uint32_t)k * 1337u);
-                if (!ok) {
+                if (!nnServer.submit(std::move(p), &stop, &T.abort)) {
+                    cancelPendingNN(p);
                     simFail.fetch_add(1, std::memory_order_relaxed);
                     if (T.abort.load(std::memory_order_relaxed)) break;
                     continue;
                 }
-
-                simOK.fetch_add(1, std::memory_order_relaxed);
-                if (needNN) {
-                    nnExp.fetch_add(1, std::memory_order_relaxed);
-                    nnServer.submit(std::move(p));   // сразу отправили => expanded=2 будет недолго
-                }
-            }
-
-            if (!pend.empty()) {
-                nnExp.fetch_add((uint64_t)pend.size(), std::memory_order_relaxed);
-                for (auto& job : pend) nnServer.submit(std::move(job));
-            }
-            else {
-                cpuRelax();
             }
         }
-        };
+
+        if (!didUsefulWork) {
+            cpuRelax();
+        }
+    }
+};
 
     std::vector<std::thread> pool;
     pool.reserve(threads);
-    for (unsigned t = 0; t < threads; ++t) pool.emplace_back(worker, t);
+    ThreadJoinGuard poolGuard(pool);
+
+    for (unsigned t = 0; t < threads; ++t) {
+        pool.emplace_back(worker, t);
+    }
 
     while (std::chrono::steady_clock::now() < tEnd) {
         if (T.abort.load(std::memory_order_relaxed)) break;
@@ -4516,8 +4820,12 @@ void mctsBatchedMT(Position& rootPos,
     stop.store(true, std::memory_order_relaxed);
 
     for (auto& th : pool) th.join();
+    poolGuard.release();
 
     nnServer.stopAndDrain();
+    nnServerGuard.release();
+
+    stopGuard.release();
 
     float qRoot = nodeQ(*rootNode);
     outEvalWhite = (rootPos.side == 0) ? qRoot : (1.0f - qRoot);
@@ -4551,14 +4859,17 @@ void mctsBatchedMT(Position& rootPos,
         }
     }
 
+    // NEW: РІС‹С‚Р°СЃРєРёРІР°РµРј РїРµСЂРІСѓСЋ Р»РёРЅРёСЋ РґРѕ Р±СЂРѕСЃРєР° РєСѓР±РёРєРѕРІ
+    extractBestPVUntilChance(T, rootPos, mask, outPVBeforeRoll, 256);
+
     (void)simOK; (void)simFail; (void)nnExp;
 }
 
 // ===================== TRAINING PATCH BEGIN (FINAL) =====================
-// (продолжение будет в сообщении 2/2)
+// (РїСЂРѕРґРѕР»Р¶РµРЅРёРµ Р±СѓРґРµС‚ РІ СЃРѕРѕР±С‰РµРЅРёРё 2/2)
 // ===================== TRAINING PATCH BEGIN (FINAL) =====================
-// ВСТАВЬ ЭТО ВМЕСТО ТВОЕГО ТЕКУЩЕГО `static void init()` И `int main()`
-// (т.е. удалить/заменить всё от `static void init()` до конца файла).
+// Р’РЎРўРђР’Р¬ Р­РўРћ Р’РњР•РЎРўРћ РўР’РћР•Р“Рћ РўР•РљРЈР©Р•Р“Рћ `static void init()` Р `int main()`
+// (С‚.Рµ. СѓРґР°Р»РёС‚СЊ/Р·Р°РјРµРЅРёС‚СЊ РІСЃС‘ РѕС‚ `static void init()` РґРѕ РєРѕРЅС†Р° С„Р°Р№Р»Р°).
 
 
 
@@ -4686,7 +4997,7 @@ struct NetImpl final : torch::nn::Module {
         v = v.contiguous().view({ v.size(0), HEAD_VALUE_C * 64 });
         v = torch::relu(valFC1->forward(v));
 
-        // Получаем сырые логиты
+        // РџРѕР»СѓС‡Р°РµРј СЃС‹СЂС‹Рµ Р»РѕРіРёС‚С‹
         v = valFC2->forward(v);
 
 
@@ -4704,14 +5015,14 @@ TORCH_MODULE(Net);
 // ------------------------------------------------------------
 
 struct TrainSample {
-    std::array<float, NN_INPUT_SIZE>  x;      // [1600]
+    Position pos;
 
     // sparse policy target:
     // idx = CHW index in [0..POLICY_SIZE-1], i.e. pl*64 + sq
     uint16_t nPi = 0;
     std::array<uint16_t, AI_MAX_MOVES> piIdx{};
     std::array<float, AI_MAX_MOVES> piProb{};
-    float q;
+    float q = 0.5f;
     float z = 0.5f; // [0..1] from side-to-move perspective
 };
 
@@ -4721,11 +5032,11 @@ struct ReplayBuffer {
     size_t head = 0;
     size_t size = 0;
 
-    // Степень "свежести" данных (Prioritized Replay Lite).
-    // 1.0  = полностью равномерный выбор (как было).
-    // 0.75 = легкий приоритет свежим играм (золотая середина для AlphaZero).
-    // 0.5  = сильный перекос в сторону только что сыгранных партий.
-    double recent_bias = 0.75;
+    // РЎС‚РµРїРµРЅСЊ "СЃРІРµР¶РµСЃС‚Рё" РґР°РЅРЅС‹С… (Prioritized Replay Lite).
+    // 1.0  = РїРѕР»РЅРѕСЃС‚СЊСЋ СЂР°РІРЅРѕРјРµСЂРЅС‹Р№ РІС‹Р±РѕСЂ (РєР°Рє Р±С‹Р»Рѕ).
+    // 0.75 = Р»РµРіРєРёР№ РїСЂРёРѕСЂРёС‚РµС‚ СЃРІРµР¶РёРј РёРіСЂР°Рј (Р·РѕР»РѕС‚Р°СЏ СЃРµСЂРµРґРёРЅР° РґР»СЏ AlphaZero).
+    // 0.5  = СЃРёР»СЊРЅС‹Р№ РїРµСЂРµРєРѕСЃ РІ СЃС‚РѕСЂРѕРЅСѓ С‚РѕР»СЊРєРѕ С‡С‚Рѕ СЃС‹РіСЂР°РЅРЅС‹С… РїР°СЂС‚РёР№.
+    double recent_bias = 0.85;
 
     std::mutex m;
 
@@ -4739,39 +5050,36 @@ struct ReplayBuffer {
         head = (head + 1) % cap;
         if (size < cap) ++size;
     }
-
-    bool sampleBatch(std::vector<TrainSample>& out, int B, std::mt19937& rng) {
-        // 1. Изменяем размер вектора ДО захвата мьютекса.
-        // Это убирает микро-фризы (Lock Contention), позволяя Self-play потокам
-        // быстрее складывать новые партии в буфер.
-        out.resize((size_t)B);
-
-        std::lock_guard<std::mutex> lk(m);
-        if (size < (size_t)B) return false;
-
-        // Используем непрерывное распределение [0.0, 1.0)
-        std::uniform_real_distribution<double> d(0.0, 1.0);
-
-        auto phys = [&](size_t logical) -> size_t {
-            size_t start = (head + cap - size) % cap;
-            return (start + logical) % cap;
-            };
-
-        for (int i = 0; i < B; ++i) {
-            double u = d(rng);
-
-            // 2. Математический трюк: возводим 'u' в степень < 1.0.
-            // График функции y = x^0.75 выгибается вверх. 
-            // Это значит, что случайные значения будут чаще смещаться ближе к 1.0
-            // Логический индекс 0 — самая старая позиция, (size - 1) — самая новая.
-            size_t li = (size_t)(size * std::pow(u, recent_bias));
-
-            if (li >= size) li = size - 1; // Защита от выхода за пределы
-
-            out[(size_t)i] = buf[phys(li)];
-        }
-        return true;
+void pushMany(const std::vector<TrainSample>& v) {
+    std::lock_guard<std::mutex> lk(m);
+    for (const auto& s : v) {
+        buf[head] = s;
+        head = (head + 1) % cap;
+        if (size < cap) ++size;
     }
+}
+    bool sampleBatch(std::vector<TrainSample>& out, int B, std::mt19937& rng) {
+    out.resize((size_t)B);
+
+    std::vector<double> biased((size_t)B);
+    std::uniform_real_distribution<double> d(0.0, 1.0);
+    for (int i = 0; i < B; ++i) {
+        biased[(size_t)i] = std::pow(d(rng), recent_bias);
+    }
+
+    std::lock_guard<std::mutex> lk(m);
+    if (size < (size_t)B) return false;
+
+    const size_t snapSize = size;
+    const size_t start = (head + cap - snapSize) % cap;
+
+    for (int i = 0; i < B; ++i) {
+        size_t li = (size_t)(biased[(size_t)i] * (double)snapSize);
+        if (li >= snapSize) li = snapSize - 1;
+        out[(size_t)i] = buf[(start + li) % cap];
+    }
+    return true;
+}
 
     size_t currentSize() {
         std::lock_guard<std::mutex> lk(m);
@@ -4780,11 +5088,19 @@ struct ReplayBuffer {
 };
 
 // ------------------------------------------------------------
-// TRT refit из libtorch модели + пересоздание Context + CUDA Graph
+// TRT refit РёР· libtorch РјРѕРґРµР»Рё + РїРµСЂРµСЃРѕР·РґР°РЅРёРµ Context + CUDA Graph
 // ------------------------------------------------------------
 
-static std::mutex g_trtMutex;     // защищаем TRT enqueue/refit/serialize
-static std::mutex g_modelMutex;   // защищаем чтение/запись весов модели и optimizer step
+static std::mutex g_trtMutex;     // Р·Р°С‰РёС‰Р°РµРј TRT enqueue/refit/serialize
+static std::mutex g_modelMutex;   // Р·Р°С‰РёС‰Р°РµРј С‡С‚РµРЅРёРµ/Р·Р°РїРёСЃСЊ РІРµСЃРѕРІ РјРѕРґРµР»Рё Рё optimizer step
+static TrtRunner g_trt_old;
+static bool g_trtOldReady = false;
+static std::mutex g_trtOldMutex;
+
+struct BackendBinding {
+    TrtRunner& trt;
+    std::mutex& mtx;
+};
 // Always lock BOTH in the same order, deadlock-free (C++17)
 static AI_FORCEINLINE std::scoped_lock<std::mutex, std::mutex> lockModelTrt() {
     return std::scoped_lock<std::mutex, std::mutex>(g_modelMutex, g_trtMutex);
@@ -4804,7 +5120,7 @@ static std::vector<float> tensorToHostVecF32(const torch::Tensor& tIn) {
     return v;
 }
 
-// Pretty-print missing refit weights (IMPORTANT: иначе refit может "молча" быть частичным).
+// Pretty-print missing refit weights (IMPORTANT: РёРЅР°С‡Рµ refit РјРѕР¶РµС‚ "РјРѕР»С‡Р°" Р±С‹С‚СЊ С‡Р°СЃС‚РёС‡РЅС‹Рј).
 static void trtDumpMissingRefitWeights(nvinfer1::IRefitter& ref) {
     using namespace nvinfer1;
 
@@ -4856,15 +5172,14 @@ static bool trtRecreateContextAndRebindAndGraph(TrtRunner& trt) {
     if (!newCtx->setInputTensorAddress("input", trt.dInput)) { delete newCtx; return false; }
 
     if (!newCtx->setOptimizationProfileAsync(0, trt.stream)) { delete newCtx; return false; }
-
-    if (!newCtx->setInputShape("input", Dims4{ trt.maxBatch, NN_SQ_PLANES, 8, 8 })) {
-        std::cerr << "TensorRT: setInputShape failed on new ctx.\n";
-        delete newCtx;
-        return false;
-    }
-
     if (trt.ctx) { delete trt.ctx; trt.ctx = nullptr; }
     trt.ctx = newCtx;
+    trt.currentShapeB = -1;
+
+    if (!trt.ensureShape(TRT_MAX_BATCH)) {
+        std::cerr << "TensorRT: setInputShape failed on new ctx.\n";
+        return false;
+    }
 
     // IMPORTANT: re-attach aux streams for the NEW context BEFORE capture
     if (!trt.setupAuxStreams()) {
@@ -4895,7 +5210,7 @@ static bool trtRecreateContextAndRebindAndGraph(TrtRunner& trt) {
 // - Keep all host vectors alive until refitCudaEngine() finishes.
 // =============================================================
 
-// RAII: временно перевести модель в eval() на время refit и вернуть режим обратно.
+// RAII: РІСЂРµРјРµРЅРЅРѕ РїРµСЂРµРІРµСЃС‚Рё РјРѕРґРµР»СЊ РІ eval() РЅР° РІСЂРµРјСЏ refit Рё РІРµСЂРЅСѓС‚СЊ СЂРµР¶РёРј РѕР±СЂР°С‚РЅРѕ.
 struct ScopedModelEval {
     Net& model;
     bool wasTraining = false;
@@ -4915,11 +5230,11 @@ static bool trtRefitFromTorchModel(TrtRunner& trt, Net& model) {
 
     if (!trt.engine || !trt.ctx) return false;
 
-    // IMPORTANT: refit делаем из eval(), чтобы BN running stats не менялись.
+    // IMPORTANT: refit РґРµР»Р°РµРј РёР· eval(), С‡С‚РѕР±С‹ BN running stats РЅРµ РјРµРЅСЏР»РёСЃСЊ.
     ScopedModelEval evalGuard(model);
     torch::NoGradGuard ng;
 
-    // Если модель на CUDA — можно синхронизироваться (опционально, но безопасно).
+    // Р•СЃР»Рё РјРѕРґРµР»СЊ РЅР° CUDA вЂ” РјРѕР¶РЅРѕ СЃРёРЅС…СЂРѕРЅРёР·РёСЂРѕРІР°С‚СЊСЃСЏ (РѕРїС†РёРѕРЅР°Р»СЊРЅРѕ, РЅРѕ Р±РµР·РѕРїР°СЃРЅРѕ).
     try {
         auto params = model->parameters(); // std::vector<at::Tensor>
         if (!params.empty()) {
@@ -4933,7 +5248,7 @@ static bool trtRefitFromTorchModel(TrtRunner& trt, Net& model) {
     if (!ref) return false;
 
     // Keep host vectors alive (TensorRT reads weights during refitCudaEngine()).
-    // std::deque гарантирует стабильность адресов элементов.
+    // std::deque РіР°СЂР°РЅС‚РёСЂСѓРµС‚ СЃС‚Р°Р±РёР»СЊРЅРѕСЃС‚СЊ Р°РґСЂРµСЃРѕРІ СЌР»РµРјРµРЅС‚РѕРІ.
     std::deque<std::vector<float>> keep;
 
     auto pushKeep = [&](std::vector<float>&& v) -> nvinfer1::Weights {
@@ -5128,7 +5443,7 @@ static bool trtSavePlanToDisk(TrtRunner& trt, const std::string& planFile) {
 
 
 // ------------------------------------------------------------
-// Inference server для обучения (CV вместо busy-wait), + g_trtMutex
+// Inference server РґР»СЏ РѕР±СѓС‡РµРЅРёСЏ (CV РІРјРµСЃС‚Рѕ busy-wait), + g_trtMutex
 // ------------------------------------------------------------
 static std::atomic<int> g_inferInFlight{ 0 };
 
@@ -5137,71 +5452,103 @@ struct InferInFlightGuard {
     ~InferInFlightGuard() { g_inferInFlight.fetch_sub(1, std::memory_order_relaxed); }
 };
 struct InferenceServerTrain {
+    static constexpr int NN_QUEUE_CAP = 8 * TRT_MAX_BATCH; // 2048
+
     MCTSTable& T;
+    BackendBinding backend;
 
     std::atomic<bool> stop{ false };
     std::atomic<int>  qSize{ 0 };
-    std::atomic<int>  busy{ 0 };
 
     std::mutex m;
-    std::condition_variable cv;
+    std::condition_variable cvNotEmpty;
+    std::condition_variable cvNotFull;
+    std::condition_variable cvIdle;
 
-    std::deque<PendingNN> q;   // FIFO
+    std::deque<PendingNN> q;
     std::thread th;
+
+    bool busyFlag = false; // protected by m
 
     std::vector<float> neutralPol;
     std::vector<float> neutralLogits;
 
-    explicit InferenceServerTrain(MCTSTable& tab) : T(tab) {
+    explicit InferenceServerTrain(MCTSTable& tab, BackendBinding be)
+        : T(tab), backend(be) {
         q.clear();
         neutralPol.assign((size_t)POLICY_SIZE, 0.0f);
         neutralLogits.assign((size_t)AI_MAX_MOVES, 0.0f);
     }
 
     void start() {
-        stop.store(false, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lk(m);
+            stop.store(false, std::memory_order_relaxed);
+            busyFlag = false;
+            q.clear();
+            qSize.store(0, std::memory_order_relaxed);
+        }
         th = std::thread([this] { this->run(); });
     }
 
     void requestStop() {
-        stop.store(true, std::memory_order_relaxed);
-        cv.notify_all();
+        {
+            std::lock_guard<std::mutex> lk(m);
+            stop.store(true, std::memory_order_relaxed);
+        }
+        cvNotEmpty.notify_all();
+        cvNotFull.notify_all();
+        cvIdle.notify_all();
     }
 
     void join() {
         if (th.joinable()) th.join();
     }
 
-    int size() const { return qSize.load(std::memory_order_relaxed); }
+    int size() const {
+        return qSize.load(std::memory_order_relaxed);
+    }
 
-    void submit(PendingNN&& job) {
-        {
-            std::lock_guard<std::mutex> lk(m);
+    // Blocking bounded submit.
+    // IMPORTANT: by lifecycle, producers must stop before requestStop().
+    bool submit(PendingNN&& job,
+                const std::atomic<bool>* extCancel = nullptr,
+                const std::atomic<bool>* extAbort  = nullptr) {
+        auto cancelled = [&]() -> bool {
+            return stop.load(std::memory_order_relaxed) ||
+                   (extCancel && extCancel->load(std::memory_order_relaxed)) ||
+                   (extAbort && extAbort->load(std::memory_order_relaxed));
+        };
 
-            // Pure FIFO:
-            q.emplace_back(std::move(job));
+        std::unique_lock<std::mutex> lk(m);
 
-            // Optional: mild root priority
-            // if (job.isRoot) q.emplace_front(std::move(job));
-            // else            q.emplace_back(std::move(job));
-
-            qSize.fetch_add(1, std::memory_order_relaxed);
+        while ((int)q.size() >= NN_QUEUE_CAP && !cancelled()) {
+            cvNotFull.wait_for(lk, std::chrono::microseconds(AI_SUBMIT_WAIT_US));
         }
-        cv.notify_one();
+
+        if (cancelled()) return false;
+
+        q.emplace_back(std::move(job));
+        qSize.store((int)q.size(), std::memory_order_relaxed);
+
+        lk.unlock();
+        cvNotEmpty.notify_one();
+        return true;
     }
 
     void waitIdle() {
-        for (;;) {
-            if (size() == 0 && busy.load(std::memory_order_relaxed) == 0) break;
-            std::this_thread::sleep_for(std::chrono::microseconds(50));
-        }
+        std::unique_lock<std::mutex> lk(m);
+        cvIdle.wait(lk, [&] {
+            return q.empty() && !busyFlag;
+        });
     }
 
-    // Use only when server is idle.
     void clearQueueUnsafeWhenIdle() {
         std::lock_guard<std::mutex> lk(m);
         q.clear();
         qSize.store(0, std::memory_order_relaxed);
+        cvNotFull.notify_all();
+        if (!busyFlag) cvIdle.notify_all();
     }
 
 private:
@@ -5211,121 +5558,160 @@ private:
 
         int n = 0;
         while (n < wantB && !q.empty()) {
-            batch.emplace_back(std::move(q.front())); // FIFO
+            batch.emplace_back(std::move(q.front()));
             q.pop_front();
             ++n;
         }
-        if (n) qSize.fetch_sub(n, std::memory_order_relaxed);
+
+        qSize.store((int)q.size(), std::memory_order_relaxed);
         return n != 0;
     }
 
     void run() {
         std::vector<PendingNN> batch;
+        std::vector<PendingNN> add;
         batch.reserve((size_t)TRT_MAX_BATCH);
+        add.reserve((size_t)TRT_MAX_BATCH);
 
-        for (;;) {
-            // wait for work or stop
-            {
-                std::unique_lock<std::mutex> lk(m);
-                busy.store(0, std::memory_order_relaxed);
+        std::vector<Position> posBatch;
+        posBatch.reserve((size_t)TRT_MAX_BATCH);
 
-                cv.wait_for(lk, std::chrono::milliseconds(1), [&] {
-                    return stop.load(std::memory_order_relaxed) || !q.empty();
-                    });
+        std::vector<float> values((size_t)TRT_MAX_BATCH, 0.5f);
 
-                if (stop.load(std::memory_order_relaxed) && q.empty()) break;
-                if (q.empty()) continue;
+#if AI_HAVE_CUDA_KERNELS
+        std::vector<float> logits((size_t)TRT_MAX_BATCH * (size_t)AI_MAX_MOVES, 0.0f);
+#else
+        std::vector<float> policy((size_t)TRT_MAX_BATCH * (size_t)POLICY_SIZE, 0.0f);
+#endif
 
-                busy.store(1, std::memory_order_relaxed);
-                (void)popBatchUnlocked(batch, TRT_MAX_BATCH);
-            }
-
-            const int B = (int)batch.size();
-            if (B <= 0) continue;
+        auto processBatch = [&](std::vector<PendingNN>& jobs) {
+            const int B = (int)jobs.size();
+            if (B <= 0) return;
 
 #if AI_HAVE_CUDA_KERNELS
             bool ok = false;
             {
                 InferInFlightGuard ig;
-                std::lock_guard<std::mutex> lk(g_trtMutex);
-                ok = g_trt.inferBatchGather(batch.data(), B);
+                std::lock_guard<std::mutex> lk(backend.mtx);
+
+                ok = backend.trt.inferBatchGather(jobs.data(), B);
+                if (ok) {
+                    backend.trt.copyValuesTo(values.data(), B);
+                    backend.trt.copyGatherLogitsTo(logits.data(), B);
+                }
             }
 
             for (int i = 0; i < B; ++i) {
-                float v = ok ? g_trt.valueHost(i) : 0.5f;
-                const float* logits = ok ? g_trt.gatherLogitsHostPtr(i) : neutralLogits.data();
-                expandLeafWithGatheredLogits(T, batch[(size_t)i], v, logits);
+                float v = ok ? values[(size_t)i] : 0.5f;
+                const float* lg = ok
+                    ? (logits.data() + (size_t)i * (size_t)AI_MAX_MOVES)
+                    : neutralLogits.data();
+
+                expandLeafWithGatheredLogits(T, jobs[(size_t)i], v, lg);
             }
 #else
-            std::vector<Position> posBatch((size_t)B);
-            for (int i = 0; i < B; ++i) posBatch[(size_t)i] = batch[(size_t)i].pos;
+            posBatch.clear();
+            posBatch.resize((size_t)B);
+            for (int i = 0; i < B; ++i) posBatch[(size_t)i] = jobs[(size_t)i].pos;
 
             bool ok = false;
             {
                 InferInFlightGuard ig;
-                std::lock_guard<std::mutex> lk(g_trtMutex);
-                ok = g_trt.inferBatch(posBatch.data(), B);
+                std::lock_guard<std::mutex> lk(backend.mtx);
+
+                ok = backend.trt.inferBatch(posBatch.data(), B);
+                if (ok) {
+                    backend.trt.copyValuesTo(values.data(), B);
+                    backend.trt.copyPolicyTo(policy.data(), B);
+                }
             }
 
             for (int i = 0; i < B; ++i) {
-                float v = ok ? g_trt.valueHost(i) : 0.5f;
-                const float* pol = ok ? g_trt.policyHostPtr(i) : neutralPol.data();
-                expandLeafWithOutputs(T, batch[(size_t)i], v, pol);
+                float v = ok ? values[(size_t)i] : 0.5f;
+                const float* pol = ok
+                    ? (policy.data() + (size_t)i * (size_t)POLICY_SIZE)
+                    : neutralPol.data();
+
+                expandLeafWithOutputs(T, jobs[(size_t)i], v, pol);
             }
 #endif
+        };
+
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> lk(m);
+
+                busyFlag = false;
+                if (q.empty()) cvIdle.notify_all();
+
+                cvNotEmpty.wait(lk, [&] {
+                    return stop.load(std::memory_order_relaxed) || !q.empty();
+                });
+
+                if (stop.load(std::memory_order_relaxed) && q.empty()) break;
+
+                busyFlag = true;
+                (void)popBatchUnlocked(batch, TRT_MAX_BATCH);
+            }
+
+            // queue shrank -> wake blocked producers
+            cvNotFull.notify_all();
+
+            const auto tFillEnd =
+                std::chrono::steady_clock::now() + std::chrono::microseconds(200);
+
+            while ((int)batch.size() < TRT_MAX_BATCH &&
+                   std::chrono::steady_clock::now() < tFillEnd) {
+                std::unique_lock<std::mutex> lk(m);
+
+                if (q.empty()) {
+                    cvNotEmpty.wait_until(lk, tFillEnd, [&] {
+                        return stop.load(std::memory_order_relaxed) || !q.empty();
+                    });
+                }
+
+                if (q.empty()) break;
+
+                add.clear();
+                const int need = TRT_MAX_BATCH - (int)batch.size();
+                (void)popBatchUnlocked(add, need);
+                lk.unlock();
+
+                cvNotFull.notify_all();
+
+                for (auto& j : add) batch.emplace_back(std::move(j));
+            }
+
+            processBatch(batch);
         }
 
-        // Drain remaining (best effort)
+        // drain tail after stop request
         for (;;) {
             std::vector<PendingNN> tail;
             {
                 std::lock_guard<std::mutex> lk(m);
                 if (q.empty()) break;
-                busy.store(1, std::memory_order_relaxed);
+                busyFlag = true;
                 (void)popBatchUnlocked(tail, TRT_MAX_BATCH);
             }
 
-            const int B = (int)tail.size();
-            if (B <= 0) break;
-
-#if AI_HAVE_CUDA_KERNELS
-            bool ok = false;
-            {
-                InferInFlightGuard ig;
-                std::lock_guard<std::mutex> lk(g_trtMutex);
-                ok = g_trt.inferBatchGather(tail.data(), B);
-            }
-
-            for (int i = 0; i < B; ++i) {
-                float v = ok ? g_trt.valueHost(i) : 0.5f;
-                const float* logits = ok ? g_trt.gatherLogitsHostPtr(i) : neutralLogits.data();
-                expandLeafWithGatheredLogits(T, tail[(size_t)i], v, logits);
-            }
-#else
-            std::vector<Position> posBatch((size_t)B);
-            for (int i = 0; i < B; ++i) posBatch[(size_t)i] = tail[(size_t)i].pos;
-
-            bool ok = false;
-            {
-                InferInFlightGuard ig;
-                std::lock_guard<std::mutex> lk(g_trtMutex);
-                ok = g_trt.inferBatch(posBatch.data(), B);
-            }
-
-            for (int i = 0; i < B; ++i) {
-                float v = ok ? g_trt.valueHost(i) : 0.5f;
-                const float* pol = ok ? g_trt.policyHostPtr(i) : neutralPol.data();
-                expandLeafWithOutputs(T, tail[(size_t)i], v, pol);
-            }
-#endif
+            cvNotFull.notify_all();
+            processBatch(tail);
         }
 
-        busy.store(0, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lk(m);
+            busyFlag = false;
+            qSize.store((int)q.size(), std::memory_order_relaxed);
+            if (q.empty()) cvIdle.notify_all();
+        }
+
+        cvNotFull.notify_all();
     }
 };
 
 // ------------------------------------------------------------
-// SearchPool: постоянные MCTS-воркеры (НЕ пересоздаём потоки на каждый search)
+// SearchPool: РїРѕСЃС‚РѕСЏРЅРЅС‹Рµ MCTS-РІРѕСЂРєРµСЂС‹ (РќР• РїРµСЂРµСЃРѕР·РґР°С‘Рј РїРѕС‚РѕРєРё РЅР° РєР°Р¶РґС‹Р№ search)
 // ------------------------------------------------------------
 static AI_FORCEINLINE bool tryClaimSimBudget(std::atomic<int>& simsLeft) {
     int cur = simsLeft.load(std::memory_order_relaxed);
@@ -5336,7 +5722,6 @@ static AI_FORCEINLINE bool tryClaimSimBudget(std::atomic<int>& simsLeft) {
                 std::memory_order_relaxed)) {
             return true;
         }
-        // cur обновится compare_exchange_weak'ом
     }
     return false;
 }
@@ -5344,17 +5729,30 @@ static AI_FORCEINLINE bool tryClaimSimBudget(std::atomic<int>& simsLeft) {
 static AI_FORCEINLINE void refundSimBudget(std::atomic<int>& simsLeft) {
     simsLeft.fetch_add(1, std::memory_order_relaxed);
 }
+
 struct SearchPool {
     std::vector<std::thread> pool;
     std::mutex m;
     std::condition_variable cv;
+
     bool stop = false;
+
     std::atomic<bool> cancelJob{ false };
+
+    // FAIL-FAST state
+    std::atomic<bool> fatal{ false };
+    std::mutex fatalM;
+    std::string fatalReason;
+
     // job dispatch
     int jobId = 0;
     std::atomic<int> workersBusy{ 0 };
     std::atomic<int> simsLeft{ 0 };
+std::atomic<uint64_t> progressTick{ 0 };
 
+AI_FORCEINLINE void noteProgress() {
+    progressTick.fetch_add(1, std::memory_order_relaxed);
+}
     // job params (valid only during active job)
     MCTSTable* T = nullptr;
     InferenceServerTrain* srv = nullptr;
@@ -5364,91 +5762,306 @@ struct SearchPool {
 
     unsigned threads = 1;
 
-    void start(unsigned nThreads) {
-        stop = false;
-        threads = std::max(1u, nThreads);
-        pool.reserve(threads);
+void start(unsigned nThreads) {
+    if (!pool.empty()) {
+        throw std::logic_error("SearchPool::start() called while pool is already running");
+    }
 
-        for (unsigned tid = 0; tid < threads; ++tid) {
-            pool.emplace_back([this, tid] { this->workerMain(tid); });
+    const unsigned newThreads = std::max(1u, nThreads);
+    std::vector<std::thread> newPool;
+    newPool.reserve(newThreads);
+
+    // Prepare clean "starting" state before workers begin.
+    {
+        std::lock_guard<std::mutex> lk(m);
+        stop = false;
+
+        // no active job at startup
+        T = nullptr;
+        srv = nullptr;
+        rootPos = nullptr;
+        path = nullptr;
+        mask = nullptr;
+        jobId = 0;
+    }
+
+    cancelJob.store(false, std::memory_order_relaxed);
+    fatal.store(false, std::memory_order_relaxed);
+    workersBusy.store(0, std::memory_order_relaxed);
+    simsLeft.store(0, std::memory_order_relaxed);
+    progressTick.store(0, std::memory_order_relaxed);
+
+    {
+        std::lock_guard<std::mutex> lk(fatalM);
+        fatalReason.clear();
+    }
+
+    try {
+        for (unsigned tid = 0; tid < newThreads; ++tid) {
+            newPool.emplace_back([this, tid] { this->workerMain(tid); });
         }
     }
+    catch (...) {
+        // Stop and wake any workers that were already created.
+        {
+            std::lock_guard<std::mutex> lk(m);
+            stop = true;
+        }
+
+        cancelJob.store(true, std::memory_order_relaxed);
+        simsLeft.store(0, std::memory_order_relaxed);
+        cv.notify_all();
+
+        for (auto& th : newPool) {
+            if (th.joinable()) th.join();
+        }
+
+        // Restore inert state.
+        {
+            std::lock_guard<std::mutex> lk(m);
+            T = nullptr;
+            srv = nullptr;
+            rootPos = nullptr;
+            path = nullptr;
+            mask = nullptr;
+            jobId = 0;
+        }
+
+        workersBusy.store(0, std::memory_order_relaxed);
+        throw;
+    }
+
+    pool = std::move(newPool);
+    threads = newThreads;
+}
 
     void shutdown() {
         {
             std::lock_guard<std::mutex> lk(m);
             stop = true;
         }
+        cancelJob.store(true, std::memory_order_relaxed);
+        simsLeft.store(0, std::memory_order_relaxed);
+
         cv.notify_all();
-        for (auto& th : pool) if (th.joinable()) th.join();
+
+        for (auto& th : pool) {
+            if (th.joinable()) th.join();
+        }
         pool.clear();
     }
 
-    void runSims(MCTSTable& TT,
-        InferenceServerTrain& server,
-        const Position& rp,
-        const std::array<uint64_t, 4>& pth,
-        const std::array<int, 64>& msk,
-        int sims) {
-        if (pool.empty()) return;
+    bool isFatal() const {
+        return fatal.load(std::memory_order_acquire);
+    }
 
-        if (TT.abort.load(std::memory_order_relaxed)) return;
+    std::string getFatalReason() const {
+        std::lock_guard<std::mutex> lk(const_cast<std::mutex&>(fatalM));
+        return fatalReason;
+    }
 
-        simsLeft.store(sims, std::memory_order_relaxed);
-        cancelJob.store(false, std::memory_order_relaxed);
-        workersBusy.store((int)threads, std::memory_order_relaxed);
+    void requestFailFastNoThrow(const std::string& reason, MCTSTable* tt = nullptr) noexcept {
+        bool wasFatal = fatal.exchange(true, std::memory_order_acq_rel);
+        if (!wasFatal) {
+            std::lock_guard<std::mutex> lk(fatalM);
+            fatalReason = reason;
+        }
+
+        if (tt) {
+            tt->abort.store(true, std::memory_order_release);
+        }
 
         {
             std::lock_guard<std::mutex> lk(m);
-            T = &TT;
-            srv = &server;
-            rootPos = &rp;
-            path = &pth;
-            mask = &msk;
-            ++jobId;
+            stop = true;
         }
+
+        cancelJob.store(true, std::memory_order_relaxed);
+        simsLeft.store(0, std::memory_order_relaxed);
         cv.notify_all();
+    }
 
-        // ВАЖНО: даже если TT.abort == true, мы всё равно ждём,
-        // чтобы воркеры гарантированно вышли, иначе нельзя делать T.newGame().
-        const auto t0 = std::chrono::steady_clock::now();
-        const auto hardTimeout = std::chrono::seconds(2);
+    bool isPoolThreadId(std::thread::id id) const noexcept {
+        for (const auto& th : pool) {
+            if (th.joinable() && th.get_id() == id) return true;
+        }
+        return false;
+    }
 
-        for (;;) {
-            if (workersBusy.load(std::memory_order_relaxed) == 0) break;
+    void joinAllWorkersNoexcept() noexcept {
+        const auto self = std::this_thread::get_id();
 
-            if (TT.abort.load(std::memory_order_relaxed)) {
-                // ускоряем останов
-                cancelJob.store(true, std::memory_order_relaxed);
-                simsLeft.store(0, std::memory_order_relaxed);
+        for (auto& th : pool) {
+            if (!th.joinable()) continue;
+            if (th.get_id() == self) continue;
+
+            try {
+                th.join();
+            } catch (...) {
             }
-
-            if (std::chrono::steady_clock::now() - t0 > hardTimeout) {
-                // Если реально зависли — лучше остановить пул, чем продолжать с битым состоянием.
-                std::cerr << "[SearchPool] ERROR: workers did not stop in time. Forcing shutdown.\n";
-                shutdown();
-                break;
-            }
-
-            std::this_thread::sleep_for(std::chrono::microseconds(50));
         }
     }
 
+    void requestFailFast(const std::string& reason, MCTSTable* tt = nullptr) noexcept {
+        requestFailFastNoThrow(reason, tt);
+    }
+
+    void failFast(const std::string& reason, MCTSTable* tt = nullptr) {
+        requestFailFastNoThrow(reason, tt);
+
+        // failFast() РґРѕР»Р¶РµРЅ Р±СЂРѕСЃР°С‚СЊ С‚РѕР»СЊРєРѕ РёР· СѓРїСЂР°РІР»СЏСЋС‰РµРіРѕ РїРѕС‚РѕРєР°.
+        // Р•СЃР»Рё РєС‚Рѕ-С‚Рѕ СЃР»СѓС‡Р°Р№РЅРѕ РІС‹Р·РѕРІРµС‚ РµРіРѕ РёР· worker thread, РїСЂРѕСЃС‚Рѕ РЅРµ Р±СЂРѕСЃР°РµРј:
+        // worker РґРѕР»Р¶РµРЅ Р·Р°РІРµСЂС€РёС‚СЊСЃСЏ, Р° СѓРїСЂР°РІР»СЏСЋС‰РёР№ РїРѕС‚РѕРє СѓРІРёРґРёС‚ fatal Рё СЃР°Рј Р±СЂРѕСЃРёС‚.
+        if (isPoolThreadId(std::this_thread::get_id())) {
+            return;
+        }
+
+        joinAllWorkersNoexcept();
+        pool.clear();
+
+        throw std::runtime_error("[SearchPool] FATAL: " + getFatalReason());
+    }
+
+void runSims(MCTSTable& TT,
+    InferenceServerTrain& server,
+    const Position& rp,
+    const std::array<uint64_t, 4>& pth,
+    const std::array<int, 64>& msk,
+    int sims) {
+
+    if (isFatal()) {
+        throw std::runtime_error("[SearchPool] already failed: " + getFatalReason());
+    }
+
+    if (pool.empty()) {
+        failFast("runSims() called with no worker threads", &TT);
+    }
+
+    if (TT.abort.load(std::memory_order_relaxed)) return;
+
+    simsLeft.store(sims, std::memory_order_relaxed);
+    cancelJob.store(false, std::memory_order_relaxed);
+    workersBusy.store((int)threads, std::memory_order_relaxed);
+
+    {
+        std::lock_guard<std::mutex> lk(m);
+        T = &TT;
+        srv = &server;
+        rootPos = &rp;
+        path = &pth;
+        mask = &msk;
+        ++jobId;
+    }
+    cv.notify_all();
+
+    using Clock = std::chrono::steady_clock;
+
+    // Watchdog thresholds:
+    // warning only if nothing changed for a while,
+    // fatal only if stall is really long.
+    static constexpr auto WATCHDOG_WARN_AFTER  = std::chrono::seconds(5);
+    static constexpr auto WATCHDOG_FATAL_AFTER = std::chrono::seconds(30);
+
+    uint64_t lastTick = progressTick.load(std::memory_order_relaxed);
+    int lastSimsLeft = simsLeft.load(std::memory_order_relaxed);
+    int lastQSize = server.size();
+    int lastInFlight = g_inferInFlight.load(std::memory_order_relaxed);
+
+    auto lastProgressAt = Clock::now();
+    auto lastWarnAt = Clock::time_point::min();
+
+    for (;;) {
+        if (isFatal()) {
+            failFast(getFatalReason(), &TT);
+        }
+
+        const int busy = workersBusy.load(std::memory_order_relaxed);
+        if (busy == 0) break;
+
+        if (TT.abort.load(std::memory_order_relaxed)) {
+            cancelJob.store(true, std::memory_order_relaxed);
+            simsLeft.store(0, std::memory_order_relaxed);
+        }
+
+        const auto now = Clock::now();
+
+        const uint64_t tickNow = progressTick.load(std::memory_order_relaxed);
+        const int simsNow = simsLeft.load(std::memory_order_relaxed);
+        const int qNow = server.size();
+        const int inFlightNow = g_inferInFlight.load(std::memory_order_relaxed);
+
+        const bool progressed =
+            (tickNow != lastTick) ||
+            (simsNow != lastSimsLeft) ||
+            (qNow != lastQSize) ||
+            (inFlightNow != lastInFlight);
+
+        if (progressed) {
+            lastTick = tickNow;
+            lastSimsLeft = simsNow;
+            lastQSize = qNow;
+            lastInFlight = inFlightNow;
+            lastProgressAt = now;
+        } else {
+            const auto stalledFor = now - lastProgressAt;
+
+            if (stalledFor >= WATCHDOG_FATAL_AFTER) {
+                std::ostringstream oss;
+                oss << "stall watchdog fired: no progress for "
+                    << std::chrono::duration_cast<std::chrono::milliseconds>(stalledFor).count()
+                    << " ms"
+                    << " busy=" << busy
+                    << " simsLeft=" << simsNow
+                    << " nnQueue=" << qNow
+                    << " inferInFlight=" << inFlightNow
+                    << " ttAbort=" << TT.abort.load(std::memory_order_relaxed);
+                failFast(oss.str(), &TT);
+            }
+
+            if (stalledFor >= WATCHDOG_WARN_AFTER &&
+                (lastWarnAt == Clock::time_point::min() ||
+                 now - lastWarnAt >= std::chrono::seconds(2))) {
+                lastWarnAt = now;
+                std::cerr << "[SearchPool] watchdog warning: stalled for "
+                          << std::chrono::duration_cast<std::chrono::milliseconds>(stalledFor).count()
+                          << " ms"
+                          << " busy=" << busy
+                          << " simsLeft=" << simsNow
+                          << " nnQueue=" << qNow
+                          << " inferInFlight=" << inFlightNow
+                          << " ttAbort=" << TT.abort.load(std::memory_order_relaxed)
+                          << "\n";
+            }
+        }
+
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+
+    if (isFatal()) {
+        failFast(getFatalReason(), &TT);
+    }
+}
 private:
-    void workerMain(unsigned tid) {
-        int myJob = 0;
-        uint32_t jitterBase = (uint32_t)(0x9E3779B9u * (tid + 1));
+void workerMain(unsigned tid) {
+    int myJob = 0;
+    uint32_t jitterBase = (uint32_t)(0x9E3779B9u * (tid + 1));
 
-        for (;;) {
-            MCTSTable* TT = nullptr;
-            InferenceServerTrain* server = nullptr;
-            const Position* rp = nullptr;
-            const std::array<uint64_t, 4>* pth = nullptr;
-            const std::array<int, 64>* msk = nullptr;
+    for (;;) {
+        MCTSTable* TT = nullptr;
+        InferenceServerTrain* server = nullptr;
+        const Position* rp = nullptr;
+        const std::array<uint64_t, 4>* pth = nullptr;
+        const std::array<int, 64>* msk = nullptr;
 
+        bool busyAccounted = false;
+
+        try {
             {
                 std::unique_lock<std::mutex> lk(m);
-                cv.wait(lk, [&] { return stop || jobId != myJob; });
+                cv.wait(lk, [&] {
+                    return stop || jobId != myJob;
+                });
+
                 if (stop) return;
 
                 myJob = jobId;
@@ -5459,69 +6072,118 @@ private:
                 msk = mask;
             }
 
+            busyAccounted = true;
+
             if (!TT || TT->abort.load(std::memory_order_relaxed)) {
                 workersBusy.fetch_sub(1, std::memory_order_relaxed);
+                busyAccounted = false;
                 continue;
             }
 
-            // execute sims
-int k = 0;
-for (;;) {
-    if (TT->abort.load(std::memory_order_relaxed)) break;
-    if (cancelJob.load(std::memory_order_relaxed)) break;
+            int k = 0;
+            int queueSpins = 0;
 
-    // avoid unbounded queue growth
-    static thread_local int throttleSpins = 0;
-    int qs = server ? server->size() : 0;
-    throttleOnNNQueue_NoSleep(qs, throttleSpins);
+            for (;;) {
+                if (fatal.load(std::memory_order_relaxed)) break;
+                if (TT->abort.load(std::memory_order_relaxed)) break;
+                if (cancelJob.load(std::memory_order_relaxed)) break;
 
-    // IMPORTANT:
-    // do NOT spend sim budget while we are only throttling on NN queue pressure
-    if (qs > 2000) {
-        cpuRelax();
-        continue;
-    }
+                if (server) {
+                    throttleOnNNQueue_NoSleep(server->size(), queueSpins);
 
-    // claim exactly one simulation budget item
-    if (!tryClaimSimBudget(simsLeft)) break;
+                    if (fatal.load(std::memory_order_relaxed)) break;
+                    if (TT->abort.load(std::memory_order_relaxed)) break;
+                    if (cancelJob.load(std::memory_order_relaxed)) break;
+                }
 
-    PendingNN p;
-    bool needNN = false;
+                if (!tryClaimSimBudget(simsLeft)) break;
 
-    bool ok = runOneSim(*TT, *rp, *pth, *msk, /*rootNoise=*/false,
-        p, needNN,
-        jitterBase + (uint32_t)(k++) * 1337u);
+                PendingNN p;
+                bool needNN = false;
 
-    if (!ok) {
-        // simulation did not actually happen -> give budget back
-        refundSimBudget(simsLeft);
+                bool ok = runOneSim(*TT, *rp, *pth, *msk,
+                                    p, needNN,
+                                    jitterBase + (uint32_t)(k++) * 1337u);
 
-        if (TT->abort.load(std::memory_order_relaxed)) break;
-        if (cancelJob.load(std::memory_order_relaxed)) break;
+                if (!ok) {
+                    refundSimBudget(simsLeft);
 
-        cpuRelax();
-        continue;
-    }
+                    if (fatal.load(std::memory_order_relaxed)) break;
+                    if (TT->abort.load(std::memory_order_relaxed)) break;
+                    if (cancelJob.load(std::memory_order_relaxed)) break;
 
-    if (needNN && server) server->submit(std::move(p));
-}
+                    cpuRelax();
+                    continue;
+                }
+
+                noteProgress();
+
+                if (needNN && server) {
+                    throttleOnNNQueue_NoSleep(server->size(), queueSpins);
+
+                    if (fatal.load(std::memory_order_relaxed) ||
+                        cancelJob.load(std::memory_order_relaxed) ||
+                        TT->abort.load(std::memory_order_relaxed)) {
+                        cancelPendingNN(p);
+                        break;
+                    }
+
+                    if (!server->submit(std::move(p), &cancelJob, &TT->abort)) {
+                        cancelPendingNN(p);
+
+                        if (!fatal.load(std::memory_order_relaxed) &&
+                            !cancelJob.load(std::memory_order_relaxed) &&
+                            !TT->abort.load(std::memory_order_relaxed)) {
+                            refundSimBudget(simsLeft);
+                        }
+                        break;
+                    }
+
+                    noteProgress();
+                }
+            }
 
             workersBusy.fetch_sub(1, std::memory_order_relaxed);
+            busyAccounted = false;
+        }
+        catch (const std::exception& e) {
+            if (busyAccounted) {
+                workersBusy.fetch_sub(1, std::memory_order_relaxed);
+                busyAccounted = false;
+            }
+
+            std::ostringstream oss;
+            oss << "workerMain tid=" << tid << " exception: " << e.what();
+            requestFailFast(oss.str(), TT);
+            return;
+        }
+        catch (...) {
+            if (busyAccounted) {
+                workersBusy.fetch_sub(1, std::memory_order_relaxed);
+                busyAccounted = false;
+            }
+
+            std::ostringstream oss;
+            oss << "workerMain tid=" << tid << " unknown exception";
+            requestFailFast(oss.str(), TT);
+            return;
         }
     }
+}
 };
 
 // ------------------------------------------------------------
 // Search fixed number of simulations (sims) with tree reuse
-// Dirichlet noise применяется ТОЛЬКО временно на root (не портит priors в TT навсегда)
+// Dirichlet noise РїСЂРёРјРµРЅСЏРµС‚СЃСЏ РўРћР›Р¬РљРћ РІСЂРµРјРµРЅРЅРѕ РЅР° root (РЅРµ РїРѕСЂС‚РёС‚ priors РІ TT РЅР°РІСЃРµРіРґР°)
 // ------------------------------------------------------------
 
 // Expand root (or any node keyed by rootPos) exactly once for training-selfplay.
 // IMPORTANT:
-//  - does NOT apply Dirichlet noise (p.isRoot = false)
+//  - does NOT apply Dirichlet noise in permanent expansion
 //  - marks GPU inference as "in flight" so trainer yields (InferInFlightGuard)
 //  - protects TensorRT with g_trtMutex
 static void ensureExpandedTrain(MCTSTable& T,
+    BackendBinding backend,
     const Position& rootPos,
     const std::array<uint64_t, 4>& path,
     const std::array<int, 64>& mask) {
@@ -5541,15 +6203,11 @@ static void ensureExpandedTrain(MCTSTable& T,
         return;
     }
 
-    // Generate legal moves for this position (note: genLegal mutates Position)
     MoveList ml;
     int term = 0;
     Position tmp = rootPos;
 
-    genLegal(tmp,
-        path,
-        mask,
-        ml, term);
+    genLegal(tmp, path, mask, ml, term);
 
     if (term) {
         root->key = rootPos.key;
@@ -5565,7 +6223,6 @@ static void ensureExpandedTrain(MCTSTable& T,
     }
 
     if (ml.n == 0) {
-        // Chance node (dice roll)
         publishReady(root, rootPos.key, 0, 0, 0, 1);
         return;
     }
@@ -5575,47 +6232,46 @@ static void ensureExpandedTrain(MCTSTable& T,
     p.pos = rootPos;
     p.ml = ml;
     p.trace.reset();
-    p.isRoot = false; // IMPORTANT: no Dirichlet noise in permanent expansion
+    fillPendingPolicyIdx(p);
 
     float v = 0.5f;
 
 #if AI_HAVE_CUDA_KERNELS
-    // Gathered-logits path
-    {
-        bool ok = false;
-        {
-            InferInFlightGuard ig;             // trainer yields while TRT is running
-            std::lock_guard<std::mutex> lk(g_trtMutex);
-            ok = g_trt.inferBatchGather(&p, 1);
-        }
-
-        v = ok ? g_trt.valueHost(0) : 0.5f;
-
-        if (ok) {
-            const float* logits = g_trt.gatherLogitsHostPtr(0);
-            expandLeafWithGatheredLogits(T, p, v, logits);
-            return;
-        }
-    }
-
-    // If TRT failed: expand with neutral logits (all zeros)
-    {
-        std::vector<float> z((size_t)AI_MAX_MOVES, 0.0f);
-        expandLeafWithGatheredLogits(T, p, v, z.data());
-    }
-#else
-    // Full-policy path (no custom kernels)
-    std::vector<float> pol((size_t)POLICY_SIZE, 0.0f);
+    std::array<float, AI_MAX_MOVES> logitsLocal{};
     bool ok = false;
+
     {
         InferInFlightGuard ig;
-        std::lock_guard<std::mutex> lk(g_trtMutex);
-        ok = g_trt.inferBatch(&p.pos, 1, &v, pol.data());
+        std::lock_guard<std::mutex> lk(backend.mtx);
+
+        ok = backend.trt.inferBatchGather(&p, 1);
+        if (ok) {
+            backend.trt.copyValuesTo(&v, 1);
+            backend.trt.copyGatherLogitsTo(logitsLocal.data(), 1);
+        }
     }
+
+    if (!ok) {
+        v = 0.5f;
+        logitsLocal.fill(0.0f);
+    }
+
+    expandLeafWithGatheredLogits(T, p, v, logitsLocal.data());
+#else
+    std::vector<float> pol((size_t)POLICY_SIZE, 0.0f);
+    bool ok = false;
+
+    {
+        InferInFlightGuard ig;
+        std::lock_guard<std::mutex> lk(backend.mtx);
+        ok = backend.trt.inferBatch(&p.pos, 1, &v, pol.data());
+    }
+
     if (!ok) {
         v = 0.5f;
         std::fill(pol.begin(), pol.end(), 0.0f);
     }
+
     expandLeafWithOutputs(T, p, v, pol.data());
 #endif
 }
@@ -5624,7 +6280,7 @@ static void collectRootMoves(MCTSTable& T,
     const Position& rootPos,
     float& outQSideToMove,
     std::vector<moveState>& outMoves) {
-    TTNode* root = T.getNode(rootPos.key);
+    TTNode* root = T.findNodeNoInsert(rootPos.key);
     if (!root) { outQSideToMove = 0.5f; outMoves.clear(); return; }
 
     outQSideToMove = nodeQ(*root);
@@ -5641,9 +6297,9 @@ static void collectRootMoves(MCTSTable& T,
         uint32_t v = e.visits.load(std::memory_order_relaxed);
 
         float ev = -1.0f;
-        if (v) ev = clamp01(e.sum() / (float)v);
+        if (v) ev = clamp01((float)(e.sum() / (double)v));
 
-        outMoves.push_back(moveState{ e.move, ev, (int)v });
+        outMoves.push_back(moveState{ e.move, ev, (int)v, e.prior() });
     }
 
     std::sort(outMoves.begin(), outMoves.end(),
@@ -5658,14 +6314,14 @@ static int pickMoveFromVisits(const std::vector<moveState>& mv, float temperatur
 
     if (!(temperature > 1e-6f)) return mv[0].move;
 
+    const double invTemp = 1.0 / (double)temperature;
+
     double sum = 0.0;
-    std::vector<double> w(mv.size());
     for (size_t i = 0; i < mv.size(); ++i) {
-        double v = (double)std::max(0, mv[i].visits);
-        double ww = std::pow(v + 1e-9, 1.0 / (double)temperature);
-        w[i] = ww;
-        sum += ww;
+        const double v = (double)std::max(0, mv[i].visits);
+        sum += std::pow(v + 1e-9, invTemp);
     }
+
     if (!(sum > 0.0)) return mv[0].move;
 
     std::uniform_real_distribution<double> d(0.0, sum);
@@ -5673,13 +6329,15 @@ static int pickMoveFromVisits(const std::vector<moveState>& mv, float temperatur
 
     double acc = 0.0;
     for (size_t i = 0; i < mv.size(); ++i) {
-        acc += w[i];
+        const double v = (double)std::max(0, mv[i].visits);
+        acc += std::pow(v + 1e-9, invTemp);
         if (r <= acc) return mv[i].move;
     }
+
     return mv.back().move;
 }
 
-// policy target — SPARSE (idx/prob), idx в CHW: k=pl*64+sq
+// policy target вЂ” SPARSE (idx/prob), idx РІ CHW: k=pl*64+sq
 static void buildSparsePolicyTargetCHW(const Position& pos,
     const std::vector<moveState>& mv,
     uint16_t& outN,
@@ -5714,10 +6372,11 @@ static void buildSparsePolicyTargetCHW(const Position& pos,
     }
 }
 
-// временно (на один search) зашумливаем root priors и потом откатываем назад
+// РІСЂРµРјРµРЅРЅРѕ (РЅР° РѕРґРёРЅ search) Р·Р°С€СѓРјР»РёРІР°РµРј root priors Рё РїРѕС‚РѕРј РѕС‚РєР°С‚С‹РІР°РµРј РЅР°Р·Р°Рґ
 static void runFixedSims(MCTSTable& T,
     SearchPool& pool,
     InferenceServerTrain& srv,
+    BackendBinding backend,
     const Position& rootPos,
     const std::array<uint64_t, 4>& path,
     const std::array<int, 64>& mask,
@@ -5725,53 +6384,18 @@ static void runFixedSims(MCTSTable& T,
     bool rootNoise) {
     if (T.abort.load(std::memory_order_relaxed)) return;
 
-    ensureExpandedTrain(T, rootPos, path, mask);
+    ensureExpandedTrain(T, backend, rootPos, path, mask);
     if (T.abort.load(std::memory_order_relaxed)) return;
 
-    TTNode* root = T.getNode(rootPos.key);
-    TTEdge* e0 = nullptr;
-    int nEdges = 0;
-
-    // Сохраняем root priors в сыром квантованном виде, чтобы потом
-    // восстановить их без лишней ошибки округления.
-    std::vector<uint16_t> savedPriorQ;
-
-    if (rootNoise &&
-        root &&
-        root->expanded.load(std::memory_order_acquire) == 1 &&
-        root->edgeCount >= 2) {
-        e0 = T.edgePtr(root->edgeBegin);
-        nEdges = (int)root->edgeCount;
-
-        savedPriorQ.resize((size_t)nEdges);
-        std::vector<float> noisy((size_t)nEdges);
-
-        for (int i = 0; i < nEdges; ++i) {
-            savedPriorQ[(size_t)i] = e0[i].priorRaw();
-            noisy[(size_t)i] = e0[i].prior();
-        }
-
-        applyRootDirichletNoise(noisy);
-
-        for (int i = 0; i < nEdges; ++i) {
-            e0[i].setPrior(noisy[(size_t)i]);
-        }
-    }
+    RootNoiseGuard rootNoiseGuard(T, rootPos, rootNoise);
 
     pool.runSims(T, srv, rootPos, path, mask, sims);
 
     srv.waitIdle();
-
-    // Восстанавливаем исходные root priors.
-    if (!savedPriorQ.empty() && e0 && nEdges > 0) {
-        for (int i = 0; i < nEdges; ++i) {
-            e0[i].setPriorRaw(savedPriorQ[(size_t)i]);
-        }
-    }
 }
 
 // ------------------------------------------------------------
-// Self-play: переиспользуем один MCTSTable + один InferenceServerTrain + SearchPool
+// Self-play: РїРµСЂРµРёСЃРїРѕР»СЊР·СѓРµРј РѕРґРёРЅ MCTSTable + РѕРґРёРЅ InferenceServerTrain + SearchPool
 // ------------------------------------------------------------
 
 static AI_FORCEINLINE void resetMCTSTableForNewGame(MCTSTable& T) {
@@ -5781,11 +6405,15 @@ static AI_FORCEINLINE void resetMCTSTableForNewGame(MCTSTable& T) {
 
 struct SelfPlayContext {
     MCTSTable T;
+    BackendBinding backend;
     InferenceServerTrain server;
     SearchPool pool;
 
-    explicit SelfPlayContext(size_t nodePow2, size_t edgeCap)
-        : T(nodePow2, edgeCap), server(T) {
+    explicit SelfPlayContext(size_t nodePow2, size_t edgeCap,
+        TrtRunner& trt, std::mutex& mtx)
+        : T(nodePow2, edgeCap)
+        , backend{ trt, mtx }
+        , server(T, backend) {
     }
 
     void start() {
@@ -5810,13 +6438,149 @@ struct SelfPlayContext {
     }
 };
 
+struct ArenaStats {
+    int curWins = 0;
+    int oldWins = 0;
+    int draws = 0;
+
+    double currentScore() const {
+        int n = curWins + oldWins + draws;
+        if (n <= 0) return 0.5;
+        return ((double)curWins + 0.5 * (double)draws) / (double)n;
+    }
+};
+
+static int playOneArenaGame(SelfPlayContext& curCtx,
+                            SelfPlayContext& oldCtx,
+                            const Position& startPos,
+                            const std::array<uint64_t, 4>& path,
+                            const std::array<int, 64>& mask,
+                            bool currentIsWhite,
+                            int simsPerPos,
+                            int maxPlies = 256) {
+    Position pos = startPos;
+
+    for (int ply = 0; ply < maxPlies; ++ply) {
+        MoveList ml;
+        int term = 0;
+        Position tmp = pos;
+        genLegal(tmp, path, mask, ml, term);
+
+        if (term) {
+            // winner = side-to-move
+            bool currentWon = ((pos.side == 0) == currentIsWhite);
+            return currentWon ? +1 : -1;
+        }
+
+        if (ml.n == 0) {
+            bool currentTurn = ((pos.side == 0) == currentIsWhite);
+            TTNode* n = currentTurn
+                ? curCtx.T.findNodeNoInsert(pos.key)
+                : oldCtx.T.findNodeNoInsert(pos.key);
+            makeRandom(pos, n);
+            continue;
+        }
+
+        bool currentTurn = ((pos.side == 0) == currentIsWhite);
+        SelfPlayContext& ctx = currentTurn ? curCtx : oldCtx;
+
+        std::vector<moveState> moves;
+        float q = 0.5f;
+
+        runFixedSims(ctx.T, ctx.pool, ctx.server, ctx.backend,
+            pos, path, mask, simsPerPos, /*rootNoise=*/false);
+
+        if (ctx.T.abort.load(std::memory_order_relaxed)) {
+            return 0;
+        }
+
+        collectRootMoves(ctx.T, pos, q, moves);
+
+        if (moves.empty()) return 0;
+
+        int mv = moves[0].move; // temperature=0, best by visits
+        if (!mv) return 0;
+
+        makeMove(pos, mask, mv);
+    }
+
+    return 0; // draw by maxPlies
+}
+
+static ArenaStats runArenaMatch(int games, int simsPerPos) {
+    ArenaStats st;
+
+    SelfPlayContext curCtx((1u << 19), (1u << 23), g_trt, g_trtMutex);
+    SelfPlayContext oldCtx((1u << 19), (1u << 23), g_trt_old, g_trtOldMutex);
+
+    curCtx.start();
+    oldCtx.start();
+
+    const int pairs = games / 2;
+
+    for (int g = 0; g < pairs; ++g) {
+        Position startPos;
+        std::array<uint64_t, 4> path;
+        std::array<int, 64> mask;
+        chess960(startPos, path, mask);
+
+        // game 1: current = white
+        curCtx.resetForNewGame();
+        oldCtx.resetForNewGame();
+        {
+            int r = playOneArenaGame(curCtx, oldCtx, startPos, path, mask, true, simsPerPos);
+            if (r > 0) ++st.curWins;
+            else if (r < 0) ++st.oldWins;
+            else ++st.draws;
+        }
+
+        // game 2: current = black
+        curCtx.resetForNewGame();
+        oldCtx.resetForNewGame();
+        {
+            int r = playOneArenaGame(curCtx, oldCtx, startPos, path, mask, false, simsPerPos);
+            if (r > 0) ++st.curWins;
+            else if (r < 0) ++st.oldWins;
+            else ++st.draws;
+        }
+
+        if (((g + 1) % 50) == 0) {
+            std::cout << "[arena] pair " << (g + 1) << "/" << pairs
+                      << "  W/D/L = "
+                      << st.curWins << "/" << st.draws << "/" << st.oldWins
+                      << "  score=" << st.currentScore() << "\n";
+        }
+    }
+
+    if (games & 1) {
+        Position startPos;
+        std::array<uint64_t, 4> path;
+        std::array<int, 64> mask;
+        chess960(startPos, path, mask);
+
+        curCtx.resetForNewGame();
+        oldCtx.resetForNewGame();
+
+        int r = playOneArenaGame(curCtx, oldCtx, startPos, path, mask, true, simsPerPos);
+        if (r > 0) ++st.curWins;
+        else if (r < 0) ++st.oldWins;
+        else ++st.draws;
+    }
+
+    curCtx.stop();
+    oldCtx.stop();
+
+    return st;
+}
+
 static void selfPlayOneGame960(SelfPlayContext& sp,
     ReplayBuffer& rb,
     int simsPerPos,
     int maxPlies,
     bool addRootNoise,
     int& outPlyCount,
-    bool& outTerminated) {
+    bool& outTerminated,
+    int& outSamplesAdded) {
     sp.resetForNewGame();
 
     Position pos;
@@ -5840,6 +6604,7 @@ static void selfPlayOneGame960(SelfPlayContext& sp,
     sideAtSample.reserve((size_t)maxPlies);
 
     outTerminated = false;
+    outSamplesAdded = 0;
 
     for (int ply = 0; ply < maxPlies; ++ply) {
         // Early stop if table overflow
@@ -5856,14 +6621,15 @@ static void selfPlayOneGame960(SelfPlayContext& sp,
 
         bool rootNoiseHere = addRootNoise && (d < 20);
 
-        runFixedSims(sp.T, sp.pool, sp.server, pos, path, mask, simsPerPos, rootNoiseHere);
+        runFixedSims(sp.T, sp.pool, sp.server, sp.backend,
+            pos, path, mask, simsPerPos, rootNoiseHere);
         if (sp.T.abort.load(std::memory_order_relaxed)) break;
 
         collectRootMoves(sp.T, pos, sample.q, moves);
 
         if (moves.empty()) break;
 
-        positionToNNInput(pos, sample.x);
+        sample.pos = pos;
         buildSparsePolicyTargetCHW(pos, moves, sample.nPi, sample.piIdx, sample.piProb);
 
         game.push_back(sample);
@@ -5881,22 +6647,24 @@ static void selfPlayOneGame960(SelfPlayContext& sp,
 
     float zWhite = 0.5f;
     if (outTerminated) {
-        // term означает "у side-to-move есть немедленная победа (взятие короля)".
+        // term РѕР·РЅР°С‡Р°РµС‚ "Сѓ side-to-move РµСЃС‚СЊ РЅРµРјРµРґР»РµРЅРЅР°СЏ РїРѕР±РµРґР° (РІР·СЏС‚РёРµ РєРѕСЂРѕР»СЏ)".
         // winner = side-to-move => whiteWin = 1 - pos.side
         zWhite = 1.0f - pos.side;
     }
     else return;
 
-    for (size_t i = 0; i < game.size(); ++i) {
-        int stm = sideAtSample[i];
-        float zi = (stm == 0) ? zWhite : (1.0f - zWhite);
-        game[i].z = 0.5f * zi + 0.5f * game[i].q;
-        rb.push(game[i]);
-    }
+for (size_t i = 0; i < game.size(); ++i) {
+    int stm = sideAtSample[i];
+    float zi = (stm == 0) ? zWhite : (1.0f - zWhite);
+    game[i].z = 0.5f * zi + 0.5f * game[i].q;
+}
+
+rb.pushMany(game);
+outSamplesAdded += (int)game.size();
 }
 
 // ------------------------------------------------------------
-// Trainer thread: sparse policy loss через gather(logp, idx)
+// Trainer thread: sparse policy loss С‡РµСЂРµР· gather(logp, idx)
 // + pin_memory/non_blocking, + grad clipping, + NaN guard
 // ------------------------------------------------------------
 
@@ -5905,15 +6673,200 @@ struct TrainerState {
     std::atomic<uint64_t> steps{ 0 };
     std::atomic<float> lastLoss{ 0.0f };
 };
+struct TensorPairRef {
+    torch::Tensor dst;
+    torch::Tensor src;
+};
+
+struct ModulePairCache {
+    std::vector<TensorPairRef> params;
+    std::vector<TensorPairRef> buffers;
+
+    void clear() {
+        params.clear();
+        buffers.clear();
+    }
+
+    bool empty() const {
+        return params.empty() && buffers.empty();
+    }
+};
+
+static ModulePairCache buildModulePairCache(Net& dst, Net& src,
+                                             const char* tag = "ModulePairCache") {
+    ModulePairCache cache;
+
+    auto srcParams = src->named_parameters(true);
+    auto dstParams = dst->named_parameters(true);
+
+    cache.params.reserve(srcParams.size());
+    for (const auto& kv : srcParams) {
+        auto* d = dstParams.find(kv.key());
+        if (!d) {
+            std::ostringstream oss;
+            oss << "[" << tag << "] missing dst parameter: " << kv.key();
+            throw std::runtime_error(oss.str());
+        }
+        cache.params.push_back(TensorPairRef{ *d, kv.value() });
+    }
+
+    auto srcBufs = src->named_buffers(true);
+    auto dstBufs = dst->named_buffers(true);
+
+    cache.buffers.reserve(srcBufs.size());
+    for (const auto& kv : srcBufs) {
+        auto* d = dstBufs.find(kv.key());
+        if (!d) {
+            std::ostringstream oss;
+            oss << "[" << tag << "] missing dst buffer: " << kv.key();
+            throw std::runtime_error(oss.str());
+        }
+        cache.buffers.push_back(TensorPairRef{ *d, kv.value() });
+    }
+
+    return cache;
+}
+
+static void emaUpdateCached(ModulePairCache& cache, double decay) {
+    torch::NoGradGuard ng;
+
+    for (auto& p : cache.params) {
+        auto s = p.src.detach().to(
+            p.dst.device(),
+            p.dst.scalar_type(),
+            /*non_blocking=*/false,
+            /*copy=*/false
+        );
+
+        p.dst.mul_(decay);
+        p.dst.add_(s, 1.0 - decay);
+    }
+
+    for (auto& b : cache.buffers) {
+        b.dst.copy_(b.src.detach().to(
+            b.dst.device(),
+            b.dst.scalar_type(),
+            /*non_blocking=*/false,
+            /*copy=*/false
+        ));
+    }
+}
+
+static void copyNetStateCached(ModulePairCache& cache) {
+    torch::NoGradGuard ng;
+
+    for (auto& p : cache.params) {
+        p.dst.copy_(p.src.detach().to(
+            p.dst.device(),
+            p.dst.scalar_type(),
+            /*non_blocking=*/false,
+            /*copy=*/false
+        ));
+    }
+
+    for (auto& b : cache.buffers) {
+        b.dst.copy_(b.src.detach().to(
+            b.dst.device(),
+            b.dst.scalar_type(),
+            /*non_blocking=*/false,
+            /*copy=*/false
+        ));
+    }
+}
+struct CudaAutocastGuard {
+    bool enabled = false;
+    bool prevEnabled = false;
+    bool prevCacheEnabled = false;
+    at::ScalarType prevDtype = at::kFloat;
+
+    explicit CudaAutocastGuard(bool en,
+                               at::ScalarType dtype = at::kHalf,
+                               bool cacheEnabled = true)
+        : enabled(en) {
+        if (!enabled) return;
+
+        prevEnabled = at::autocast::is_autocast_enabled(at::kCUDA);
+        prevCacheEnabled = at::autocast::is_autocast_cache_enabled();
+        prevDtype = at::autocast::get_autocast_dtype(at::kCUDA);
+
+        at::autocast::increment_nesting();
+        at::autocast::set_autocast_enabled(at::kCUDA, true);
+        at::autocast::set_autocast_dtype(at::kCUDA, dtype);
+        at::autocast::set_autocast_cache_enabled(cacheEnabled);
+    }
+
+    ~CudaAutocastGuard() {
+        if (!enabled) return;
+
+        at::autocast::set_autocast_enabled(at::kCUDA, prevEnabled);
+        at::autocast::set_autocast_dtype(at::kCUDA, prevDtype);
+        at::autocast::set_autocast_cache_enabled(prevCacheEnabled);
+
+        if (at::autocast::decrement_nesting() == 0) {
+            at::autocast::clear_cache();
+        }
+    }
+};
+
+struct SimpleGradScaler {
+    bool enabled = false;
+
+    float scale = 65536.0f;
+    float growthFactor = 2.0f;
+    float backoffFactor = 0.5f;
+    int growthInterval = 2000;
+    int growthTracker = 0;
+    float minScale = 1.0f;
+
+    torch::Tensor scaleLoss(const torch::Tensor& loss) const {
+        if (!enabled) return loss;
+        return loss * scale;
+    }
+
+    void unscale(const std::vector<torch::Tensor>& params) {
+        if (!enabled) return;
+
+        const float invScale = 1.0f / scale;
+        for (const auto& p : params) {
+            auto g = p.grad();
+            if (!g.defined()) continue;
+            g.mul_(invScale);
+        }
+    }
+
+    void update(bool gradsFinite) {
+        if (!enabled) return;
+
+        if (!gradsFinite) {
+            scale = std::max(minScale, scale * backoffFactor);
+            growthTracker = 0;
+            return;
+        }
+
+        ++growthTracker;
+        if (growthTracker >= growthInterval) {
+            scale *= growthFactor;
+            growthTracker = 0;
+        }
+    }
+};
 
 struct Trainer {
     torch::Device device{ torch::kCPU };
     bool useCuda = false;
 
+    bool useAmp = false;
+    at::ScalarType ampDtype = at::kHalf;
+    SimpleGradScaler scaler;
+
+    uint64_t ampSkippedSteps = 0;
+    float lastAmpScale = 1.0f;
+
     // Hyperparams
     double initial_lr = 2e-4;
     double current_lr = initial_lr;
     double wd = 1e-4;
+    double ema_decay = 0.999;
 // restart-warmup
 uint64_t resumeStartStep = 0;              // step at process start / resume
 uint64_t warmupStepsAfterRestart = 2000;   // tune: 1000..5000
@@ -5931,17 +6884,24 @@ double   warmupStartFactor = 0.10;         // 0.05..0.25 usually good
     // Optimizer
     std::unique_ptr<torch::optim::AdamW> opt;
 
+    // Cached EMA dst/src tensor pairs
+    ModulePairCache emaCache;
+
     // CPU staging (pinned if CUDA)
-    torch::Tensor xCPU, idxCPU, probCPU, zCPU;
+    torch::Tensor xCPU, idxCPU, probCPU, zCPU, nPiCPU;
 
     // Device tensors (allocated once)
-    torch::Tensor xDev, idxDev, probDev, zDev;
+    torch::Tensor xDev, idxDev, probDev, zDev, nPiDev;
+
+    // [1, AI_MAX_MOVES] => 0..254 on the active device
+    torch::Tensor slotIdsDev;
 
     // State
     uint64_t steps = 0;
     float lastLoss = 0.0f;
-    float lastLossP = 0.0f; // <--- ДОБАВИТЬ ЭТО
-    float lastLossV = 0.0f; // <--- ДОБАВИТЬ ЭТО
+    float lastLossP = 0.0f; // <--- Р”РћР‘РђР’РРўР¬ Р­РўРћ
+    float lastLossV = 0.0f; // <--- Р”РћР‘РђР’РРўР¬ Р­РўРћ
+    float lastGradNorm = 0.0f;
 double computeBaseLRFromSteps(uint64_t s) const {
     double lr = initial_lr;
     for (uint64_t ms : lr_milestones) {
@@ -5975,172 +6935,395 @@ double computeRestartWarmupMultiplier(uint64_t s) const {
                   << ", step=" << steps << ")\n";
     }
 }
+static AI_FORCEINLINE bool endsWithStr(const std::string& s, const char* suf) {
+    const size_t n = std::strlen(suf);
+    return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
+}
+void init(Net& model, Net& emaModel) {
+    try { torch::set_num_threads(1); }
+    catch (...) {}
+    try { torch::set_num_interop_threads(1); }
+    catch (...) {}
 
-    void init(Net& model) {
-        // Stop libtorch from stealing CPU threads
-        try { torch::set_num_threads(1); }
-        catch (...) {}
-        try { torch::set_num_interop_threads(1); }
-        catch (...) {}
+    device = torch::Device(torch::kCPU);
+    useCuda = false;
 
+    try {
+        if (torch::cuda::is_available() && torch::cuda::device_count() > 0) {
+            device = torch::Device(torch::kCUDA, 0);
+            useCuda = true;
+        }
+    }
+    catch (...) {
         device = torch::Device(torch::kCPU);
         useCuda = false;
+    }
 
-        try {
-            if (torch::cuda::is_available() && torch::cuda::device_count() > 0) {
-                device = torch::Device(torch::kCUDA, 0);
-                useCuda = true;
+    useAmp = useCuda;          // AMP only on CUDA
+    ampDtype = at::kHalf;      // fp16 autocast on CUDA
+
+    scaler.enabled = useAmp;
+    scaler.scale = 65536.0f;
+    scaler.growthFactor = 2.0f;
+    scaler.backoffFactor = 0.5f;
+    scaler.growthInterval = 2000;
+    scaler.growthTracker = 0;
+    scaler.minScale = 1.0f;
+    lastAmpScale = scaler.scale;
+
+    std::cerr << "[Trainer] device=" << (useCuda ? "cuda" : "cpu")
+              << " amp=" << (useAmp ? "fp16" : "off") << "\n";
+
+    {
+        std::lock_guard<std::mutex> lk(g_modelMutex);
+        model->to(device);
+        model->train();
+
+        emaModel->to(device);
+        emaModel->eval();
+
+        // Build EMA cache AFTER final device placement.
+        emaCache = buildModulePairCache(emaModel, model, "emaCache");
+    }
+
+    // AdamW with no weight decay on BN / bias
+    std::vector<torch::Tensor> decayParams;
+    std::vector<torch::Tensor> noDecayParams;
+
+    {
+        auto named = model->named_parameters(/*recurse=*/true);
+        for (const auto& kv : named) {
+            const std::string name = kv.key();
+            const torch::Tensor& p = kv.value();
+
+            if (!p.defined() || !p.requires_grad()) continue;
+
+            const bool isBias = endsWithStr(name, ".bias");
+            const bool is1D = p.dim() <= 1;
+
+            if (isBias || is1D) noDecayParams.push_back(p);
+            else                decayParams.push_back(p);
+        }
+    }
+
+    const size_t decayCount = decayParams.size();
+    const size_t noDecayCount = noDecayParams.size();
+
+    if (decayParams.empty() && noDecayParams.empty()) {
+        throw std::runtime_error("Trainer::init(): model has no trainable parameters");
+    }
+
+    // Base optimizer group:
+    // prefer decayParams as the main group; if empty, bootstrap from noDecayParams.
+    if (!decayParams.empty()) {
+        opt = std::make_unique<torch::optim::AdamW>(
+            decayParams,
+            torch::optim::AdamWOptions(initial_lr).weight_decay(wd)
+        );
+    } else {
+        opt = std::make_unique<torch::optim::AdamW>(
+            noDecayParams,
+            torch::optim::AdamWOptions(initial_lr).weight_decay(0.0)
+        );
+        noDecayParams.clear(); // already used as base group
+    }
+
+    // Add no-decay group only if it wasn't already consumed above.
+    if (!noDecayParams.empty()) {
+        auto opts = torch::optim::AdamWOptions(initial_lr);
+        opts.weight_decay(0.0);
+
+        torch::optim::OptimizerParamGroup g(
+            noDecayParams,
+            std::make_unique<torch::optim::AdamWOptions>(opts)
+        );
+
+        opt->add_param_group(std::move(g));
+    }
+
+    std::cerr << "[Trainer] AdamW groups: decay=" << decayCount
+              << " no_decay=" << noDecayCount << "\n";
+
+    resumeStartStep = steps;
+    current_lr = -1.0;
+    updateLR(true);
+
+    auto makeCPU = [&](torch::IntArrayRef sizes, torch::ScalarType t) {
+        auto ten = torch::empty(sizes, torch::TensorOptions().dtype(t).device(torch::kCPU));
+        if (useCuda) ten = ten.pin_memory();
+        return ten;
+    };
+
+    xCPU   = makeCPU({ B, NN_SQ_PLANES, 8, 8 }, torch::kFloat32);
+    idxCPU = makeCPU({ B, AI_MAX_MOVES },       torch::kInt64);
+    probCPU= makeCPU({ B, AI_MAX_MOVES },       torch::kFloat32);
+    zCPU   = makeCPU({ B, 1 },                  torch::kFloat32);
+    nPiCPU = makeCPU({ B },                     torch::kInt64);
+
+    if (useCuda) {
+        xDev   = torch::empty({ B, NN_SQ_PLANES, 8, 8 }, torch::TensorOptions().dtype(torch::kFloat32).device(device));
+        idxDev = torch::empty({ B, AI_MAX_MOVES },       torch::TensorOptions().dtype(torch::kInt64).device(device));
+        probDev= torch::empty({ B, AI_MAX_MOVES },       torch::TensorOptions().dtype(torch::kFloat32).device(device));
+        zDev   = torch::empty({ B, 1 },                  torch::TensorOptions().dtype(torch::kFloat32).device(device));
+        nPiDev = torch::empty({ B },                     torch::TensorOptions().dtype(torch::kInt64).device(device));
+    }
+    else {
+        xDev   = xCPU;
+        idxDev = idxCPU;
+        probDev= probCPU;
+        zDev   = zCPU;
+        nPiDev = nPiCPU;
+    }
+
+    // slot ids for masking legal part: [1, 255] = 0..254
+    slotIdsDev = torch::arange(
+        AI_MAX_MOVES,
+        torch::TensorOptions().dtype(torch::kInt64).device(device)
+    ).view({ 1, AI_MAX_MOVES });
+}
+
+int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
+    int budgetMs,
+    int maxStepsHard,
+    int warmupBatches = 1000) {
+    if (budgetMs <= 0 || maxStepsHard <= 0) return 0;
+
+    const size_t need = (size_t)B * (size_t)std::max(1, warmupBatches);
+    if (rb.currentSize() < need) return 0;
+
+    const auto tEnd = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
+
+    std::vector<TrainSample> batch;
+    batch.reserve((size_t)B);
+
+    int done = 0;
+
+    int skippedConsecutive = 0;
+    int skippedTotal = 0;
+    static constexpr int MAX_SKIPPED_CONSECUTIVE = 32;
+    static constexpr int MAX_SKIPPED_TOTAL = 256;
+
+    for (int it = 0; it < maxStepsHard; ++it) {
+        if (std::chrono::steady_clock::now() >= tEnd) break;
+        if (!rb.sampleBatch(batch, B, rng)) break;
+
+        // ---- Fill CPU staging ----
+        float*   xp = xCPU.data_ptr<float>();
+        int64_t* ip = idxCPU.data_ptr<int64_t>();
+        float*   pp = probCPU.data_ptr<float>();
+        float*   zp = zCPU.data_ptr<float>();
+        int64_t* np = nPiCPU.data_ptr<int64_t>();
+
+        for (int i = 0; i < B; ++i) {
+            const TrainSample& s = batch[(size_t)i];
+
+            NNInput enc;
+            positionToNNInput(s.pos, enc);
+
+            std::memcpy(
+                xp + (size_t)i * (size_t)NN_INPUT_SIZE,
+                enc.data(),
+                (size_t)NN_INPUT_SIZE * sizeof(float)
+            );
+
+            np[(size_t)i] = (int64_t)s.nPi;
+
+            for (int j = 0; j < AI_MAX_MOVES; ++j) {
+                ip[(size_t)i * (size_t)AI_MAX_MOVES + (size_t)j] = (int64_t)s.piIdx[(size_t)j];
+                pp[(size_t)i * (size_t)AI_MAX_MOVES + (size_t)j] = s.piProb[(size_t)j];
             }
+
+            zp[(size_t)i] = s.z;
         }
-        catch (...) {
-            device = torch::Device(torch::kCPU);
-            useCuda = false;
+
+        // ---- H2D (no realloc) ----
+        if (useCuda) {
+            xDev.copy_(xCPU,    /*non_blocking=*/true);
+            idxDev.copy_(idxCPU, /*non_blocking=*/true);
+            probDev.copy_(probCPU, /*non_blocking=*/true);
+            zDev.copy_(zCPU,    /*non_blocking=*/true);
+            nPiDev.copy_(nPiCPU, /*non_blocking=*/true);
         }
+
+        float lossScalar = 0.0f;
+        float lossPScalar = 0.0f;
+        float lossVScalar = 0.0f;
+        float gradNormScalar = 0.0f;
+        bool didStep = false;
 
         {
             std::lock_guard<std::mutex> lk(g_modelMutex);
-            model->to(device);
-            model->train();
-        }
 
-        opt = std::make_unique<torch::optim::AdamW>(
-            model->parameters(),
-            torch::optim::AdamWOptions(initial_lr).weight_decay(wd)
-        );
-resumeStartStep = steps;   // important for restart-warmup
-current_lr = -1.0;        // force apply
-updateLR(true);
-        auto makeCPU = [&](torch::IntArrayRef sizes, torch::ScalarType t) {
-            auto ten = torch::empty(sizes, torch::TensorOptions().dtype(t).device(torch::kCPU));
-            if (useCuda) ten = ten.pin_memory();
-            return ten;
-            };
+            opt->zero_grad();
 
-        xCPU = makeCPU({ B, NN_SQ_PLANES, 8, 8 }, torch::kFloat32);
-        idxCPU = makeCPU({ B, AI_MAX_MOVES }, torch::kInt64);
-        probCPU = makeCPU({ B, AI_MAX_MOVES }, torch::kFloat32);
-        zCPU = makeCPU({ B, 1 }, torch::kFloat32);
+auto runForwardLoss = [&]() {
+    auto out = model->forward(xDev);
+    auto pol = out.first;         // [B,73,8,8]
+    auto valLogits = out.second;  // [B,1]
 
-        if (useCuda) {
-            xDev = torch::empty({ B, NN_SQ_PLANES, 8, 8 }, torch::TensorOptions().dtype(torch::kFloat32).device(device));
-            idxDev = torch::empty({ B, AI_MAX_MOVES }, torch::TensorOptions().dtype(torch::kInt64).device(device));
-            probDev = torch::empty({ B, AI_MAX_MOVES }, torch::TensorOptions().dtype(torch::kFloat32).device(device));
-            zDev = torch::empty({ B, 1 }, torch::TensorOptions().dtype(torch::kFloat32).device(device));
-        }
-        else {
-            // CPU mode: alias
-            xDev = xCPU; idxDev = idxCPU; probDev = probCPU; zDev = zCPU;
-        }
+    // =========================================================
+    // POLICY LOSS over LEGAL MOVES ONLY (SAFE VERSION)
+    // =========================================================
+
+    // Always compute policy loss in FP32, even under AMP.
+    // This avoids FP16 saturation to -Inf on masked logits.
+    auto polFlat = pol.flatten(1).to(torch::kFloat32); // [B, POLICY_SIZE]
+
+    // Clamp nPi to valid range just in case.
+    auto nPiClamped = nPiDev.clamp(0, AI_MAX_MOVES);   // [B], int64
+
+    // validMask[b, j] == true iff slot j is a real legal move for sample b
+    auto validMask = slotIdsDev.lt(nPiClamped.view({ -1, 1 })); // [B, AI_MAX_MOVES], bool
+
+    // Safety for gather:
+    // padded / corrupted indices must not crash gather.
+    auto idxSafe = idxDev.clamp(0, POLICY_SIZE - 1);   // [B, AI_MAX_MOVES], int64
+
+    auto gathered = polFlat.gather(1, idxSafe);        // [B, AI_MAX_MOVES], FP32
+
+    // IMPORTANT:
+    // use a large finite negative number, not -inf.
+    // Since gathered is FP32 here, -1e9 is perfectly safe.
+    constexpr float kMaskedLogit = -1e9f;
+    auto maskedLogits = gathered.masked_fill(torch::logical_not(validMask), kMaskedLogit);
+
+    // log-softmax over move slots
+    auto logp_valid = torch::log_softmax(maskedLogits, 1); // [B, AI_MAX_MOVES], FP32
+
+    // Zero out invalid target slots explicitly.
+    // This prevents any chance of 0 * (-inf) style NaNs if code changes later.
+    auto tgtProb = probDev.to(torch::kFloat32)
+        .masked_fill(torch::logical_not(validMask), 0.0f); // [B, AI_MAX_MOVES]
+
+    // Per-row policy CE
+    auto rowLossP = -(tgtProb * logp_valid).sum(1); // [B]
+
+    // Ignore rows with nPi == 0 instead of letting them distort the mean.
+    auto rowHasTarget = nPiClamped.gt(0).to(torch::kFloat32); // [B]
+    auto denomP = rowHasTarget.sum().clamp_min(1.0f);
+
+    auto lossP = (rowLossP * rowHasTarget).sum() / denomP;
+
+    // =========================================================
+    // VALUE LOSS (also in FP32)
+    // =========================================================
+    auto lossV = torch::binary_cross_entropy_with_logits(
+        valLogits.to(torch::kFloat32),
+        zDev.to(torch::kFloat32)
+    );
+
+    auto loss = lossP + lossV;
+    return std::make_tuple(loss, lossP, lossV);
+};
+
+            torch::Tensor loss, lossP, lossV;
+
+    if (useAmp) {
+                CudaAutocastGuard ampGuard(true, ampDtype);
+                std::tie(loss, lossP, lossV) = runForwardLoss();
+            } else {
+                std::tie(loss, lossP, lossV) = runForwardLoss();
+            }
+
+            const bool finiteLoss = torch::isfinite(loss).all().item<bool>();
+            if (finiteLoss) {
+if (useAmp) {
+    scaler.scaleLoss(loss).backward();
+
+    scaler.unscale(model->parameters());
+
+    double currentGradNorm =
+        torch::nn::utils::clip_grad_norm_(model->parameters(), 1.0);
+
+    bool gradsFinite = std::isfinite(currentGradNorm);
+
+    if (gradsFinite) {
+        opt->step();
+        emaUpdateCached(emaCache, ema_decay);
+
+        lossScalar = loss.item<float>();
+        lossPScalar = lossP.item<float>();
+        lossVScalar = lossV.item<float>();
+        gradNormScalar = static_cast<float>(currentGradNorm);
+        didStep = true;
     }
 
-    // Train block with a strict time budget.
-    int trainBlockBudgetMs(ReplayBuffer& rb, Net& model,
-        int budgetMs,
-        int maxStepsHard,
-    int warmupBatches = 1000) {
-        if (budgetMs <= 0 || maxStepsHard <= 0) return 0;
+    scaler.update(gradsFinite);
+    lastAmpScale = scaler.scale;
 
-        const size_t need = (size_t)B * (size_t)std::max(1, warmupBatches);
-        if (rb.currentSize() < need) return 0;
-
-        const auto tEnd = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
-
-        std::vector<TrainSample> batch;
-        batch.reserve((size_t)B);
-
-        int done = 0;
-
-        // Distributions outside inner loops (micro-optimization + cleaner)
-        std::bernoulli_distribution coin(0.5);
-
-        for (int it = 0; it < maxStepsHard; ++it) {
-            if (std::chrono::steady_clock::now() >= tEnd) break;
-            if (!rb.sampleBatch(batch, B, rng)) break;
-
-            // ---- Fill CPU staging ----
-            float* xp = xCPU.data_ptr<float>();
-            int64_t* ip = idxCPU.data_ptr<int64_t>();
-            float* pp = probCPU.data_ptr<float>();
-            float* zp = zCPU.data_ptr<float>();
-
-            for (int i = 0; i < B; ++i) {
-                const TrainSample& s = batch[(size_t)i];
-
-                std::memcpy(xp + (size_t)i * (size_t)NN_INPUT_SIZE,
-                    s.x.data(),
-                    (size_t)NN_INPUT_SIZE * sizeof(float));
-
-                // sparse policy target packed into fixed 255 slots (rest are already 0 in samples)
-                for (int j = 0; j < AI_MAX_MOVES; ++j) {
-                    ip[(size_t)i * (size_t)AI_MAX_MOVES + (size_t)j] = (int64_t)s.piIdx[(size_t)j];
-                    pp[(size_t)i * (size_t)AI_MAX_MOVES + (size_t)j] = s.piProb[(size_t)j];
-                }
-
-                // zCPU is [B,1] contiguous, so zp[i] is fine
-                zp[(size_t)i] = s.z;
-            }
-
-
-            
-
-            // ---- H2D (no realloc) ----
-            if (useCuda) {
-                xDev.copy_(xCPU, /*non_blocking=*/true);
-                idxDev.copy_(idxCPU, /*non_blocking=*/true);
-                probDev.copy_(probCPU, /*non_blocking=*/true);
-                zDev.copy_(zCPU, /*non_blocking=*/true);
-            }
-
-            float lossScalar = 0.0f;
-            float lossPScalar = 0.0f; // <--- ДОБАВИТЬ
-            float lossVScalar = 0.0f; // <--- ДОБАВИТЬ
-            bool didStep = false;
-
-            {
-                std::lock_guard<std::mutex> lk(g_modelMutex);
-
-                auto out = model->forward(xDev);
-                auto pol = out.first;       // [B,73,8,8]
-                auto valLogits = out.second; // [B,1] logits in train()
-
-                auto polFlat = pol.flatten(1);                 // [B,4672]
-                auto logp = torch::log_softmax(polFlat, 1); // [B,4672]
-                auto g = logp.gather(1, idxDev);         // [B,255]
-
-                auto lossP = -(probDev * g).sum(1).mean();
-                auto lossV = torch::binary_cross_entropy_with_logits(valLogits, zDev);
-                auto loss = lossP + lossV;
-
-                if (torch::isfinite(loss).item<bool>()) {
-                    opt->zero_grad();
-                    loss.backward();
-                    torch::nn::utils::clip_grad_norm_(model->parameters(), 1.0);
-                    opt->step();
-
-                    lossScalar = loss.item<float>();
-                    lossPScalar = lossP.item<float>(); // <--- СОХРАНЯЕМ lossP
-                    lossVScalar = lossV.item<float>(); // <--- СОХРАНЯЕМ lossV
-                    didStep = true;
-                }
-            }
-
-            if (!didStep) break;
-
-            ++done;
-            ++steps;
-            lastLoss = lossScalar;
-            lastLossP = lossPScalar; // <--- ОБНОВЛЯЕМ STATE ТРЕНЕРА
-            lastLossV = lossVScalar; // <--- ОБНОВЛЯЕМ STATE ТРЕНЕРА
-            updateLR();
-        }
-
-        if (useCuda) {
-            try { torch::cuda::synchronize(); }
-            catch (...) {}
-        }
-
-        return done;
+    if (!didStep) {
+        ++ampSkippedSteps;
     }
+} else {
+    loss.backward();
+
+    double currentGradNorm =
+        torch::nn::utils::clip_grad_norm_(model->parameters(), 1.0);
+
+    if (std::isfinite(currentGradNorm)) {
+        opt->step();
+        emaUpdateCached(emaCache, ema_decay);
+
+        lossScalar = loss.item<float>();
+        lossPScalar = lossP.item<float>();
+        lossVScalar = lossV.item<float>();
+        gradNormScalar = static_cast<float>(currentGradNorm);
+        didStep = true;
+    }
+}
+            } else {
+                if (useAmp) {
+                    scaler.update(false);
+                    lastAmpScale = scaler.scale;
+                    ++ampSkippedSteps;
+                }
+            }
+        }
+
+        if (!didStep) {
+            ++skippedConsecutive;
+            ++skippedTotal;
+
+            if (skippedConsecutive == 1 ||
+                skippedConsecutive == 8 ||
+                skippedConsecutive == 32) {
+                std::cerr << "[Trainer] skipped batch"
+                          << " consec=" << skippedConsecutive
+                          << " total=" << skippedTotal
+                          << " ampScale=" << lastAmpScale
+                          << "\n";
+            }
+
+            if (skippedConsecutive >= MAX_SKIPPED_CONSECUTIVE ||
+                skippedTotal >= MAX_SKIPPED_TOTAL) {
+                std::cerr << "[Trainer] too many skipped batches, stopping train block"
+                          << " consec=" << skippedConsecutive
+                          << " total=" << skippedTotal
+                          << "\n";
+                break;
+            }
+
+            continue;
+        }
+
+        skippedConsecutive = 0;
+
+        ++done;
+        ++steps;
+        lastLoss = lossScalar;
+        lastLossP = lossPScalar;
+        lastLossV = lossVScalar;
+        lastGradNorm = gradNormScalar;
+        updateLR();
+    }
+
+    if (useCuda) {
+        try { torch::cuda::synchronize(); }
+        catch (...) {}
+    }
+
+    return done;
+}
 };
 // init / load / save
 // ------------------------------------------------------------
@@ -6228,80 +7411,94 @@ static bool loadOrCreateTorchModel(const std::string& ptFile, Net& model) {
         }
     }
 }
+
+static void copyNetState(Net& dst, Net& src) {
+    auto cache = buildModulePairCache(dst, src, "copyNetState");
+    copyNetStateCached(cache);
+
+    if (src->is_training()) dst->train();
+    else                    dst->eval();
+}
+
+static bool loadOrCreateEmaModel(const std::string& emaFile, Net& emaModel, Net& model) {
+    if (fileExists(emaFile)) {
+        try {
+            torch::load(emaModel, emaFile);
+            emaModel->eval();
+            return true;
+        }
+        catch (const std::exception& e) {
+            std::cerr << "torch::load(ema) failed: " << e.what()
+                      << " -> fallback to current model\n";
+        }
+    }
+
+    try {
+        copyNetState(emaModel, model);
+        emaModel->eval();
+        torch::save(emaModel, emaFile);
+        return true;
+    }
+    catch (const std::exception& e) {
+        std::cerr << "create/save ema model failed: " << e.what() << "\n";
+        return false;
+    }
+}
+
+
+
+static bool ensureOldRunnerReady(const std::string& planFile) {
+    std::lock_guard<std::mutex> lk(g_trtOldMutex);
+    if (g_trtOldReady) return true;
+
+    if (!g_trt_old.initOrCreate(planFile)) return false;
+    g_trtOldReady = true;
+    return true;
+}
+
+static bool syncCurrentRunnerFromModel(Net& emaModel) {
+    std::scoped_lock lk(g_modelMutex, g_trtMutex);
+    torch::NoGradGuard ng;
+    return trtRefitFromTorchModel(g_trt, emaModel);
+}
+
+static bool snapshotCurrentIntoOld(Net& currentEmaModel,
+                                   Net& oldModel,
+                                   const std::string& planFile) {
+    {
+        std::lock_guard<std::mutex> lk(g_modelMutex);
+        oldModel->to(torch::kCPU);
+        copyNetState(oldModel, currentEmaModel);
+        oldModel->eval();
+    }
+
+    if (!ensureOldRunnerReady(planFile)) return false;
+
+    {
+        std::lock_guard<std::mutex> lk(g_trtOldMutex);
+        torch::NoGradGuard ng;
+        return trtRefitFromTorchModel(g_trt_old, oldModel);
+    }
+}
+
 static inline bool isFiniteF(float x) {
     return std::isfinite((double)x) != 0;
 }
 
-static void softmaxTo(std::vector<float>& out, const float* logits, int n) {
-    out.resize((size_t)n);
-    if (n <= 0) return;
-
-    float mx = logits[0];
-    for (int i = 1; i < n; ++i) mx = std::max(mx, logits[i]);
-
-    double sum = 0.0;
-    for (int i = 0; i < n; ++i) {
-        double e = std::exp((double)logits[i] - (double)mx);
-        out[(size_t)i] = (float)e;
-        sum += e;
-    }
-
-    if (!(sum > 0.0)) {
-        float inv = 1.0f / (float)n;
-        for (int i = 0; i < n; ++i) out[(size_t)i] = inv;
-        return;
-    }
-
-    float inv = (float)(1.0 / sum);
-    for (int i = 0; i < n; ++i) out[(size_t)i] *= inv;
-}
-
-static double klDiv(const std::vector<float>& p, const std::vector<float>& q, double eps = 1e-12) {
-    // KL(p||q) with epsilon floor
-    const int n = (int)p.size();
-    double s = 0.0;
-    for (int i = 0; i < n; ++i) {
-        double pi = std::max((double)p[(size_t)i], eps);
-        double qi = std::max((double)q[(size_t)i], eps);
-        s += pi * (std::log(pi) - std::log(qi));
-    }
-    return s;
-}
-
-static double l1Dist(const std::vector<float>& p, const std::vector<float>& q) {
-    const int n = (int)p.size();
-    double s = 0.0;
-    for (int i = 0; i < n; ++i) s += std::fabs((double)p[(size_t)i] - (double)q[(size_t)i]);
-    return s;
-}
-
-static void topKIndices(const float* x, int n, int K, std::vector<int>& outIdx) {
-    outIdx.clear();
-    outIdx.reserve((size_t)K);
 
 
-    std::vector<int> idx((size_t)n);
-    for (int i = 0; i < n; ++i) idx[(size_t)i] = i;
 
-    std::partial_sort(idx.begin(), idx.begin() + std::min(K, n), idx.end(),
-        [&](int a, int b) { return x[a] > x[b]; });
 
-    int kk = std::min(K, n);
-    outIdx.assign(idx.begin(), idx.begin() + kk);
-}
 
-static int top1Index(const float* x, int n) {
-    int bi = 0;
-    float bv = x[0];
-    for (int i = 1; i < n; ++i) {
-        if (x[i] > bv) { bv = x[i]; bi = i; }
-    }
-    return bi;
-}
+
+
+
 
 
 static void initAllOrExit(Net& model,
+    Net& emaModel,
     const std::string& ptFile,
+    const std::string& emaFile,
     const std::string& planFile) {
     setlocale(LC_ALL, "Russian");
 
@@ -6322,37 +7519,44 @@ static void initAllOrExit(Net& model,
     else          initSlidersMagics();
 
     if (!loadOrCreateTorchModel(ptFile, model)) {
-        std::cerr << "Не удалось загрузить/создать " << ptFile << "\n";
+        std::cerr << "РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ/СЃРѕР·РґР°С‚СЊ " << ptFile << "\n";
+        std::exit(1);
+    }
+
+    if (!loadOrCreateEmaModel(emaFile, emaModel, model)) {
+        std::cerr << "РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ/СЃРѕР·РґР°С‚СЊ " << emaFile << "\n";
         std::exit(1);
     }
 
     {
         std::lock_guard<std::mutex> lk(g_trtMutex);
         if (!g_trt.initOrCreate(planFile)) {
-            std::cerr << "TensorRT: не удалось инициализировать движок.\n";
+            std::cerr << "TensorRT: РЅРµ СѓРґР°Р»РѕСЃСЊ РёРЅРёС†РёР°Р»РёР·РёСЂРѕРІР°С‚СЊ РґРІРёР¶РѕРє.\n";
             std::exit(1);
         }
         g_trtReady = true;
         g_nnBatch = TRT_MAX_BATCH;
     }
 
-    // Первичный refit
+    // РџРµСЂРІРёС‡РЅС‹Р№ refit
     {
         std::scoped_lock lk(g_modelMutex, g_trtMutex);
         torch::NoGradGuard ng;
 
-        if (!trtRefitFromTorchModel(g_trt, model)) {
-            std::cerr << "TRT refit from net.pt failed at startup.\n";
+        if (!trtRefitFromTorchModel(g_trt, emaModel)) {
+            std::cerr << "TRT refit from net_ema.pt failed at startup.\n";
         }
     }
-std::cerr << "[TRT] AI_HAVE_CUDA_KERNELS=" << AI_HAVE_CUDA_KERNELS << "\n";
+//std::cerr << "[TRT] AI_HAVE_CUDA_KERNELS=" << AI_HAVE_CUDA_KERNELS << "\n";
 }
 
 static void saveAll(const std::string& ptFile,
+    const std::string& emaFile,
     const std::string& planFile,
     const std::string& optFile,
     const std::string& trainerStateFile,
     Net& model,
+    Net& emaModel,
     Trainer& trainer) {
     {
         std::lock_guard<std::mutex> lk(g_modelMutex);
@@ -6362,6 +7566,13 @@ static void saveAll(const std::string& ptFile,
         }
         catch (const std::exception& e) {
             std::cerr << "torch::save(model) failed: " << e.what() << "\n";
+        }
+
+        try {
+            torch::save(emaModel, emaFile);
+        }
+        catch (const std::exception& e) {
+            std::cerr << "torch::save(emaModel) failed: " << e.what() << "\n";
         }
 
         if (!saveOptimizerState(optFile, trainer)) {
@@ -6385,30 +7596,43 @@ static void saveAll(const std::string& ptFile,
 // Training(minutes)
 // ------------------------------------------------------------
 
+static AI_FORCEINLINE void waitForNoInferenceInFlight() {
+    while (g_inferInFlight.load(std::memory_order_acquire) != 0) {
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+}
+
 static void safeRefitBarrier(SelfPlayContext& sp) {
-    // Гарантируем, что на момент refit:
-    // - server idle
-    // - очередь пуста
+    // Р“Р°СЂР°РЅС‚РёСЂСѓРµРј, С‡С‚Рѕ РЅР° РјРѕРјРµРЅС‚ refit/save:
+    // - inference server idle
+    // - РѕС‡РµСЂРµРґСЊ РїСѓСЃС‚Р°
+    // - РЅРё РѕРґРёРЅ TRT inference Р±РѕР»СЊС€Рµ РЅРµ "РІ РїРѕР»С‘С‚Рµ"
     sp.server.waitIdle();
+    waitForNoInferenceInFlight();
+
     sp.server.clearQueueUnsafeWhenIdle();
+
+    waitForNoInferenceInFlight();
 }
 
 
 
 void Training(int targetGames) {
     const std::string ptFile = "net.pt";
+    const std::string emaFile = "net_ema.pt";
     const std::string planFile = "net.plan";
     const std::string optFile = "optimizer.pt";
     const std::string trainerStateFile = "trainer_state.bin";
 
     Net model;
-    initAllOrExit(model, ptFile, planFile);
+    Net emaModel;
+    initAllOrExit(model, emaModel, ptFile, emaFile, planFile);
 
     // Replay
     static constexpr size_t REPLAY_CAP = 1000000;
     ReplayBuffer rb(REPLAY_CAP);
 
-    // Trainer: сначала восстановим steps, потом init(), потом optimizer
+    // Trainer: СЃРЅР°С‡Р°Р»Р° РІРѕСЃСЃС‚Р°РЅРѕРІРёРј steps, РїРѕС‚РѕРј init(), РїРѕС‚РѕРј optimizer
     Trainer trainer;
 
     if (loadTrainerState(trainerStateFile, trainer)) {
@@ -6418,12 +7642,12 @@ void Training(int targetGames) {
         std::cerr << "[Trainer] no trainer_state found, starting from step 0.\n";
     }
 
-    trainer.init(model);
+    trainer.init(model, emaModel);
 
     if (loadOptimizerState(optFile, trainer)) {
         std::cerr << "[Trainer] optimizer state restored.\n";
 
-        // После restore optimizer ещё раз принудительно выставим LR по scheduler'у
+        // РџРѕСЃР»Рµ restore optimizer РµС‰С‘ СЂР°Р· РїСЂРёРЅСѓРґРёС‚РµР»СЊРЅРѕ РІС‹СЃС‚Р°РІРёРј LR РїРѕ scheduler'Сѓ
         trainer.current_lr = -1.0;
         trainer.updateLR(true);
     }
@@ -6437,8 +7661,16 @@ void Training(int targetGames) {
         }
     }
 
+    Net oldModel;
+    oldModel->to(torch::kCPU);
+    oldModel->eval();
+
+    if (!snapshotCurrentIntoOld(emaModel, oldModel, planFile)) {
+        std::cerr << "[arena] failed to initialize old snapshot in memory.\n";
+    }
+
     // One self-play context for the whole training
-    SelfPlayContext sp(/*nodePow2=*/(1u << 20), /*edgeCap=*/(1u << 24));
+    SelfPlayContext sp((1u << 20), (1u << 24), g_trt, g_trtMutex);
     sp.start();
 
     // -------------------------------
@@ -6447,8 +7679,8 @@ void Training(int targetGames) {
     static constexpr int SELFPLAY_BLOCK_MS = 8000;
     static constexpr int MAX_GAMES_PER_BLOCK = 16;
 
-    static constexpr int TRAIN_BLOCK_MS = 325;
-    static constexpr int TRAIN_MAX_STEPS = 9999;
+    static constexpr double REPLAY_RATIO = 6.0;          // consumed / added
+    static constexpr int TRAIN_MAX_STEPS_PER_BLOCK = 9999;
     static constexpr int TRAIN_WARMUP_BATCHES = 1000;
 
     static constexpr int REFIT_EVERY_TRAIN_BLOCKS = 8;
@@ -6457,6 +7689,12 @@ void Training(int targetGames) {
     const int maxPlies = 256;
     const bool addRootNoise = true;
 
+    const size_t MIN_REPLAY_TO_TRAIN =
+        (size_t)trainer.B * (size_t)TRAIN_WARMUP_BATCHES;
+
+    bool trainSchedulerActive = false;
+    double trainSampleCredits = 0.0; // measured in "samples to consume"
+
     auto t0 = std::chrono::steady_clock::now();
     auto nextSave = t0 + std::chrono::hours(1);
     auto nextStat = t0 + std::chrono::seconds(10);
@@ -6464,8 +7702,9 @@ void Training(int targetGames) {
     int games = 0;
     int trainBlocks = 0;
     int refits = 0;
+    int nextArenaAt = 10000;
 
-    std::cout << "Начинаем тренировку на " << targetGames << " партий...\n";
+    std::cout << "РќР°С‡РёРЅР°РµРј С‚СЂРµРЅРёСЂРѕРІРєСѓ РЅР° " << targetGames << " РїР°СЂС‚РёР№...\n";
 
     while (games < targetGames) {
         // ===========================
@@ -6480,16 +7719,29 @@ void Training(int targetGames) {
 
             int plyCount = 0;
             bool terminated = false;
+            int samplesAdded = 0;
 
             selfPlayOneGame960(sp, rb,
                 simsPerPos,
                 maxPlies,
                 addRootNoise,
                 plyCount,
-                terminated);
+                terminated,
+                samplesAdded);
 
             ++games;
             ++gamesThisBlock;
+
+            if (!trainSchedulerActive && rb.currentSize() >= MIN_REPLAY_TO_TRAIN) {
+                trainSchedulerActive = true;
+                std::cerr << "[trainer] replay warmup reached: "
+                          << rb.currentSize()
+                          << " samples, sample-based schedule enabled\n";
+            }
+
+            if (trainSchedulerActive && samplesAdded > 0) {
+                trainSampleCredits += REPLAY_RATIO * (double)samplesAdded;
+            }
 
             if (sp.T.abort.load(std::memory_order_relaxed)) {
                 std::cerr << "[selfplay] MCTS aborted: oomCode=" << sp.T.oomCode.load()
@@ -6499,17 +7751,31 @@ void Training(int targetGames) {
         }
 
         // ===========================
-        // 2) TRAIN BLOCK
+        // 2) TRAIN BLOCK (sample-based, replay ratio = 6)
         // ===========================
-        safeRefitBarrier(sp);
+        int didTrain = 0;
 
-        int didTrain = trainer.trainBlockBudgetMs(rb, model,
-            TRAIN_BLOCK_MS,
-            TRAIN_MAX_STEPS,
-            TRAIN_WARMUP_BATCHES);
+        if (trainSchedulerActive) {
+            const int targetSteps =
+                std::min(TRAIN_MAX_STEPS_PER_BLOCK,
+                         (int)(trainSampleCredits / (double)trainer.B));
 
-        if (didTrain > 0) {
-            ++trainBlocks;
+            if (targetSteps > 0) {
+                safeRefitBarrier(sp);
+
+                // use old function as fixed-step runner by giving it a huge time budget
+                didTrain = trainer.trainBlockBudgetMs(rb, model, emaModel,
+                    /*budgetMs=*/24 * 60 * 60 * 1000,
+                    /*maxStepsHard=*/targetSteps,
+                    TRAIN_WARMUP_BATCHES);
+
+                trainSampleCredits -= (double)didTrain * (double)trainer.B;
+                if (trainSampleCredits < 0.0) trainSampleCredits = 0.0;
+
+                if (didTrain > 0) {
+                    ++trainBlocks;
+                }
+            }
         }
 
         // ===========================
@@ -6521,12 +7787,53 @@ void Training(int targetGames) {
             std::scoped_lock lk(g_modelMutex, g_trtMutex);
             torch::NoGradGuard ng;
 
-            if (!trtRefitFromTorchModel(g_trt, model)) {
+            if (!trtRefitFromTorchModel(g_trt, emaModel)) {
                 std::cerr << "[refit] TRT refit failed.\n";
             }
             else {
                 ++refits;
             }
+        }
+
+        while (games >= nextArenaAt) {
+            safeRefitBarrier(sp);
+
+            // current TRT РґРѕР»Р¶РµРЅ С‚РѕС‡РЅРѕ СЃРѕРѕС‚РІРµС‚СЃС‚РІРѕРІР°С‚СЊ С‚РµРєСѓС‰РµРјСѓ model
+            if (!syncCurrentRunnerFromModel(emaModel)) {
+                std::cerr << "[arena] failed to sync current TRT from EMA model.\n";
+                break;
+            }
+
+            if (!g_trtOldReady) {
+                if (!snapshotCurrentIntoOld(emaModel, oldModel, planFile)) {
+                    std::cerr << "[arena] failed to prepare old TRT snapshot.\n";
+                    break;
+                }
+            }
+
+            std::cout << "\n[arena] start: current vs old, games=1000, sims=200, triggerGames="
+                      << nextArenaAt << "\n";
+
+            ArenaStats ar = runArenaMatch(/*games=*/1000, /*simsPerPos=*/200);
+
+            std::cout << "[arena] done: W/D/L = "
+                      << ar.curWins << "/" << ar.draws << "/" << ar.oldWins
+                      << "  score=" << ar.currentScore() << "\n";
+
+            // promotion rule: РµСЃР»Рё current > old, old := current
+            if (ar.currentScore() > 0.5) {
+                if (snapshotCurrentIntoOld(emaModel, oldModel, planFile)) {
+                    std::cout << "[arena] promoted current EMA -> old snapshot in memory\n";
+                }
+                else {
+                    std::cerr << "[arena] promotion failed\n";
+                }
+            }
+            else {
+                std::cout << "[arena] old snapshot kept\n";
+            }
+
+            nextArenaAt += 10000;
         }
 
         // ===========================
@@ -6538,9 +7845,9 @@ void Training(int targetGames) {
             safeRefitBarrier(sp);
             nextSave += std::chrono::hours(1);
 
-            saveAll(ptFile, planFile, optFile, trainerStateFile, model, trainer);
+            saveAll(ptFile, emaFile, planFile, optFile, trainerStateFile, model, emaModel, trainer);
 
-            std::cout << "[autosave] Прогресс: " << games << " / " << targetGames << " партий.\n";
+            std::cout << "[autosave] РџСЂРѕРіСЂРµСЃСЃ: " << games << " / " << targetGames << " РїР°СЂС‚РёР№.\n";
         }
 
         if (now >= nextStat) {
@@ -6551,8 +7858,15 @@ void Training(int targetGames) {
                 << " LR=" << trainer.current_lr
                 << " lastLoss=" << trainer.lastLoss
                 << " (P:" << trainer.lastLossP << " V:" << trainer.lastLossV << ")"
+                << " Grad=" << trainer.lastGradNorm
+                << " amp=" << (trainer.useAmp ? "fp16" : "off")
+                << " ampScale=" << trainer.lastAmpScale
+                << " ampSkipped=" << trainer.ampSkippedSteps
                 << " nnQueue=" << sp.server.size()
                 << " refits=" << refits
+                << " sched=" << (trainSchedulerActive ? "on" : "warmup")
+                << " credits=" << trainSampleCredits
+                << " pendingSteps=" << (int)(trainSampleCredits / (double)trainer.B)
                 << "\n";
         }
     }
@@ -6563,7 +7877,7 @@ void Training(int targetGames) {
     safeRefitBarrier(sp);
     sp.stop();
 
-    std::cout << "\n[Завершение] Собрано " << targetGames << " партий. Сохранение финальных весов...\n";
+    std::cout << "\n[Р—Р°РІРµСЂС€РµРЅРёРµ] РЎРѕР±СЂР°РЅРѕ " << targetGames << " РїР°СЂС‚РёР№. РЎРѕС…СЂР°РЅРµРЅРёРµ С„РёРЅР°Р»СЊРЅС‹С… РІРµСЃРѕРІ...\n";
     {
         std::lock_guard<std::mutex> lk(g_modelMutex);
 
@@ -6572,6 +7886,13 @@ void Training(int targetGames) {
         }
         catch (const std::exception& e) {
             std::cerr << "torch::save(model) failed: " << e.what() << "\n";
+        }
+
+        try {
+            torch::save(emaModel, emaFile);
+        }
+        catch (const std::exception& e) {
+            std::cerr << "torch::save(emaModel) failed: " << e.what() << "\n";
         }
 
         if (!saveOptimizerState(optFile, trainer)) {
@@ -6583,7 +7904,7 @@ void Training(int targetGames) {
         }
     }
 
-    std::cout << "[Завершение] Запуск финальной пересборки TensorRT (Rebuild). Это займет пару минут...\n";
+    std::cout << "[Р—Р°РІРµСЂС€РµРЅРёРµ] Р—Р°РїСѓСЃРє С„РёРЅР°Р»СЊРЅРѕР№ РїРµСЂРµСЃР±РѕСЂРєРё TensorRT (Rebuild). Р­С‚Рѕ Р·Р°Р№РјРµС‚ РїР°СЂСѓ РјРёРЅСѓС‚...\n";
 
     // 1) shutdown + remove old plan
     {
@@ -6601,7 +7922,7 @@ void Training(int targetGames) {
     }
 
     if (!okInit) {
-        std::cerr << "[Завершение] FATAL ERROR: Не удалось пересобрать финальный net.plan!\n";
+        std::cerr << "[Р—Р°РІРµСЂС€РµРЅРёРµ] FATAL ERROR: РќРµ СѓРґР°Р»РѕСЃСЊ РїРµСЂРµСЃРѕР±СЂР°С‚СЊ С„РёРЅР°Р»СЊРЅС‹Р№ net.plan!\n";
     }
     else {
         // 3) refit from final torch model and save final plan
@@ -6609,7 +7930,7 @@ void Training(int targetGames) {
             std::scoped_lock lk(g_modelMutex, g_trtMutex);
             torch::NoGradGuard ng;
 
-            if (trtRefitFromTorchModel(g_trt, model)) {
+            if (trtRefitFromTorchModel(g_trt, emaModel)) {
                 trtSavePlanToDisk(g_trt, planFile);
             }
         }
@@ -6622,16 +7943,23 @@ void Training(int targetGames) {
         }
     }
 
-    std::cout << "Тренировка успешно завершена! Файлы net.pt, optimizer.pt, trainer_state.bin и net.plan готовы.\n";
+    {
+        std::lock_guard<std::mutex> lk(g_trtOldMutex);
+        g_trt_old.shutdown();
+        g_trtOldReady = false;
+    }
+
+    std::cout << "РўСЂРµРЅРёСЂРѕРІРєР° СѓСЃРїРµС€РЅРѕ Р·Р°РІРµСЂС€РµРЅР°! Р¤Р°Р№Р»С‹ net.pt, net_ema.pt, optimizer.pt, trainer_state.bin Рё net.plan РіРѕС‚РѕРІС‹.\n";
 }
 
 
 
 int main() {
     const std::string ptFile = "net.pt";
+    const std::string emaFile = "net_ema.pt";
     const std::string planFile = "net.plan";
 
-    std::cout << "Введите FEN (или '960' для случайной Chess960 позиции, '-' для Training):\n";
+    std::cout << "Р’РІРµРґРёС‚Рµ FEN (РёР»Рё '960' РґР»СЏ СЃР»СѓС‡Р°Р№РЅРѕР№ Chess960 РїРѕР·РёС†РёРё, '-' РґР»СЏ Training):\n";
     std::string fen;
     std::getline(std::cin, fen);
 
@@ -6644,9 +7972,10 @@ int main() {
     }
 
     Net model;
-    initAllOrExit(model, ptFile, planFile);
+    Net emaModel;
+    initAllOrExit(model, emaModel, ptFile, emaFile, planFile);
     if (!g_trtReady) {
-        std::cout << "TensorRT движок не загружен.\n";
+        std::cout << "TensorRT РґРІРёР¶РѕРє РЅРµ Р·Р°РіСЂСѓР¶РµРЅ.\n";
         return 1;
     }
 
@@ -6659,8 +7988,10 @@ int main() {
 
     std::cout << "slider_backend " << (g_usePext ? "pext" : "magics") << "\n";
 
-    MoveList ml;
-    genMoves(pos, path, ml);
+MoveList ml;
+int term = 0;
+Position tmp = pos;
+genLegal(tmp, path, mask, ml, term);
 
     std::cout << "moves " << ml.n << "\n";
     for (int i = 0; i < ml.n; ++i) {
@@ -6669,10 +8000,9 @@ int main() {
     }
 
     float mctsEvalWhite = 0.5f;
+    std::vector<int> pvBeforeRoll;
     std::vector<moveState> rootMoves;
-    bool rootNoise = false;
-
-    mctsBatchedMT(pos, path, mask, 10.0, rootNoise, mctsEvalWhite, rootMoves);
+mctsBatchedMT(pos, path, mask, 10.0, mctsEvalWhite, rootMoves, pvBeforeRoll);
 
     float v = 0.5f;
     std::vector<float> pol((size_t)POLICY_SIZE, 0.0f);
@@ -6681,13 +8011,18 @@ int main() {
 
     std::cout << "eval=" << v << std::endl;
     std::cout << "mcts_eval_white " << mctsEvalWhite << "\n";
+    for (size_t i = 0; i < pvBeforeRoll.size(); ++i) {
+    if (i) std::cout << ' ';
+    std::cout << moveToStr(pvBeforeRoll[i]);
+}
+std::cout << "\n";
     std::cout << "root_moves " << rootMoves.size() << "\n";
     for (auto& ms : rootMoves) {
-        int m = ms.move;
-        std::cout << sqName(m & 63) << sqName((m >> 6) & 63)
-            << " eval " << ms.eval
-            << " visits " << ms.visits << " prior " << ms.prior << "\n";
-    }
+    std::cout << moveToStr(ms.move)
+        << " eval " << ms.eval
+        << " visits " << ms.visits
+        << " prior " << ms.prior << "\n";
+}
 
     cin.get();
 
