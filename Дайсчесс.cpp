@@ -5159,12 +5159,32 @@ struct ReplayBuffer {
         if (size < cap) ++size;
     }
 void pushMany(const std::vector<TrainSample>& v) {
+    if (v.empty() || cap == 0) return;
+
     std::lock_guard<std::mutex> lk(m);
-    for (const auto& s : v) {
-        buf[head] = s;
-        head = (head + 1) % cap;
-        if (size < cap) ++size;
+
+    size_t n = v.size();
+
+    // If incoming batch is bigger than the whole buffer,
+    // keep only the newest `cap` samples.
+    if (n >= cap) {
+        std::copy(v.end() - cap, v.end(), buf.begin());
+        head = 0;
+        size = cap;
+        return;
     }
+
+    size_t space_at_end = cap - head;
+
+    if (n <= space_at_end) {
+        std::copy(v.begin(), v.end(), buf.begin() + head);
+    } else {
+        std::copy(v.begin(), v.begin() + space_at_end, buf.begin() + head);
+        std::copy(v.begin() + space_at_end, v.end(), buf.begin());
+    }
+
+    head = (head + n) % cap;
+    size = std::min(cap, size + n);
 }
     bool sampleBatch(std::vector<TrainSample>& out, int B, std::mt19937& rng) {
     out.resize((size_t)B);
