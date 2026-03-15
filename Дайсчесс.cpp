@@ -7291,14 +7291,19 @@ int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
             zp[(size_t)i] = s.z;
         }
 
-        // ---- H2D (no realloc) ----
-        if (useCuda) {
-            xDev.copy_(xCPU,    /*non_blocking=*/true);
-            idxDev.copy_(idxCPU, /*non_blocking=*/true);
-            probDev.copy_(probCPU, /*non_blocking=*/true);
-            zDev.copy_(zCPU,    /*non_blocking=*/true);
-            nPiDev.copy_(nPiCPU, /*non_blocking=*/true);
-        }
+// ---- H2D (SAFE: blocking copies) ----
+// IMPORTANT:
+// CPU staging tensors (xCPU/idxCPU/probCPU/zCPU/nPiCPU) are reused
+// on the next loop iteration. With pinned memory + non_blocking=true,
+// CPU may start overwriting them before CUDA finishes reading them.
+// So copies here must be blocking unless we implement double buffering.
+if (useCuda) {
+    xDev.copy_(xCPU,     /*non_blocking=*/false);
+    idxDev.copy_(idxCPU, /*non_blocking=*/false);
+    probDev.copy_(probCPU,/*non_blocking=*/false);
+    zDev.copy_(zCPU,     /*non_blocking=*/false);
+    nPiDev.copy_(nPiCPU, /*non_blocking=*/false);
+}
 
         // Обновляем host-метрики только раз в N успешных шагов.
         // +1 => проверка по "следующему" успешному global step.
