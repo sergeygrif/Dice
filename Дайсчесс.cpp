@@ -3710,6 +3710,69 @@ struct PendingNN {
 };
 
 static constexpr uint16_t INVALID_POLICY_IDX = 0xFFFFu;
+
+// ============================================================
+// PendingNN object pool
+// ============================================================
+
+static std::mutex g_pendingMutex;
+static std::vector<std::unique_ptr<PendingNN>> g_pendingPool;
+
+// Ограничиваем рост пула, чтобы он не раздувался бесконечно после пиков.
+static constexpr size_t AI_MAX_PENDING_POOL = 4096;
+
+static AI_FORCEINLINE void resetPendingNN(PendingNN& p) {
+    p.leaf = nullptr;
+    p.ml.n = 0;
+    p.trace.reset();
+    p.policyIdx.fill(INVALID_POLICY_IDX);
+}
+
+static std::unique_ptr<PendingNN> allocPendingNN() {
+    std::lock_guard<std::mutex> lk(g_pendingMutex);
+
+    if (!g_pendingPool.empty()) {
+        auto p = std::move(g_pendingPool.back());
+        g_pendingPool.pop_back();
+        resetPendingNN(*p);
+        return p;
+    }
+
+    auto p = std::make_unique<PendingNN>();
+    resetPendingNN(*p);
+    return p;
+}
+
+static void freePendingNN(std::unique_ptr<PendingNN> p) {
+    if (!p) return;
+
+    resetPendingNN(*p);
+
+    std::lock_guard<std::mutex> lk(g_pendingMutex);
+    if (g_pendingPool.size() < AI_MAX_PENDING_POOL) {
+        g_pendingPool.push_back(std::move(p));
+    }
+    // иначе объект просто уничтожится при выходе из функции
+}
+
+template<class TVec>
+static void freePendingBatch(TVec& jobs) {
+    std::lock_guard<std::mutex> lk(g_pendingMutex);
+
+    for (auto& p : jobs) {
+        if (!p) continue;
+
+        resetPendingNN(*p);
+
+        if (g_pendingPool.size() < AI_MAX_PENDING_POOL) {
+            g_pendingPool.push_back(std::move(p));
+        }
+        // иначе unique_ptr останется в контейнере и удалится на clear()
+    }
+
+    jobs.clear();
+}
+
 static AI_FORCEINLINE float pendingPolicyLogitFromFullCHW(
     const PendingNN& p,
     int i,
@@ -4445,6 +4508,7 @@ private:
             }
 
             processBatch(batch);
+            freePendingBatch(batch);
         }
 
         {
@@ -4801,7 +4865,7 @@ auto worker = [&](unsigned tid) {
             if (T.abort.load(std::memory_order_relaxed)) break;
             if (stop.load(std::memory_order_relaxed)) break;
 
-            auto p = std::make_unique<PendingNN>();
+            auto p = allocPendingNN();
             bool needNN = false;
 
             bool ok = runOneSim(T, rootPos, path, mask,
@@ -4831,7 +4895,10 @@ auto worker = [&](unsigned tid) {
                 }
 
                 if (!nnServer.submit(std::move(p), &stop, &T.abort)) {
-                    if (p) cancelPendingNN(*p);
+                    if (p) {
+                        cancelPendingNN(*p);
+                        freePendingNN(std::move(p));
+                    }
                     simFail.fetch_add(1, std::memory_order_relaxed);
                     if (T.abort.load(std::memory_order_relaxed)) break;
                     continue;
@@ -5727,6 +5794,7 @@ private:
             }
 
             processBatch(batch);
+            freePendingBatch(batch);
         }
 
         // drain tail after stop request
@@ -5741,6 +5809,7 @@ private:
 
             cvNotFull.notify_all();
             processBatch(tail);
+            freePendingBatch(tail);
         }
 
         {
@@ -6172,7 +6241,7 @@ void workerMain(unsigned tid) {
 
                 if (!tryClaimSimBudget(simsLeft)) break;
 
-                auto p = std::make_unique<PendingNN>();
+                auto p = allocPendingNN();
                 bool needNN = false;
 
                 bool ok = runOneSim(*TT, *rp, *pth, *msk,
@@ -6203,7 +6272,10 @@ void workerMain(unsigned tid) {
                     }
 
                     if (!server->submit(std::move(p), &cancelJob, &TT->abort)) {
-                        if (p) cancelPendingNN(*p);
+                        if (p) {
+                            cancelPendingNN(*p);
+                            freePendingNN(std::move(p));
+                        }
 
                         if (!fatal.load(std::memory_order_relaxed) &&
                             !cancelJob.load(std::memory_order_relaxed) &&
