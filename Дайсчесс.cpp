@@ -14,6 +14,7 @@
 #include <fstream>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <thread>
 #include <chrono>
 #include <condition_variable>
@@ -8079,7 +8080,9 @@ void Training(int targetGames) {
         std::lock_guard<std::mutex> lkT(g_trtMutex);
         g_trt.shutdown();
         g_trtReady = false;
-        std::remove(planFile.c_str());
+if (::remove(planFile.c_str()) != 0) {
+    // не фатально: файла могло не быть
+}
     }
 
     // 2) rebuild/load new plan
