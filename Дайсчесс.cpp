@@ -7252,6 +7252,10 @@ int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
     static constexpr int MAX_SKIPPED_CONSECUTIVE = 32;
     static constexpr int MAX_SKIPPED_TOTAL = 256;
 
+    // Не читаем CUDA scalars на CPU каждый батч:
+    // обновляем host-статистику только периодически.
+    static constexpr uint64_t HOST_STATS_EVERY = 16;
+
     for (int it = 0; it < maxStepsHard; ++it) {
         if (std::chrono::steady_clock::now() >= tEnd) break;
         if (!rb.sampleBatch(batch, B, rng)) break;
@@ -7294,10 +7298,15 @@ int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
             nPiDev.copy_(nPiCPU, /*non_blocking=*/true);
         }
 
-        float lossScalar = 0.0f;
-        float lossPScalar = 0.0f;
-        float lossVScalar = 0.0f;
-        float gradNormScalar = 0.0f;
+        // Обновляем host-метрики только раз в N успешных шагов.
+        // +1 => проверка по "следующему" успешному global step.
+        const bool needHostStats =
+            (((steps + (uint64_t)done + 1ull) % HOST_STATS_EVERY) == 0ull);
+
+        float lossScalar = lastLoss;
+        float lossPScalar = lastLossP;
+        float lossVScalar = lastLossV;
+        float gradNormScalar = lastGradNorm;
         bool didStep = false;
 
         {
@@ -7390,9 +7399,12 @@ if (useAmp) {
         opt->step();
         emaUpdateCached(emaCache, ema_decay);
 
-        lossScalar = loss.item<float>();
-        lossPScalar = lossP.item<float>();
-        lossVScalar = lossV.item<float>();
+        if (needHostStats) {
+            lossScalar = loss.detach().item<float>();
+            lossPScalar = lossP.detach().item<float>();
+            lossVScalar = lossV.detach().item<float>();
+        }
+
         gradNormScalar = static_cast<float>(currentGradNorm);
         didStep = true;
     }
@@ -7413,9 +7425,12 @@ if (useAmp) {
         opt->step();
         emaUpdateCached(emaCache, ema_decay);
 
-        lossScalar = loss.item<float>();
-        lossPScalar = lossP.item<float>();
-        lossVScalar = lossV.item<float>();
+        if (needHostStats) {
+            lossScalar = loss.detach().item<float>();
+            lossPScalar = lossP.detach().item<float>();
+            lossVScalar = lossV.detach().item<float>();
+        }
+
         gradNormScalar = static_cast<float>(currentGradNorm);
         didStep = true;
     }
@@ -7459,9 +7474,13 @@ if (useAmp) {
 
         ++done;
         ++steps;
-        lastLoss = lossScalar;
-        lastLossP = lossPScalar;
-        lastLossV = lossVScalar;
+
+        if (needHostStats) {
+            lastLoss = lossScalar;
+            lastLossP = lossPScalar;
+            lastLossV = lossVScalar;
+        }
+
         lastGradNorm = gradNormScalar;
         updateLR();
     }
