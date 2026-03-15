@@ -305,10 +305,10 @@ struct TTEdge {
         return valueSum.load(std::memory_order_relaxed);
     }
 
-   AI_FORCEINLINE void addVisitAndValue(float v) {
-    atomicAddDouble(valueSum, (double)v);
-    visits.fetch_add(1, std::memory_order_release);
-}
+    AI_FORCEINLINE void addVisitAndValue(float v) {
+        atomicAddDouble(valueSum, (double)v);
+        visits.fetch_add(1, std::memory_order_release);
+    }
 };
 
 struct TTNode {
@@ -331,9 +331,9 @@ struct TTNode {
         return valueSum.load(std::memory_order_relaxed);
     }
     AI_FORCEINLINE void addVisitAndValue(float v) {
-    atomicAddDouble(valueSum, (double)v);
-    visits.fetch_add(1, std::memory_order_release);
-}
+        atomicAddDouble(valueSum, (double)v);
+        visits.fetch_add(1, std::memory_order_release);
+    }
     AI_FORCEINLINE void publish(uint64_t k, uint32_t begin, uint8_t count,
         int term, int isChance) {
         key = k;
@@ -457,7 +457,7 @@ static void initDice216AndDicePiece() {
 
                 for (int t = 0; t < mult; ++t) Dice[out++] = d;
             }
-            std::shuffle(Dice.begin(), Dice.end(), Random);
+    std::shuffle(Dice.begin(), Dice.end(), Random);
 }
 
 static void initDiceTable() {
@@ -753,14 +753,15 @@ static AI_FORCEINLINE void positionToNNInput(const Position& pos, NNInput& out) 
             if (((pos.castle >> rookIdx) & 1) && (unsigned)pos.rook[rookIdx] < 64u) {
                 outp[plane * 64 + cg.sq(pos.rook[rookIdx])] = 1.0f;
             }
-        };
+            };
 
         if (!cg.hmirror) {
             putCastle(15, usQ);
             putCastle(16, usK);
             putCastle(17, themQ);
             putCastle(18, themK);
-        } else {
+        }
+        else {
             // after file mirror, queenside/kingside swap in canonical view
             putCastle(15, usK);
             putCastle(16, usQ);
@@ -1882,7 +1883,7 @@ void makeMove(Position& pos, const array<int, 64>& mask, int move) {
     pos.key ^= ZDice[pos.dice];
 }
 
-void makeRandom(Position& pos,TTNode* node) {
+void makeRandom(Position& pos, TTNode* node) {
     while (pos.ep1[pos.side]) {
         int sq = pop_lsb(pos.ep1[pos.side]);
         pos.key ^= ZEp1[pos.side][sq];
@@ -1897,7 +1898,7 @@ void makeRandom(Position& pos,TTNode* node) {
     uint64_t pawns = pos.color[pos.side] & pos.piece[0];
     int dist = 6;
     pos.key ^= ZDice[pos.dice];
-pos.dice = Dice[Range(Random)];
+    pos.dice = Dice[Range(Random)];
     if (pawns) {
         if (pos.side == 0)dist = clz64(pawns) >> 3;   // MSVC-safe
         else dist = ctz64(pawns) >> 3;            // MSVC-safe
@@ -3609,7 +3610,7 @@ static AI_FORCEINLINE int selectPUCT(const TTNode& n,
         uint32_t ev = e.visits.load(std::memory_order_relaxed);
         const float p = e.prior();
 
-const float fpu = clamp01(parentQ - 0.08f);
+        const float fpu = clamp01(parentQ - 0.08f);
         const float q = ev ? clamp01((float)(e.sum() / (double)ev)) : fpu;
 
         const float u = cpuct * p * (sqrtN / (1.0f + (float)ev));
@@ -3693,23 +3694,23 @@ struct Trace {
         }
     }
 
-AI_FORCEINLINE TraceStep& push(TTNode* node, TTEdge* edge, bool flip, bool vloss) {
-    assert(n >= 0 && n < MCTS_MAX_DEPTH);
+    AI_FORCEINLINE TraceStep& push(TTNode* node, TTEdge* edge, bool flip, bool vloss) {
+        assert(n >= 0 && n < MCTS_MAX_DEPTH);
 
-    if (AI_UNLIKELY((unsigned)n >= (unsigned)MCTS_MAX_DEPTH)) {
-        std::cerr << "[FATAL] Trace overflow: n=" << n
-                  << " MCTS_MAX_DEPTH=" << MCTS_MAX_DEPTH << "\n";
-        std::abort();
+        if (AI_UNLIKELY((unsigned)n >= (unsigned)MCTS_MAX_DEPTH)) {
+            std::cerr << "[FATAL] Trace overflow: n=" << n
+                << " MCTS_MAX_DEPTH=" << MCTS_MAX_DEPTH << "\n";
+            std::abort();
+        }
+
+        TraceStep& s = st[n];
+        s.node = node;
+        s.edge = edge;
+        s.flip = flip;
+        s.vloss = vloss;
+        ++n;
+        return s;
     }
-
-    TraceStep& s = st[n];
-    s.node = node;
-    s.edge = edge;
-    s.flip = flip;
-    s.vloss = vloss;
-    ++n;
-    return s;
-}
 };
 
 struct SearchWaitGroup {
@@ -3737,7 +3738,7 @@ static void waitGroupWaitZero(SearchWaitGroup* wg) {
     std::unique_lock<std::mutex> lk(wg->m);
     wg->cv.wait(lk, [&] {
         return wg->pending.load(std::memory_order_acquire) == 0;
-    });
+        });
 }
 
 struct PendingNN {
@@ -3767,7 +3768,7 @@ static constexpr size_t AI_MAX_PENDING_POOL = 4096;
 
 // block allocator params
 static constexpr size_t AI_PENDING_BLOCK_SIZE = 64;
-static constexpr size_t AI_PENDING_TLS_KEEP   = 128;
+static constexpr size_t AI_PENDING_TLS_KEEP = 128;
 
 // per-thread local cache
 static thread_local std::vector<std::unique_ptr<PendingNN>> g_pendingTLS;
@@ -3823,7 +3824,7 @@ static AI_FORCEINLINE void flushPendingTLSPartial() {
     std::lock_guard<std::mutex> lk(g_pendingMutex);
 
     while (g_pendingTLS.size() > AI_PENDING_BLOCK_SIZE &&
-           g_pendingPool.size() < AI_MAX_PENDING_POOL) {
+        g_pendingPool.size() < AI_MAX_PENDING_POOL) {
         g_pendingPool.push_back(std::move(g_pendingTLS.back()));
         g_pendingTLS.pop_back();
     }
@@ -3962,7 +3963,8 @@ struct ExpansionClaimGuard {
 
     ExpansionClaimGuard() = default;
     explicit ExpansionClaimGuard(TTNode* n) noexcept
-        : node(n), active(n != nullptr) {}
+        : node(n), active(n != nullptr) {
+    }
 
     void arm(TTNode* n) noexcept {
         node = n;
@@ -3991,7 +3993,8 @@ struct PendingNNGuard {
 
     PendingNNGuard() = default;
     explicit PendingNNGuard(PendingNN& ref) noexcept
-        : p(&ref), active(true) {}
+        : p(&ref), active(true) {
+    }
 
     void reset(PendingNN& ref) noexcept {
         p = &ref;
@@ -4018,7 +4021,8 @@ struct PendingNNPtrGuard {
 
     PendingNNPtrGuard() = default;
     explicit PendingNNPtrGuard(std::unique_ptr<PendingNN>& p) noexcept
-        : up(&p), active(true) {}
+        : up(&p), active(true) {
+    }
 
     void reset(std::unique_ptr<PendingNN>& p) noexcept {
         up = &p;
@@ -4227,8 +4231,8 @@ struct RootNoiseGuard {
     RootNoiseBackup bk;
 
     RootNoiseGuard(MCTSTable& T,
-                   const Position& rootPos,
-                   bool enabled) {
+        const Position& rootPos,
+        bool enabled) {
         applyTemporaryRootNoise(T, rootPos, enabled, bk);
     }
 
@@ -4580,17 +4584,17 @@ struct InferenceServer {
         std::unique_lock<std::mutex> lk(m);
         cvIdle.wait(lk, [&] {
             return q.empty() && !busyFlag;
-        });
+            });
     }
 
     bool submit(std::unique_ptr<PendingNN>&& job,
-                const std::atomic<bool>* extCancel = nullptr,
-                const std::atomic<bool>* extAbort  = nullptr) {
+        const std::atomic<bool>* extCancel = nullptr,
+        const std::atomic<bool>* extAbort = nullptr) {
         auto cancelled = [&]() -> bool {
             return stop.load(std::memory_order_relaxed) ||
-                   (extCancel && extCancel->load(std::memory_order_relaxed)) ||
-                   (extAbort && extAbort->load(std::memory_order_relaxed));
-        };
+                (extCancel && extCancel->load(std::memory_order_relaxed)) ||
+                (extAbort && extAbort->load(std::memory_order_relaxed));
+            };
 
         std::unique_lock<std::mutex> lk(m);
 
@@ -4656,7 +4660,7 @@ private:
                 expandLeafWithOutputs(T, *jobs[(size_t)i], v, pol);
             }
 #endif
-        };
+            };
 
         for (;;) {
             {
@@ -4667,7 +4671,7 @@ private:
 
                 cvNotEmpty.wait(lk, [&] {
                     return stop.load(std::memory_order_relaxed) || !q.empty();
-                });
+                    });
 
                 if (stop.load(std::memory_order_relaxed) && q.empty()) break;
 
@@ -4683,13 +4687,13 @@ private:
                 std::chrono::steady_clock::now() + std::chrono::microseconds(200);
 
             while ((int)batch.size() < TRT_MAX_BATCH &&
-                   std::chrono::steady_clock::now() < tFillEnd) {
+                std::chrono::steady_clock::now() < tFillEnd) {
                 std::unique_lock<std::mutex> lk(m);
 
                 if (q.empty()) {
                     cvNotEmpty.wait_until(lk, tFillEnd, [&] {
                         return stop.load(std::memory_order_relaxed) || !q.empty();
-                    });
+                        });
                 }
 
                 if (q.empty()) break;
@@ -4722,7 +4726,8 @@ inline InferenceServerStopGuard::~InferenceServerStopGuard() noexcept {
     if (!srv) return;
     try {
         srv->stopAndDrain();
-    } catch (...) {
+    }
+    catch (...) {
     }
 }
 static void ensureRootExpanded(MCTSTable& T,
@@ -4898,7 +4903,7 @@ static bool runOneSim(MCTSTable& T,
                 claim.release();
 
                 tr.push(node, nullptr, /*flip=*/true, /*vloss=*/false);
-                makeRandom(pos,node);
+                makeRandom(pos, node);
                 isRoot = false;
                 continue;
             }
@@ -4926,7 +4931,7 @@ static bool runOneSim(MCTSTable& T,
         if (node->edgeCount == 0) {
             if (node->chance) {
                 tr.push(node, nullptr, /*flip=*/true, /*vloss=*/false);
-                makeRandom(pos,node);
+                makeRandom(pos, node);
                 isRoot = false;
                 continue;
             }
@@ -5066,84 +5071,84 @@ void mctsBatchedMT(Position& rootPos,
 
     std::atomic<uint64_t> simOK{ 0 }, simFail{ 0 }, nnExp{ 0 };
 
-auto worker = [&](unsigned tid) {
-    uint32_t jitterBase = (uint32_t)(0x9E3779B9u * (tid + 1));
+    auto worker = [&](unsigned tid) {
+        uint32_t jitterBase = (uint32_t)(0x9E3779B9u * (tid + 1));
 
-    uint64_t iter = 0;
-    int queueSpins = 0;
+        uint64_t iter = 0;
+        int queueSpins = 0;
 
-    for (;;) {
-        if (stop.load(std::memory_order_relaxed)) break;
-        if (T.abort.load(std::memory_order_relaxed)) break;
-
-        if ((iter++ & 63ull) == 0ull) {
-            if (std::chrono::steady_clock::now() >= tEnd) break;
-        }
-
-        bool didUsefulWork = false;
-
-        const int B = std::max(1, g_nnBatch);
-        for (int k = 0; k < B; ++k) {
-            if (T.abort.load(std::memory_order_relaxed)) break;
+        for (;;) {
             if (stop.load(std::memory_order_relaxed)) break;
-
-            // Front-pressure: let NN server drain before making more leaves.
-            throttleOnNNQueue_NoSleep(nnServer.size(), queueSpins);
-
             if (T.abort.load(std::memory_order_relaxed)) break;
-            if (stop.load(std::memory_order_relaxed)) break;
 
-PendingNN localPending;
-resetPendingNN(localPending);
+            if ((iter++ & 63ull) == 0ull) {
+                if (std::chrono::steady_clock::now() >= tEnd) break;
+            }
 
-bool needNN = false;
+            bool didUsefulWork = false;
 
-bool ok = runOneSim(T, rootPos, path, mask,
+            const int B = std::max(1, g_nnBatch);
+            for (int k = 0; k < B; ++k) {
+                if (T.abort.load(std::memory_order_relaxed)) break;
+                if (stop.load(std::memory_order_relaxed)) break;
+
+                // Front-pressure: let NN server drain before making more leaves.
+                throttleOnNNQueue_NoSleep(nnServer.size(), queueSpins);
+
+                if (T.abort.load(std::memory_order_relaxed)) break;
+                if (stop.load(std::memory_order_relaxed)) break;
+
+                PendingNN localPending;
+                resetPendingNN(localPending);
+
+                bool needNN = false;
+
+                bool ok = runOneSim(T, rootPos, path, mask,
                     localPending, needNN,
                     jitterBase + (uint32_t)k * 1337u);
 
-if (!ok) {
-    simFail.fetch_add(1, std::memory_order_relaxed);
-    if (T.abort.load(std::memory_order_relaxed)) break;
-    continue;
-}
+                if (!ok) {
+                    simFail.fetch_add(1, std::memory_order_relaxed);
+                    if (T.abort.load(std::memory_order_relaxed)) break;
+                    continue;
+                }
 
-didUsefulWork = true;
-simOK.fetch_add(1, std::memory_order_relaxed);
+                didUsefulWork = true;
+                simOK.fetch_add(1, std::memory_order_relaxed);
 
-if (needNN) {
-    nnExp.fetch_add(1, std::memory_order_relaxed);
+                if (needNN) {
+                    nnExp.fetch_add(1, std::memory_order_relaxed);
 
-    // Extra throttle immediately before submit.
-    throttleOnNNQueue_NoSleep(nnServer.size(), queueSpins);
+                    // Extra throttle immediately before submit.
+                    throttleOnNNQueue_NoSleep(nnServer.size(), queueSpins);
 
-    if (stop.load(std::memory_order_relaxed) ||
-        T.abort.load(std::memory_order_relaxed)) {
-        cancelPendingNN(localPending);
-        simFail.fetch_add(1, std::memory_order_relaxed);
-        break;
-    }
+                    if (stop.load(std::memory_order_relaxed) ||
+                        T.abort.load(std::memory_order_relaxed)) {
+                        cancelPendingNN(localPending);
+                        simFail.fetch_add(1, std::memory_order_relaxed);
+                        break;
+                    }
 
-    auto p = allocPendingNN();
-    *p = localPending; // copy only when NN submit is really needed
+                    auto p = allocPendingNN();
+                    *p = localPending; // copy only when NN submit is really needed
 
-    if (!nnServer.submit(std::move(p), &stop, &T.abort)) {
-        if (p) {
-            cancelPendingNN(*p);
-            freePendingNN(std::move(p));
+                    if (!nnServer.submit(std::move(p), &stop, &T.abort)) {
+                        if (p) {
+                            cancelPendingNN(*p);
+                            freePendingNN(std::move(p));
+                        }
+                        simFail.fetch_add(1, std::memory_order_relaxed);
+                        if (T.abort.load(std::memory_order_relaxed)) break;
+                        continue;
+                    }
+                }
+            }
+
+            if (!didUsefulWork) {
+                cpuRelax();
+            }
         }
-        simFail.fetch_add(1, std::memory_order_relaxed);
-        if (T.abort.load(std::memory_order_relaxed)) break;
-        continue;
-    }
-}
-        }
-
-        if (!didUsefulWork) {
-            cpuRelax();
-        }
-    }
-};
+        };
 
     std::vector<std::thread> pool;
     pool.reserve(threads);
@@ -5392,7 +5397,8 @@ static AI_FORCEINLINE void decodeTrainSamplePolicyRow(
         for (int j = 0; j < n; ++j) {
             probRow[(size_t)j] *= inv;
         }
-    } else {
+    }
+    else {
         const float inv = 1.0f / (float)n;
         for (int j = 0; j < n; ++j) {
             probRow[(size_t)j] = inv;
@@ -5424,56 +5430,57 @@ struct ReplayBuffer {
         head = (head + 1) % cap;
         if (size < cap) ++size;
     }
-void pushMany(const std::vector<TrainSample>& v) {
-    if (v.empty() || cap == 0) return;
+    void pushMany(const std::vector<TrainSample>& v) {
+        if (v.empty() || cap == 0) return;
 
-    std::lock_guard<std::mutex> lk(m);
+        std::lock_guard<std::mutex> lk(m);
 
-    size_t n = v.size();
+        size_t n = v.size();
 
-    // If incoming batch is bigger than the whole buffer,
-    // keep only the newest `cap` samples.
-    if (n >= cap) {
-        std::copy(v.end() - cap, v.end(), buf.begin());
-        head = 0;
-        size = cap;
-        return;
+        // If incoming batch is bigger than the whole buffer,
+        // keep only the newest `cap` samples.
+        if (n >= cap) {
+            std::copy(v.end() - cap, v.end(), buf.begin());
+            head = 0;
+            size = cap;
+            return;
+        }
+
+        size_t space_at_end = cap - head;
+
+        if (n <= space_at_end) {
+            std::copy(v.begin(), v.end(), buf.begin() + head);
+        }
+        else {
+            std::copy(v.begin(), v.begin() + space_at_end, buf.begin() + head);
+            std::copy(v.begin() + space_at_end, v.end(), buf.begin());
+        }
+
+        head = (head + n) % cap;
+        size = std::min(cap, size + n);
     }
-
-    size_t space_at_end = cap - head;
-
-    if (n <= space_at_end) {
-        std::copy(v.begin(), v.end(), buf.begin() + head);
-    } else {
-        std::copy(v.begin(), v.begin() + space_at_end, buf.begin() + head);
-        std::copy(v.begin() + space_at_end, v.end(), buf.begin());
-    }
-
-    head = (head + n) % cap;
-    size = std::min(cap, size + n);
-}
     bool sampleBatch(std::vector<TrainSample>& out, int B, std::mt19937& rng) {
-    out.resize((size_t)B);
+        out.resize((size_t)B);
 
-    std::vector<double> biased((size_t)B);
-    std::uniform_real_distribution<double> d(0.0, 1.0);
-    for (int i = 0; i < B; ++i) {
-        biased[(size_t)i] = std::pow(d(rng), recent_bias);
+        std::vector<double> biased((size_t)B);
+        std::uniform_real_distribution<double> d(0.0, 1.0);
+        for (int i = 0; i < B; ++i) {
+            biased[(size_t)i] = std::pow(d(rng), recent_bias);
+        }
+
+        std::lock_guard<std::mutex> lk(m);
+        if (size < (size_t)B) return false;
+
+        const size_t snapSize = size;
+        const size_t start = (head + cap - snapSize) % cap;
+
+        for (int i = 0; i < B; ++i) {
+            size_t li = (size_t)(biased[(size_t)i] * (double)snapSize);
+            if (li >= snapSize) li = snapSize - 1;
+            out[(size_t)i] = buf[(start + li) % cap];
+        }
+        return true;
     }
-
-    std::lock_guard<std::mutex> lk(m);
-    if (size < (size_t)B) return false;
-
-    const size_t snapSize = size;
-    const size_t start = (head + cap - snapSize) % cap;
-
-    for (int i = 0; i < B; ++i) {
-        size_t li = (size_t)(biased[(size_t)i] * (double)snapSize);
-        if (li >= snapSize) li = snapSize - 1;
-        out[(size_t)i] = buf[(start + li) % cap];
-    }
-    return true;
-}
 
     size_t currentSize() {
         std::lock_guard<std::mutex> lk(m);
@@ -5851,8 +5858,8 @@ struct ITrainInferenceServer {
     virtual int size() const = 0;
 
     virtual bool submit(std::unique_ptr<PendingNN>&& job,
-                        const std::atomic<bool>* extCancel = nullptr,
-                        const std::atomic<bool>* extAbort  = nullptr) = 0;
+        const std::atomic<bool>* extCancel = nullptr,
+        const std::atomic<bool>* extAbort = nullptr) = 0;
 
     virtual void waitIdle() = 0;
     virtual void requestStop() = 0;
@@ -5878,9 +5885,10 @@ struct UnifiedInferenceServerTrain : ITrainInferenceServer {
     bool busyFlag = false;
 
     explicit UnifiedInferenceServerTrain(BackendBinding be,
-                                         MCTSTable* fallbackOwner,
-                                         int qCap)
-        : backend(be), defaultOwner(fallbackOwner), queueCap(qCap) {}
+        MCTSTable* fallbackOwner,
+        int qCap)
+        : backend(be), defaultOwner(fallbackOwner), queueCap(qCap) {
+    }
 
     void start() {
         {
@@ -5912,13 +5920,13 @@ struct UnifiedInferenceServerTrain : ITrainInferenceServer {
     }
 
     bool submit(std::unique_ptr<PendingNN>&& job,
-                const std::atomic<bool>* extCancel = nullptr,
-                const std::atomic<bool>* extAbort  = nullptr) override {
+        const std::atomic<bool>* extCancel = nullptr,
+        const std::atomic<bool>* extAbort = nullptr) override {
         auto cancelled = [&]() -> bool {
             return stop.load(std::memory_order_relaxed) ||
-                   (extCancel && extCancel->load(std::memory_order_relaxed)) ||
-                   (extAbort && extAbort->load(std::memory_order_relaxed));
-        };
+                (extCancel && extCancel->load(std::memory_order_relaxed)) ||
+                (extAbort && extAbort->load(std::memory_order_relaxed));
+            };
 
         std::unique_lock<std::mutex> lk(m);
 
@@ -5940,7 +5948,7 @@ struct UnifiedInferenceServerTrain : ITrainInferenceServer {
         std::unique_lock<std::mutex> lk(m);
         cvIdle.wait(lk, [&] {
             return q.empty() && !busyFlag;
-        });
+            });
     }
 
     void clearQueueUnsafeWhenIdle() {
@@ -5989,13 +5997,13 @@ private:
     // processBatch() only expands/cancels jobs.
     // Logical completion + reset + recycle are done by freePendingBatch() in the caller.
     void processBatch(std::vector<std::unique_ptr<PendingNN>>& jobs,
-                      std::vector<const PendingNN*>& batchPtrs,
-                      std::vector<float>& values
+        std::vector<const PendingNN*>& batchPtrs,
+        std::vector<float>& values
 #if AI_HAVE_CUDA_KERNELS
-                      , std::vector<float>& logits
+        , std::vector<float>& logits
 #else
-                      , std::vector<float>& policy
-                      , std::vector<Position>& posBatch
+        , std::vector<float>& policy
+        , std::vector<Position>& posBatch
 #endif
     ) {
         const int B = (int)jobs.size();
@@ -6106,11 +6114,11 @@ private:
     }
 
     void emergencyAbortAndDrain(std::vector<std::unique_ptr<PendingNN>>& batch,
-                                std::vector<std::unique_ptr<PendingNN>>& add,
-                                const char* what) noexcept {
+        std::vector<std::unique_ptr<PendingNN>>& add,
+        const char* what) noexcept {
         try {
             std::cerr << "[UnifiedInferenceServerTrain] FATAL in run(): "
-                      << (what ? what : "unknown exception") << "\n";
+                << (what ? what : "unknown exception") << "\n";
         }
         catch (...) {
         }
@@ -6169,7 +6177,7 @@ private:
 
                     cvNotEmpty.wait(lk, [&] {
                         return stop.load(std::memory_order_relaxed) || !q.empty();
-                    });
+                        });
 
                     if (stop.load(std::memory_order_relaxed) && q.empty()) break;
 
@@ -6183,13 +6191,13 @@ private:
                     std::chrono::steady_clock::now() + std::chrono::microseconds(200);
 
                 while ((int)batch.size() < TRT_MAX_BATCH &&
-                       std::chrono::steady_clock::now() < tFillEnd) {
+                    std::chrono::steady_clock::now() < tFillEnd) {
                     std::unique_lock<std::mutex> lk(m);
 
                     if (q.empty()) {
                         cvNotEmpty.wait_until(lk, tFillEnd, [&] {
                             return stop.load(std::memory_order_relaxed) || !q.empty();
-                        });
+                            });
                     }
 
                     if (q.empty()) break;
@@ -6252,12 +6260,14 @@ private:
 
 struct InferenceServerTrain final : UnifiedInferenceServerTrain {
     explicit InferenceServerTrain(MCTSTable& tab, BackendBinding be)
-        : UnifiedInferenceServerTrain(be, &tab, 8 * TRT_MAX_BATCH) {}
+        : UnifiedInferenceServerTrain(be, &tab, 8 * TRT_MAX_BATCH) {
+    }
 };
 
 struct SharedInferenceServerTrain final : UnifiedInferenceServerTrain {
     explicit SharedInferenceServerTrain(BackendBinding be)
-        : UnifiedInferenceServerTrain(be, nullptr, 16 * TRT_MAX_BATCH) {}
+        : UnifiedInferenceServerTrain(be, nullptr, 16 * TRT_MAX_BATCH) {
+    }
 };
 // ------------------------------------------------------------
 // SearchPool: постоянные MCTS-воркеры (НЕ пересоздаём потоки на каждый search)
@@ -6266,9 +6276,9 @@ static AI_FORCEINLINE bool tryClaimSimBudget(std::atomic<int>& simsLeft) {
     int cur = simsLeft.load(std::memory_order_relaxed);
     while (cur > 0) {
         if (simsLeft.compare_exchange_weak(
-                cur, cur - 1,
-                std::memory_order_relaxed,
-                std::memory_order_relaxed)) {
+            cur, cur - 1,
+            std::memory_order_relaxed,
+            std::memory_order_relaxed)) {
             return true;
         }
     }
@@ -6307,20 +6317,20 @@ struct SearchPool {
     int jobId = 0;
     std::atomic<int> workersBusy{ 0 };
     std::atomic<int> simsLeft{ 0 };
-std::atomic<uint64_t> progressTick{ 0 };
+    std::atomic<uint64_t> progressTick{ 0 };
     std::atomic<uint64_t> statSimsOk{ 0 };
     std::atomic<uint64_t> statSimsFail{ 0 };
     std::atomic<uint64_t> statTTHit{ 0 };
     std::atomic<uint64_t> statTTMiss{ 0 };
     std::atomic<uint64_t> statDepthSum{ 0 };
 
-AI_FORCEINLINE void noteProgress() {
-    const uint64_t t = progressTick.fetch_add(1, std::memory_order_relaxed) + 1ull;
+    AI_FORCEINLINE void noteProgress() {
+        const uint64_t t = progressTick.fetch_add(1, std::memory_order_relaxed) + 1ull;
 
-    if ((t & 31ull) == 0ull) {
-        cvProgress.notify_one();
+        if ((t & 31ull) == 0ull) {
+            cvProgress.notify_one();
+        }
     }
-}
     // job params (valid only during active job)
     MCTSTable* T = nullptr;
     ITrainInferenceServer* srv = nullptr;
@@ -6331,95 +6341,95 @@ AI_FORCEINLINE void noteProgress() {
 
     unsigned threads = 1;
 
-SearchPoolStatsSnapshot snapshotStats() const {
-    SearchPoolStatsSnapshot s;
-    s.simsOk = statSimsOk.load(std::memory_order_relaxed);
-    s.simsFail = statSimsFail.load(std::memory_order_relaxed);
-    s.ttHit = statTTHit.load(std::memory_order_relaxed);
-    s.ttMiss = statTTMiss.load(std::memory_order_relaxed);
-    s.depthSum = statDepthSum.load(std::memory_order_relaxed);
-    return s;
-}
-
-void start(unsigned nThreads) {
-    if (!pool.empty()) {
-        throw std::logic_error("SearchPool::start() called while pool is already running");
+    SearchPoolStatsSnapshot snapshotStats() const {
+        SearchPoolStatsSnapshot s;
+        s.simsOk = statSimsOk.load(std::memory_order_relaxed);
+        s.simsFail = statSimsFail.load(std::memory_order_relaxed);
+        s.ttHit = statTTHit.load(std::memory_order_relaxed);
+        s.ttMiss = statTTMiss.load(std::memory_order_relaxed);
+        s.depthSum = statDepthSum.load(std::memory_order_relaxed);
+        return s;
     }
 
-    const unsigned newThreads = std::max(1u, nThreads);
-    std::vector<std::thread> newPool;
-    newPool.reserve(newThreads);
-
-    // Prepare clean "starting" state before workers begin.
-    {
-        std::lock_guard<std::mutex> lk(m);
-        stop = false;
-
-        // no active job at startup
-        T = nullptr;
-        srv = nullptr;
-        rootPos = nullptr;
-        path = nullptr;
-        mask = nullptr;
-        activeWG = nullptr;
-        jobId = 0;
-    }
-
-    cancelJob.store(false, std::memory_order_relaxed);
-    fatal.store(false, std::memory_order_relaxed);
-    workersBusy.store(0, std::memory_order_relaxed);
-    simsLeft.store(0, std::memory_order_relaxed);
-    progressTick.store(0, std::memory_order_relaxed);
-    statSimsOk.store(0, std::memory_order_relaxed);
-    statSimsFail.store(0, std::memory_order_relaxed);
-    statTTHit.store(0, std::memory_order_relaxed);
-    statTTMiss.store(0, std::memory_order_relaxed);
-    statDepthSum.store(0, std::memory_order_relaxed);
-
-    {
-        std::lock_guard<std::mutex> lk(fatalM);
-        fatalReason.clear();
-    }
-
-    try {
-        for (unsigned tid = 0; tid < newThreads; ++tid) {
-            newPool.emplace_back([this, tid] { this->workerMain(tid); });
+    void start(unsigned nThreads) {
+        if (!pool.empty()) {
+            throw std::logic_error("SearchPool::start() called while pool is already running");
         }
-    }
-    catch (...) {
-        // Stop and wake any workers that were already created.
+
+        const unsigned newThreads = std::max(1u, nThreads);
+        std::vector<std::thread> newPool;
+        newPool.reserve(newThreads);
+
+        // Prepare clean "starting" state before workers begin.
         {
             std::lock_guard<std::mutex> lk(m);
-            stop = true;
-        }
+            stop = false;
 
-        cancelJob.store(true, std::memory_order_relaxed);
-        simsLeft.store(0, std::memory_order_relaxed);
-        cv.notify_all();
-        cvProgress.notify_all();
-
-        for (auto& th : newPool) {
-            if (th.joinable()) th.join();
-        }
-
-        // Restore inert state.
-        {
-            std::lock_guard<std::mutex> lk(m);
+            // no active job at startup
             T = nullptr;
             srv = nullptr;
             rootPos = nullptr;
             path = nullptr;
             mask = nullptr;
+            activeWG = nullptr;
             jobId = 0;
         }
 
+        cancelJob.store(false, std::memory_order_relaxed);
+        fatal.store(false, std::memory_order_relaxed);
         workersBusy.store(0, std::memory_order_relaxed);
-        throw;
-    }
+        simsLeft.store(0, std::memory_order_relaxed);
+        progressTick.store(0, std::memory_order_relaxed);
+        statSimsOk.store(0, std::memory_order_relaxed);
+        statSimsFail.store(0, std::memory_order_relaxed);
+        statTTHit.store(0, std::memory_order_relaxed);
+        statTTMiss.store(0, std::memory_order_relaxed);
+        statDepthSum.store(0, std::memory_order_relaxed);
 
-    pool = std::move(newPool);
-    threads = newThreads;
-}
+        {
+            std::lock_guard<std::mutex> lk(fatalM);
+            fatalReason.clear();
+        }
+
+        try {
+            for (unsigned tid = 0; tid < newThreads; ++tid) {
+                newPool.emplace_back([this, tid] { this->workerMain(tid); });
+            }
+        }
+        catch (...) {
+            // Stop and wake any workers that were already created.
+            {
+                std::lock_guard<std::mutex> lk(m);
+                stop = true;
+            }
+
+            cancelJob.store(true, std::memory_order_relaxed);
+            simsLeft.store(0, std::memory_order_relaxed);
+            cv.notify_all();
+            cvProgress.notify_all();
+
+            for (auto& th : newPool) {
+                if (th.joinable()) th.join();
+            }
+
+            // Restore inert state.
+            {
+                std::lock_guard<std::mutex> lk(m);
+                T = nullptr;
+                srv = nullptr;
+                rootPos = nullptr;
+                path = nullptr;
+                mask = nullptr;
+                jobId = 0;
+            }
+
+            workersBusy.store(0, std::memory_order_relaxed);
+            throw;
+        }
+
+        pool = std::move(newPool);
+        threads = newThreads;
+    }
 
     void shutdown() {
         {
@@ -6485,7 +6495,8 @@ void start(unsigned nThreads) {
 
             try {
                 th.join();
-            } catch (...) {
+            }
+            catch (...) {
             }
         }
     }
@@ -6510,318 +6521,319 @@ void start(unsigned nThreads) {
         throw std::runtime_error("[SearchPool] FATAL: " + getFatalReason());
     }
 
-void runSims(MCTSTable& TT,
-    ITrainInferenceServer& server,
-    const Position& rp,
-    const std::array<uint64_t, 4>& pth,
-    const std::array<int, 64>& msk,
-    int sims) {
+    void runSims(MCTSTable& TT,
+        ITrainInferenceServer& server,
+        const Position& rp,
+        const std::array<uint64_t, 4>& pth,
+        const std::array<int, 64>& msk,
+        int sims) {
 
-    if (isFatal()) {
-        throw std::runtime_error("[SearchPool] already failed: " + getFatalReason());
-    }
-
-    if (pool.empty()) {
-        failFast("runSims() called with no worker threads", &TT);
-    }
-
-    if (TT.abort.load(std::memory_order_relaxed)) return;
-
-    SearchWaitGroup wg;
-    wg.pending.store(0, std::memory_order_relaxed);
-
-    simsLeft.store(sims, std::memory_order_relaxed);
-    cancelJob.store(false, std::memory_order_relaxed);
-    workersBusy.store((int)threads, std::memory_order_relaxed);
-
-    {
-        std::lock_guard<std::mutex> lk(m);
-        T = &TT;
-        srv = &server;
-        rootPos = &rp;
-        path = &pth;
-        mask = &msk;
-        activeWG = &wg;
-        ++jobId;
-    }
-    cv.notify_all();
-    cvProgress.notify_all();
-
-    using Clock = std::chrono::steady_clock;
-
-    // Watchdog thresholds:
-    // warning only if nothing changed for a while,
-    // fatal only if stall is really long.
-    static constexpr auto WATCHDOG_WARN_AFTER  = std::chrono::seconds(5);
-    static constexpr auto WATCHDOG_FATAL_AFTER = std::chrono::seconds(30);
-
-    uint64_t lastTick = progressTick.load(std::memory_order_relaxed);
-    int lastSimsLeft = simsLeft.load(std::memory_order_relaxed);
-    int lastQSize = server.size();
-    int lastInFlight = g_inferInFlight.load(std::memory_order_relaxed);
-
-    auto lastProgressAt = Clock::now();
-    auto lastWarnAt = Clock::time_point::min();
-
-    static constexpr auto WATCHDOG_WAIT_SLICE = std::chrono::milliseconds(250);
-
-    for (;;) {
         if (isFatal()) {
-            failFast(getFatalReason(), &TT);
+            throw std::runtime_error("[SearchPool] already failed: " + getFatalReason());
         }
 
-        if (workersBusy.load(std::memory_order_relaxed) == 0) break;
+        if (pool.empty()) {
+            failFast("runSims() called with no worker threads", &TT);
+        }
+
+        if (TT.abort.load(std::memory_order_relaxed)) return;
+
+        SearchWaitGroup wg;
+        wg.pending.store(0, std::memory_order_relaxed);
+
+        simsLeft.store(sims, std::memory_order_relaxed);
+        cancelJob.store(false, std::memory_order_relaxed);
+        workersBusy.store((int)threads, std::memory_order_relaxed);
 
         {
-            std::unique_lock<std::mutex> lk(progressM);
-            cvProgress.wait_for(lk, WATCHDOG_WAIT_SLICE, [&] {
-                return isFatal() ||
-                       workersBusy.load(std::memory_order_relaxed) == 0 ||
-                       progressTick.load(std::memory_order_relaxed) != lastTick ||
-                       simsLeft.load(std::memory_order_relaxed) != lastSimsLeft ||
-                       server.size() != lastQSize ||
-                       g_inferInFlight.load(std::memory_order_relaxed) != lastInFlight ||
-                       TT.abort.load(std::memory_order_relaxed);
-            });
+            std::lock_guard<std::mutex> lk(m);
+            T = &TT;
+            srv = &server;
+            rootPos = &rp;
+            path = &pth;
+            mask = &msk;
+            activeWG = &wg;
+            ++jobId;
+        }
+        cv.notify_all();
+        cvProgress.notify_all();
+
+        using Clock = std::chrono::steady_clock;
+
+        // Watchdog thresholds:
+        // warning only if nothing changed for a while,
+        // fatal only if stall is really long.
+        static constexpr auto WATCHDOG_WARN_AFTER = std::chrono::seconds(5);
+        static constexpr auto WATCHDOG_FATAL_AFTER = std::chrono::seconds(30);
+
+        uint64_t lastTick = progressTick.load(std::memory_order_relaxed);
+        int lastSimsLeft = simsLeft.load(std::memory_order_relaxed);
+        int lastQSize = server.size();
+        int lastInFlight = g_inferInFlight.load(std::memory_order_relaxed);
+
+        auto lastProgressAt = Clock::now();
+        auto lastWarnAt = Clock::time_point::min();
+
+        static constexpr auto WATCHDOG_WAIT_SLICE = std::chrono::milliseconds(250);
+
+        for (;;) {
+            if (isFatal()) {
+                failFast(getFatalReason(), &TT);
+            }
+
+            if (workersBusy.load(std::memory_order_relaxed) == 0) break;
+
+            {
+                std::unique_lock<std::mutex> lk(progressM);
+                cvProgress.wait_for(lk, WATCHDOG_WAIT_SLICE, [&] {
+                    return isFatal() ||
+                        workersBusy.load(std::memory_order_relaxed) == 0 ||
+                        progressTick.load(std::memory_order_relaxed) != lastTick ||
+                        simsLeft.load(std::memory_order_relaxed) != lastSimsLeft ||
+                        server.size() != lastQSize ||
+                        g_inferInFlight.load(std::memory_order_relaxed) != lastInFlight ||
+                        TT.abort.load(std::memory_order_relaxed);
+                    });
+            }
+
+            if (isFatal()) {
+                failFast(getFatalReason(), &TT);
+            }
+
+            if (TT.abort.load(std::memory_order_relaxed)) {
+                cancelJob.store(true, std::memory_order_relaxed);
+                simsLeft.store(0, std::memory_order_relaxed);
+            }
+
+            const int busy = workersBusy.load(std::memory_order_relaxed);
+            if (busy == 0) break;
+
+            const auto now = Clock::now();
+
+            const uint64_t tickNow = progressTick.load(std::memory_order_relaxed);
+            const int simsNow = simsLeft.load(std::memory_order_relaxed);
+            const int qNow = server.size();
+            const int inFlightNow = g_inferInFlight.load(std::memory_order_relaxed);
+
+            const bool progressed =
+                (tickNow != lastTick) ||
+                (simsNow != lastSimsLeft) ||
+                (qNow != lastQSize) ||
+                (inFlightNow != lastInFlight);
+
+            if (progressed) {
+                lastTick = tickNow;
+                lastSimsLeft = simsNow;
+                lastQSize = qNow;
+                lastInFlight = inFlightNow;
+                lastProgressAt = now;
+            }
+            else {
+                const auto stalledFor = now - lastProgressAt;
+
+                if (stalledFor >= WATCHDOG_FATAL_AFTER) {
+                    std::ostringstream oss;
+                    oss << "stall watchdog fired: no progress for "
+                        << std::chrono::duration_cast<std::chrono::milliseconds>(stalledFor).count()
+                        << " ms"
+                        << " busy=" << busy
+                        << " simsLeft=" << simsNow
+                        << " nnQueue=" << qNow
+                        << " inferInFlight=" << inFlightNow
+                        << " ttAbort=" << TT.abort.load(std::memory_order_relaxed);
+                    failFast(oss.str(), &TT);
+                }
+
+                if (stalledFor >= WATCHDOG_WARN_AFTER &&
+                    (lastWarnAt == Clock::time_point::min() ||
+                        now - lastWarnAt >= std::chrono::seconds(2))) {
+                    lastWarnAt = now;
+                    std::cerr << "[SearchPool] watchdog warning: stalled for "
+                        << std::chrono::duration_cast<std::chrono::milliseconds>(stalledFor).count()
+                        << " ms"
+                        << " busy=" << busy
+                        << " simsLeft=" << simsNow
+                        << " nnQueue=" << qNow
+                        << " inferInFlight=" << inFlightNow
+                        << " ttAbort=" << TT.abort.load(std::memory_order_relaxed)
+                        << "\n";
+                }
+            }
+        }
+
+        waitGroupWaitZero(&wg);
+
+        {
+            std::lock_guard<std::mutex> lk(m);
+            activeWG = nullptr;
         }
 
         if (isFatal()) {
             failFast(getFatalReason(), &TT);
         }
-
-        if (TT.abort.load(std::memory_order_relaxed)) {
-            cancelJob.store(true, std::memory_order_relaxed);
-            simsLeft.store(0, std::memory_order_relaxed);
-        }
-
-        const int busy = workersBusy.load(std::memory_order_relaxed);
-        if (busy == 0) break;
-
-        const auto now = Clock::now();
-
-        const uint64_t tickNow = progressTick.load(std::memory_order_relaxed);
-        const int simsNow = simsLeft.load(std::memory_order_relaxed);
-        const int qNow = server.size();
-        const int inFlightNow = g_inferInFlight.load(std::memory_order_relaxed);
-
-        const bool progressed =
-            (tickNow != lastTick) ||
-            (simsNow != lastSimsLeft) ||
-            (qNow != lastQSize) ||
-            (inFlightNow != lastInFlight);
-
-        if (progressed) {
-            lastTick = tickNow;
-            lastSimsLeft = simsNow;
-            lastQSize = qNow;
-            lastInFlight = inFlightNow;
-            lastProgressAt = now;
-        } else {
-            const auto stalledFor = now - lastProgressAt;
-
-            if (stalledFor >= WATCHDOG_FATAL_AFTER) {
-                std::ostringstream oss;
-                oss << "stall watchdog fired: no progress for "
-                    << std::chrono::duration_cast<std::chrono::milliseconds>(stalledFor).count()
-                    << " ms"
-                    << " busy=" << busy
-                    << " simsLeft=" << simsNow
-                    << " nnQueue=" << qNow
-                    << " inferInFlight=" << inFlightNow
-                    << " ttAbort=" << TT.abort.load(std::memory_order_relaxed);
-                failFast(oss.str(), &TT);
-            }
-
-            if (stalledFor >= WATCHDOG_WARN_AFTER &&
-                (lastWarnAt == Clock::time_point::min() ||
-                 now - lastWarnAt >= std::chrono::seconds(2))) {
-                lastWarnAt = now;
-                std::cerr << "[SearchPool] watchdog warning: stalled for "
-                          << std::chrono::duration_cast<std::chrono::milliseconds>(stalledFor).count()
-                          << " ms"
-                          << " busy=" << busy
-                          << " simsLeft=" << simsNow
-                          << " nnQueue=" << qNow
-                          << " inferInFlight=" << inFlightNow
-                          << " ttAbort=" << TT.abort.load(std::memory_order_relaxed)
-                          << "\n";
-            }
-        }
     }
-
-    waitGroupWaitZero(&wg);
-
-    {
-        std::lock_guard<std::mutex> lk(m);
-        activeWG = nullptr;
-    }
-
-    if (isFatal()) {
-        failFast(getFatalReason(), &TT);
-    }
-}
 private:
-void workerMain(unsigned tid) {
-    int myJob = 0;
-    uint32_t jitterBase = (uint32_t)(0x9E3779B9u * (tid + 1));
+    void workerMain(unsigned tid) {
+        int myJob = 0;
+        uint32_t jitterBase = (uint32_t)(0x9E3779B9u * (tid + 1));
 
-    for (;;) {
-        MCTSTable* TT = nullptr;
-        ITrainInferenceServer* server = nullptr;
-        SearchWaitGroup* wg = nullptr;
-        const Position* rp = nullptr;
-        const std::array<uint64_t, 4>* pth = nullptr;
-        const std::array<int, 64>* msk = nullptr;
+        for (;;) {
+            MCTSTable* TT = nullptr;
+            ITrainInferenceServer* server = nullptr;
+            SearchWaitGroup* wg = nullptr;
+            const Position* rp = nullptr;
+            const std::array<uint64_t, 4>* pth = nullptr;
+            const std::array<int, 64>* msk = nullptr;
 
-        bool busyAccounted = false;
+            bool busyAccounted = false;
 
-        try {
-            {
-                std::unique_lock<std::mutex> lk(m);
-                cv.wait(lk, [&] {
-                    return stop || jobId != myJob;
-                });
+            try {
+                {
+                    std::unique_lock<std::mutex> lk(m);
+                    cv.wait(lk, [&] {
+                        return stop || jobId != myJob;
+                        });
 
-                if (stop) return;
+                    if (stop) return;
 
-                myJob = jobId;
-                TT = T;
-                server = srv;
-                rp = rootPos;
-                pth = path;
-                msk = mask;
-                wg = activeWG;
-            }
+                    myJob = jobId;
+                    TT = T;
+                    server = srv;
+                    rp = rootPos;
+                    pth = path;
+                    msk = mask;
+                    wg = activeWG;
+                }
 
-            busyAccounted = true;
+                busyAccounted = true;
 
-            if (!TT || TT->abort.load(std::memory_order_relaxed)) {
-                workersBusy.fetch_sub(1, std::memory_order_relaxed);
-                cvProgress.notify_all();
-                busyAccounted = false;
-                continue;
-            }
+                if (!TT || TT->abort.load(std::memory_order_relaxed)) {
+                    workersBusy.fetch_sub(1, std::memory_order_relaxed);
+                    cvProgress.notify_all();
+                    busyAccounted = false;
+                    continue;
+                }
 
-            int k = 0;
-            int queueSpins = 0;
+                int k = 0;
+                int queueSpins = 0;
 
-            for (;;) {
-                if (fatal.load(std::memory_order_relaxed)) break;
-                if (TT->abort.load(std::memory_order_relaxed)) break;
-                if (cancelJob.load(std::memory_order_relaxed)) break;
-
-                if (server) {
-                    throttleOnNNQueue_NoSleep(server->size(), queueSpins);
-
+                for (;;) {
                     if (fatal.load(std::memory_order_relaxed)) break;
                     if (TT->abort.load(std::memory_order_relaxed)) break;
                     if (cancelJob.load(std::memory_order_relaxed)) break;
+
+                    if (server) {
+                        throttleOnNNQueue_NoSleep(server->size(), queueSpins);
+
+                        if (fatal.load(std::memory_order_relaxed)) break;
+                        if (TT->abort.load(std::memory_order_relaxed)) break;
+                        if (cancelJob.load(std::memory_order_relaxed)) break;
+                    }
+
+                    if (!tryClaimSimBudget(simsLeft)) break;
+
+                    PendingNN localPending;
+                    resetPendingNN(localPending);
+                    PendingNNGuard localGuard(localPending);
+
+                    bool needNN = false;
+                    SimDiag sd{};
+
+                    bool ok = runOneSim(*TT, *rp, *pth, *msk,
+                        localPending, needNN,
+                        jitterBase + (uint32_t)(k++) * 1337u,
+                        &sd);
+
+                    if (!ok) {
+                        statSimsFail.fetch_add(1, std::memory_order_relaxed);
+                        refundSimBudget(simsLeft);
+
+                        if (fatal.load(std::memory_order_relaxed)) break;
+                        if (TT->abort.load(std::memory_order_relaxed)) break;
+                        if (cancelJob.load(std::memory_order_relaxed)) break;
+
+                        cpuRelax();
+                        continue;
+                    }
+
+                    statSimsOk.fetch_add(1, std::memory_order_relaxed);
+                    statTTHit.fetch_add(sd.ttHit, std::memory_order_relaxed);
+                    statTTMiss.fetch_add(sd.ttMiss, std::memory_order_relaxed);
+                    statDepthSum.fetch_add(sd.depth, std::memory_order_relaxed);
+
+                    noteProgress();
+
+                    if (needNN && server) {
+                        throttleOnNNQueue_NoSleep(server->size(), queueSpins);
+
+                        if (fatal.load(std::memory_order_relaxed) ||
+                            cancelJob.load(std::memory_order_relaxed) ||
+                            TT->abort.load(std::memory_order_relaxed)) {
+                            break; // localGuard will cleanup
+                        }
+
+                        auto p = allocPendingNN();
+                        PendingNNPtrGuard heapGuard(p);
+
+                        *p = localPending;
+                        localGuard.release();   // ownership moved from localPending to *p
+
+                        p->ownerT = TT;
+                        p->waitGroup = wg;
+
+                        waitGroupAdd(wg);
+
+                        if (!server->submit(std::move(p), &cancelJob, &TT->abort)) {
+                            if (!fatal.load(std::memory_order_relaxed) &&
+                                !cancelJob.load(std::memory_order_relaxed) &&
+                                !TT->abort.load(std::memory_order_relaxed)) {
+                                refundSimBudget(simsLeft);
+                            }
+                            break; // heapGuard will cleanup + free
+                        }
+
+                        heapGuard.release();
+                        noteProgress();
+                    }
+                    else if (needNN && !server) {
+                        refundSimBudget(simsLeft);
+                        break; // localGuard will cleanup
+                    }
+                    else {
+                        localGuard.release(); // no pending NN ownership survived this iteration
+                    }
                 }
 
-                if (!tryClaimSimBudget(simsLeft)) break;
-
-PendingNN localPending;
-resetPendingNN(localPending);
-PendingNNGuard localGuard(localPending);
-
-bool needNN = false;
-SimDiag sd{};
-
-bool ok = runOneSim(*TT, *rp, *pth, *msk,
-                    localPending, needNN,
-                    jitterBase + (uint32_t)(k++) * 1337u,
-                    &sd);
-
-if (!ok) {
-    statSimsFail.fetch_add(1, std::memory_order_relaxed);
-    refundSimBudget(simsLeft);
-
-    if (fatal.load(std::memory_order_relaxed)) break;
-    if (TT->abort.load(std::memory_order_relaxed)) break;
-    if (cancelJob.load(std::memory_order_relaxed)) break;
-
-    cpuRelax();
-    continue;
-}
-
-statSimsOk.fetch_add(1, std::memory_order_relaxed);
-statTTHit.fetch_add(sd.ttHit, std::memory_order_relaxed);
-statTTMiss.fetch_add(sd.ttMiss, std::memory_order_relaxed);
-statDepthSum.fetch_add(sd.depth, std::memory_order_relaxed);
-
-noteProgress();
-
-if (needNN && server) {
-    throttleOnNNQueue_NoSleep(server->size(), queueSpins);
-
-    if (fatal.load(std::memory_order_relaxed) ||
-        cancelJob.load(std::memory_order_relaxed) ||
-        TT->abort.load(std::memory_order_relaxed)) {
-        break; // localGuard will cleanup
-    }
-
-    auto p = allocPendingNN();
-    PendingNNPtrGuard heapGuard(p);
-
-    *p = localPending;
-    localGuard.release();   // ownership moved from localPending to *p
-
-    p->ownerT = TT;
-    p->waitGroup = wg;
-
-    waitGroupAdd(wg);
-
-    if (!server->submit(std::move(p), &cancelJob, &TT->abort)) {
-        if (!fatal.load(std::memory_order_relaxed) &&
-            !cancelJob.load(std::memory_order_relaxed) &&
-            !TT->abort.load(std::memory_order_relaxed)) {
-            refundSimBudget(simsLeft);
-        }
-        break; // heapGuard will cleanup + free
-    }
-
-    heapGuard.release();
-    noteProgress();
-}
-else if (needNN && !server) {
-    refundSimBudget(simsLeft);
-    break; // localGuard will cleanup
-}
-else {
-    localGuard.release(); // no pending NN ownership survived this iteration
-}
-            }
-
-            workersBusy.fetch_sub(1, std::memory_order_relaxed);
-            cvProgress.notify_all();
-            busyAccounted = false;
-        }
-        catch (const std::exception& e) {
-            if (busyAccounted) {
                 workersBusy.fetch_sub(1, std::memory_order_relaxed);
                 cvProgress.notify_all();
                 busyAccounted = false;
             }
+            catch (const std::exception& e) {
+                if (busyAccounted) {
+                    workersBusy.fetch_sub(1, std::memory_order_relaxed);
+                    cvProgress.notify_all();
+                    busyAccounted = false;
+                }
 
-            std::ostringstream oss;
-            oss << "workerMain tid=" << tid << " exception: " << e.what();
-            requestFailFast(oss.str(), TT);
-            return;
-        }
-        catch (...) {
-            if (busyAccounted) {
-                workersBusy.fetch_sub(1, std::memory_order_relaxed);
-                cvProgress.notify_all();
-                busyAccounted = false;
+                std::ostringstream oss;
+                oss << "workerMain tid=" << tid << " exception: " << e.what();
+                requestFailFast(oss.str(), TT);
+                return;
             }
+            catch (...) {
+                if (busyAccounted) {
+                    workersBusy.fetch_sub(1, std::memory_order_relaxed);
+                    cvProgress.notify_all();
+                    busyAccounted = false;
+                }
 
-            std::ostringstream oss;
-            oss << "workerMain tid=" << tid << " unknown exception";
-            requestFailFast(oss.str(), TT);
-            return;
+                std::ostringstream oss;
+                oss << "workerMain tid=" << tid << " unknown exception";
+                requestFailFast(oss.str(), TT);
+                return;
+            }
         }
     }
-}
 };
 
 // ------------------------------------------------------------
@@ -6853,7 +6865,7 @@ static bool ensureExpandedTrain(MCTSTable& T,
         if (ex == 2) {
             if (!waitWhileExpanding(root)) {
                 std::cerr << "[ensureExpandedTrain] timeout while waiting for root expansion, key="
-                          << rootPos.key << "\n";
+                    << rootPos.key << "\n";
                 T.abort.store(true, std::memory_order_release);
                 return false;
             }
@@ -6928,7 +6940,7 @@ static bool ensureExpandedTrain(MCTSTable& T,
 
     if (!ok) {
         std::cerr << "[ensureExpandedTrain] inferBatchGather failed for root key="
-                  << rootPos.key << "\n";
+            << rootPos.key << "\n";
         T.abort.store(true, std::memory_order_release);
         return false; // pGuard will cleanup
     }
@@ -6947,7 +6959,7 @@ static bool ensureExpandedTrain(MCTSTable& T,
 
     if (!ok) {
         std::cerr << "[ensureExpandedTrain] inferBatch failed for root key="
-                  << rootPos.key << "\n";
+            << rootPos.key << "\n";
         T.abort.store(true, std::memory_order_release);
         return false; // pGuard will cleanup
     }
@@ -7157,13 +7169,13 @@ struct ArenaStats {
 };
 
 static int playOneArenaGame(SelfPlayContext& curCtx,
-                            SelfPlayContext& oldCtx,
-                            const Position& startPos,
-                            const std::array<uint64_t, 4>& path,
-                            const std::array<int, 64>& mask,
-                            bool currentIsWhite,
-                            int simsPerPos,
-                            int maxPlies = 256) {
+    SelfPlayContext& oldCtx,
+    const Position& startPos,
+    const std::array<uint64_t, 4>& path,
+    const std::array<int, 64>& mask,
+    bool currentIsWhite,
+    int simsPerPos,
+    int maxPlies = 256) {
     Position pos = startPos;
 
     for (int ply = 0; ply < maxPlies; ++ply) {
@@ -7253,9 +7265,9 @@ static ArenaStats runArenaMatch(int games, int simsPerPos) {
 
         if (((g + 1) % 50) == 0) {
             std::cout << "[arena] pair " << (g + 1) << "/" << pairs
-                      << "  W/D/L = "
-                      << st.curWins << "/" << st.draws << "/" << st.oldWins
-                      << "  score=" << st.currentScore() << "\n";
+                << "  W/D/L = "
+                << st.curWins << "/" << st.draws << "/" << st.oldWins
+                << "  score=" << st.currentScore() << "\n";
         }
     }
 
@@ -7324,7 +7336,7 @@ static void selfPlayOneGame960(GameContext& sp,
         if (term) { outTerminated = true; break; }
 
         if (ml.n == 0) {
-            makeRandom(pos,sp.T.findNodeNoInsert(pos.key));
+            makeRandom(pos, sp.T.findNodeNoInsert(pos.key));
             continue;
         }
 
@@ -7362,14 +7374,14 @@ static void selfPlayOneGame960(GameContext& sp,
     }
     else return;
 
-for (size_t i = 0; i < game.size(); ++i) {
-    int stm = sideAtSample[i];
-    float zi = (stm == 0) ? zWhite : (1.0f - zWhite);
-    game[i].z = 0.5f * zi + 0.5f * game[i].q;
-}
+    for (size_t i = 0; i < game.size(); ++i) {
+        int stm = sideAtSample[i];
+        float zi = (stm == 0) ? zWhite : (1.0f - zWhite);
+        game[i].z = 0.5f * zi + 0.5f * game[i].q;
+    }
 
-rb.pushMany(game);
-outSamplesAdded += (int)game.size();
+    rb.pushMany(game);
+    outSamplesAdded += (int)game.size();
 }
 
 // ------------------------------------------------------------
@@ -7402,7 +7414,7 @@ struct ModulePairCache {
 };
 
 static ModulePairCache buildModulePairCache(Net& dst, Net& src,
-                                             const char* tag = "ModulePairCache") {
+    const char* tag = "ModulePairCache") {
     ModulePairCache cache;
 
     auto srcParams = src->named_parameters(true);
@@ -7489,8 +7501,8 @@ struct CudaAutocastGuard {
     at::ScalarType prevDtype = at::kFloat;
 
     explicit CudaAutocastGuard(bool en,
-                               at::ScalarType dtype = at::kHalf,
-                               bool cacheEnabled = true)
+        at::ScalarType dtype = at::kHalf,
+        bool cacheEnabled = true)
         : enabled(en) {
         if (!enabled) return;
 
@@ -7588,7 +7600,7 @@ struct Trainer {
 
     // Cosine Annealing with Warmup
     uint64_t lr_warmup_steps = 10000;
-    uint64_t lr_total_steps  = 1000000;
+    uint64_t lr_total_steps = 1000000;
     double   lr_warmup_start_factor = 0.10;
 
     // Optional short smoothing after process restart/resume
@@ -7619,10 +7631,10 @@ struct Trainer {
 
     // Async H2D pipeline
     cudaStream_t h2dStream = nullptr;
-    std::array<cudaEvent_t, 2> h2dDone{{nullptr, nullptr}};
-    std::array<cudaEvent_t, 2> computeDone{{nullptr, nullptr}};
-    std::array<bool, 2> h2dDoneValid{{false, false}};
-    std::array<bool, 2> computeDoneValid{{false, false}};
+    std::array<cudaEvent_t, 2> h2dDone{ {nullptr, nullptr} };
+    std::array<cudaEvent_t, 2> computeDone{ {nullptr, nullptr} };
+    std::array<bool, 2> h2dDoneValid{ {false, false} };
+    std::array<bool, 2> computeDoneValid{ {false, false} };
 
     // State
     uint64_t steps = 0;
@@ -7781,499 +7793,505 @@ struct Trainer {
         const bool changed = std::fabs(current_lr - prev) > 1e-15;
         const bool restartWarmupJustFinished =
             (warmupStepsAfterRestart > 0 &&
-             steps == resumeStartStep + warmupStepsAfterRestart);
+                steps == resumeStartStep + warmupStepsAfterRestart);
 
         if (forceLog || changed || restartWarmupJustFinished) {
             std::cerr << "[Trainer] LR=" << current_lr
-                      << " (cosine=" << cosine_lr
-                      << ", restart_x=" << restart_mult
-                      << ", step=" << steps << ")\n";
+                << " (cosine=" << cosine_lr
+                << ", restart_x=" << restart_mult
+                << ", step=" << steps << ")\n";
         }
     }
-static AI_FORCEINLINE bool endsWithStr(const std::string& s, const char* suf) {
-    const size_t n = std::strlen(suf);
-    return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
-}
-
-static AI_FORCEINLINE void fillStageFromBatch(
-    TrainTensorStage& st,
-    const std::vector<TrainSample>& batch,
-    int B)
-{
-    float*   xp = st.x.data_ptr<float>();
-    int64_t* ip = st.idx.data_ptr<int64_t>();
-    float*   pp = st.prob.data_ptr<float>();
-    float*   zp = st.z.data_ptr<float>();
-    int64_t* np = st.nPi.data_ptr<int64_t>();
-
-    for (int i = 0; i < B; ++i) {
-        const TrainSample& s = batch[(size_t)i];
-
-        NNInput enc;
-        positionToNNInput(s.pos, enc);
-
-        std::memcpy(
-            xp + (size_t)i * (size_t)NN_INPUT_SIZE,
-            enc.data(),
-            (size_t)NN_INPUT_SIZE * sizeof(float)
-        );
-
-        np[(size_t)i] = (int64_t)s.nPi;
-
-        decodeTrainSamplePolicyRow(
-            s,
-            ip + (size_t)i * (size_t)AI_MAX_MOVES,
-            pp + (size_t)i * (size_t)AI_MAX_MOVES
-        );
-
-        zp[(size_t)i] = s.z;
+    static AI_FORCEINLINE bool endsWithStr(const std::string& s, const char* suf) {
+        const size_t n = std::strlen(suf);
+        return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
     }
-}
 
-void copyStageToDevice(int slot) {
-    if (!useCuda) return;
-    enqueueStageToDeviceAsync(slot);
-}
-void init(Net& model, Net& emaModel) {
-    try { torch::set_num_threads(1); }
-    catch (...) {}
-    try { torch::set_num_interop_threads(1); }
-    catch (...) {}
+    static AI_FORCEINLINE void fillStageFromBatch(
+        TrainTensorStage& st,
+        const std::vector<TrainSample>& batch,
+        int B)
+    {
+        float* xp = st.x.data_ptr<float>();
+        int64_t* ip = st.idx.data_ptr<int64_t>();
+        float* pp = st.prob.data_ptr<float>();
+        float* zp = st.z.data_ptr<float>();
+        int64_t* np = st.nPi.data_ptr<int64_t>();
 
-    device = torch::Device(torch::kCPU);
-    useCuda = false;
+        for (int i = 0; i < B; ++i) {
+            const TrainSample& s = batch[(size_t)i];
 
-    try {
-        if (torch::cuda::is_available() && torch::cuda::device_count() > 0) {
-            device = torch::Device(torch::kCUDA, 0);
-            useCuda = true;
+            NNInput enc;
+            positionToNNInput(s.pos, enc);
+
+            std::memcpy(
+                xp + (size_t)i * (size_t)NN_INPUT_SIZE,
+                enc.data(),
+                (size_t)NN_INPUT_SIZE * sizeof(float)
+            );
+
+            np[(size_t)i] = (int64_t)s.nPi;
+
+            decodeTrainSamplePolicyRow(
+                s,
+                ip + (size_t)i * (size_t)AI_MAX_MOVES,
+                pp + (size_t)i * (size_t)AI_MAX_MOVES
+            );
+
+            zp[(size_t)i] = s.z;
         }
     }
-    catch (...) {
+
+    void copyStageToDevice(int slot) {
+        if (!useCuda) return;
+        enqueueStageToDeviceAsync(slot);
+    }
+    void init(Net& model, Net& emaModel) {
+        try { torch::set_num_threads(1); }
+        catch (...) {}
+        try { torch::set_num_interop_threads(1); }
+        catch (...) {}
+
         device = torch::Device(torch::kCPU);
         useCuda = false;
-    }
 
-    useAmp = useCuda;          // AMP only on CUDA
-    ampDtype = at::kHalf;      // fp16 autocast on CUDA
-
-    scaler.enabled = useAmp;
-    scaler.scale = 65536.0f;
-    scaler.growthFactor = 2.0f;
-    scaler.backoffFactor = 0.5f;
-    scaler.growthInterval = 2000;
-    scaler.growthTracker = 0;
-    scaler.minScale = 1.0f;
-    lastAmpScale = scaler.scale;
-
-    std::cerr << "[Trainer] device=" << (useCuda ? "cuda" : "cpu")
-              << " amp=" << (useAmp ? "fp16" : "off") << "\n";
-
-    {
-        std::lock_guard<std::mutex> lk(g_modelMutex);
-        model->to(device);
-        model->train();
-
-        emaModel->to(device);
-        emaModel->eval();
-
-        // Build EMA cache AFTER final device placement.
-        emaCache = buildModulePairCache(emaModel, model, "emaCache");
-    }
-
-    // AdamW with no weight decay on BN / bias
-    std::vector<torch::Tensor> decayParams;
-    std::vector<torch::Tensor> noDecayParams;
-
-    {
-        auto named = model->named_parameters(/*recurse=*/true);
-        for (const auto& kv : named) {
-            const std::string name = kv.key();
-            const torch::Tensor& p = kv.value();
-
-            if (!p.defined() || !p.requires_grad()) continue;
-
-            const bool isBias = endsWithStr(name, ".bias");
-            const bool is1D = p.dim() <= 1;
-
-            if (isBias || is1D) noDecayParams.push_back(p);
-            else                decayParams.push_back(p);
+        try {
+            if (torch::cuda::is_available() && torch::cuda::device_count() > 0) {
+                device = torch::Device(torch::kCUDA, 0);
+                useCuda = true;
+            }
         }
-    }
-
-    const size_t decayCount = decayParams.size();
-    const size_t noDecayCount = noDecayParams.size();
-
-    if (decayParams.empty() && noDecayParams.empty()) {
-        throw std::runtime_error("Trainer::init(): model has no trainable parameters");
-    }
-
-    // Base optimizer group:
-    // prefer decayParams as the main group; if empty, bootstrap from noDecayParams.
-    if (!decayParams.empty()) {
-        opt = std::make_unique<torch::optim::AdamW>(
-            decayParams,
-            torch::optim::AdamWOptions(initial_lr).weight_decay(wd)
-        );
-    } else {
-        opt = std::make_unique<torch::optim::AdamW>(
-            noDecayParams,
-            torch::optim::AdamWOptions(initial_lr).weight_decay(0.0)
-        );
-        noDecayParams.clear(); // already used as base group
-    }
-
-    // Add no-decay group only if it wasn't already consumed above.
-    if (!noDecayParams.empty()) {
-        auto opts = torch::optim::AdamWOptions(initial_lr);
-        opts.weight_decay(0.0);
-
-        torch::optim::OptimizerParamGroup g(
-            noDecayParams,
-            std::make_unique<torch::optim::AdamWOptions>(opts)
-        );
-
-        opt->add_param_group(std::move(g));
-    }
-
-    std::cerr << "[Trainer] AdamW groups: decay=" << decayCount
-              << " no_decay=" << noDecayCount << "\n";
-
-    resumeStartStep = steps;
-    current_lr = -1.0;
-    updateLR(true);
-
-    auto makeCPU = [&](torch::IntArrayRef sizes, torch::ScalarType t) {
-        auto ten = torch::empty(sizes, torch::TensorOptions().dtype(t).device(torch::kCPU));
-        if (useCuda) ten = ten.pin_memory();
-        return ten;
-    };
-
-    for (int s = 0; s < 2; ++s) {
-        hostStage[(size_t)s].x    = makeCPU({ B, NN_SQ_PLANES, 8, 8 }, torch::kFloat32);
-        hostStage[(size_t)s].idx  = makeCPU({ B, AI_MAX_MOVES },       torch::kInt64);
-        hostStage[(size_t)s].prob = makeCPU({ B, AI_MAX_MOVES },       torch::kFloat32);
-        hostStage[(size_t)s].z    = makeCPU({ B, 1 },                  torch::kFloat32);
-        hostStage[(size_t)s].nPi  = makeCPU({ B },                     torch::kInt64);
-    }
-
-    if (useCuda) {
-        for (int s = 0; s < 2; ++s) {
-            devStage[(size_t)s].x = torch::empty(
-                { B, NN_SQ_PLANES, 8, 8 },
-                torch::TensorOptions().dtype(torch::kFloat32).device(device));
-
-            devStage[(size_t)s].idx = torch::empty(
-                { B, AI_MAX_MOVES },
-                torch::TensorOptions().dtype(torch::kInt64).device(device));
-
-            devStage[(size_t)s].prob = torch::empty(
-                { B, AI_MAX_MOVES },
-                torch::TensorOptions().dtype(torch::kFloat32).device(device));
-
-            devStage[(size_t)s].z = torch::empty(
-                { B, 1 },
-                torch::TensorOptions().dtype(torch::kFloat32).device(device));
-
-            devStage[(size_t)s].nPi = torch::empty(
-                { B },
-                torch::TensorOptions().dtype(torch::kInt64).device(device));
-        }
-    }
-    else {
-        // CPU fallback: just alias host buffers
-        for (int s = 0; s < 2; ++s) {
-            devStage[(size_t)s] = hostStage[(size_t)s];
-        }
-    }
-
-    // slot ids for masking legal part: [1, 255] = 0..254
-    slotIdsDev = torch::arange(
-        AI_MAX_MOVES,
-        torch::TensorOptions().dtype(torch::kInt64).device(device)
-    ).view({ 1, AI_MAX_MOVES });
-
-    if (useCuda) {
-        initAsyncPipeline();
-    }
-}
-
-int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
-    int budgetMs,
-    int maxStepsHard,
-    int warmupBatches = 1000) {
-    if (budgetMs <= 0 || maxStepsHard <= 0) return 0;
-
-    const size_t need = (size_t)B * (size_t)std::max(1, warmupBatches);
-    if (rb.currentSize() < need) return 0;
-
-    const auto tEnd = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
-
-    std::array<std::vector<TrainSample>, 2> batchBuf;
-    batchBuf[0].reserve((size_t)B);
-    batchBuf[1].reserve((size_t)B);
-
-    int done = 0;
-
-    int skippedConsecutive = 0;
-    int skippedTotal = 0;
-    static constexpr int MAX_SKIPPED_CONSECUTIVE = 32;
-    static constexpr int MAX_SKIPPED_TOTAL = 256;
-
-// Trainer::trainBlockBudgetMs
-static constexpr uint64_t HOST_STATS_EVERY = 64;
-
-    int cur = 0;
-    int next = 1;
-
-    // Preload first batch
-    if (!rb.sampleBatch(batchBuf[(size_t)cur], B, rng)) return 0;
-
-    if (useCuda) {
-        waitHostSlotReusable(cur);
-    }
-    fillStageFromBatch(hostStage[(size_t)cur], batchBuf[(size_t)cur], B);
-    if (useCuda) {
-        enqueueStageToDeviceAsync(cur);
-    }
-
-    for (int it = 0; it < maxStepsHard; ++it) {
-        if (std::chrono::steady_clock::now() >= tEnd) break;
-
-        torch::Tensor xBatch;
-        torch::Tensor idxBatch;
-        torch::Tensor probBatch;
-        torch::Tensor zBatch;
-        torch::Tensor nPiBatch;
-
-        if (useCuda) {
-            waitDeviceSlotReadyOnComputeStream(cur);
-
-            xBatch   = devStage[(size_t)cur].x;
-            idxBatch = devStage[(size_t)cur].idx;
-            probBatch= devStage[(size_t)cur].prob;
-            zBatch   = devStage[(size_t)cur].z;
-            nPiBatch = devStage[(size_t)cur].nPi;
-        } else {
-            xBatch   = hostStage[(size_t)cur].x;
-            idxBatch = hostStage[(size_t)cur].idx;
-            probBatch= hostStage[(size_t)cur].prob;
-            zBatch   = hostStage[(size_t)cur].z;
-            nPiBatch = hostStage[(size_t)cur].nPi;
+        catch (...) {
+            device = torch::Device(torch::kCPU);
+            useCuda = false;
         }
 
-        const bool needHostStats =
-            (((steps + (uint64_t)done + 1ull) % HOST_STATS_EVERY) == 0ull);
+        useAmp = useCuda;          // AMP only on CUDA
+        ampDtype = at::kHalf;      // fp16 autocast on CUDA
 
-        float lossScalar = lastLoss;
-        float lossPScalar = lastLossP;
-        float lossVScalar = lastLossV;
-        float entropyScalar = lastEntropy;
-        float vMaeScalar = lastVMAE;
-        float gradNormScalar = lastGradNorm;
-        bool didStep = false;
+        scaler.enabled = useAmp;
+        scaler.scale = 65536.0f;
+        scaler.growthFactor = 2.0f;
+        scaler.backoffFactor = 0.5f;
+        scaler.growthInterval = 2000;
+        scaler.growthTracker = 0;
+        scaler.minScale = 1.0f;
+        lastAmpScale = scaler.scale;
+
+        std::cerr << "[Trainer] device=" << (useCuda ? "cuda" : "cpu")
+            << " amp=" << (useAmp ? "fp16" : "off") << "\n";
 
         {
             std::lock_guard<std::mutex> lk(g_modelMutex);
+            model->to(device);
+            model->train();
 
-            opt->zero_grad();
+            emaModel->to(device);
+            emaModel->eval();
 
-            auto runForwardLoss = [&]() {
-                auto out = model->forward(xBatch);
-                auto pol = out.first;         // [B,73,8,8]
-                auto valLogits = out.second;  // [B,1]
+            // Build EMA cache AFTER final device placement.
+            emaCache = buildModulePairCache(emaModel, model, "emaCache");
+        }
 
-                // =========================================================
-                // POLICY LOSS over LEGAL MOVES ONLY
-                // =========================================================
-                auto polFlat = pol.flatten(1).to(torch::kFloat32); // [B, POLICY_SIZE]
+        // AdamW with no weight decay on BN / bias
+        std::vector<torch::Tensor> decayParams;
+        std::vector<torch::Tensor> noDecayParams;
 
-                auto nPiClamped = nPiBatch.clamp(0, AI_MAX_MOVES); // [B], int64
-                auto validMask = slotIdsDev.lt(nPiClamped.view({ -1, 1 })); // [B, AI_MAX_MOVES], bool
+        {
+            auto named = model->named_parameters(/*recurse=*/true);
+            for (const auto& kv : named) {
+                const std::string name = kv.key();
+                const torch::Tensor& p = kv.value();
 
-                auto idxSafe = idxBatch.clamp(0, POLICY_SIZE - 1); // [B, AI_MAX_MOVES], int64
-                auto gathered = polFlat.gather(1, idxSafe);        // [B, AI_MAX_MOVES], FP32
+                if (!p.defined() || !p.requires_grad()) continue;
 
-                constexpr float kMaskedLogit = -1e9f;
-                auto maskedLogits = gathered.masked_fill(torch::logical_not(validMask), kMaskedLogit);
+                const bool isBias = endsWithStr(name, ".bias");
+                const bool is1D = p.dim() <= 1;
 
-                auto logp_valid = torch::log_softmax(maskedLogits, 1); // [B, AI_MAX_MOVES], FP32
-                auto p_valid = torch::softmax(maskedLogits, 1);        // [B, AI_MAX_MOVES], FP32
+                if (isBias || is1D) noDecayParams.push_back(p);
+                else                decayParams.push_back(p);
+            }
+        }
 
-                auto tgtProb = probBatch.to(torch::kFloat32)
-                    .masked_fill(torch::logical_not(validMask), 0.0f);
+        const size_t decayCount = decayParams.size();
+        const size_t noDecayCount = noDecayParams.size();
 
-                auto rowLossP = -(tgtProb * logp_valid).sum(1); // [B]
+        if (decayParams.empty() && noDecayParams.empty()) {
+            throw std::runtime_error("Trainer::init(): model has no trainable parameters");
+        }
 
-                auto rowHasTarget = nPiClamped.gt(0).to(torch::kFloat32); // [B]
-                auto denomP = rowHasTarget.sum().clamp_min(1.0f);
+        // Base optimizer group:
+        // prefer decayParams as the main group; if empty, bootstrap from noDecayParams.
+        if (!decayParams.empty()) {
+            opt = std::make_unique<torch::optim::AdamW>(
+                decayParams,
+                torch::optim::AdamWOptions(initial_lr).weight_decay(wd)
+            );
+        }
+        else {
+            opt = std::make_unique<torch::optim::AdamW>(
+                noDecayParams,
+                torch::optim::AdamWOptions(initial_lr).weight_decay(0.0)
+            );
+            noDecayParams.clear(); // already used as base group
+        }
 
-                auto lossP = (rowLossP * rowHasTarget).sum() / denomP;
+        // Add no-decay group only if it wasn't already consumed above.
+        if (!noDecayParams.empty()) {
+            auto opts = torch::optim::AdamWOptions(initial_lr);
+            opts.weight_decay(0.0);
 
-                // Entropy model policy on legal moves
-                auto rowEntropy = -(p_valid * logp_valid).sum(1); // [B]
-                auto entropy = (rowEntropy * rowHasTarget).sum() / denomP;
+            torch::optim::OptimizerParamGroup g(
+                noDecayParams,
+                std::make_unique<torch::optim::AdamWOptions>(opts)
+            );
 
-                // =========================================================
-                // VALUE LOSS
-                // =========================================================
-                auto zF = zBatch.to(torch::kFloat32);
-                auto valLogitsF = valLogits.to(torch::kFloat32);
+            opt->add_param_group(std::move(g));
+        }
 
-                auto lossV = torch::binary_cross_entropy_with_logits(valLogitsF, zF);
+        std::cerr << "[Trainer] AdamW groups: decay=" << decayCount
+            << " no_decay=" << noDecayCount << "\n";
 
-                auto valProb = torch::sigmoid(valLogitsF);
-                auto vMAE = torch::mean(torch::abs(valProb - zF));
+        resumeStartStep = steps;
+        current_lr = -1.0;
+        updateLR(true);
 
-                auto loss = lossP + lossV;
-                return std::make_tuple(loss, lossP, lossV, entropy, vMAE);
+        auto makeCPU = [&](torch::IntArrayRef sizes, torch::ScalarType t) {
+            auto ten = torch::empty(sizes, torch::TensorOptions().dtype(t).device(torch::kCPU));
+            if (useCuda) ten = ten.pin_memory();
+            return ten;
             };
 
-            torch::Tensor loss, lossP, lossV, entropyT, vMAET;
+        for (int s = 0; s < 2; ++s) {
+            hostStage[(size_t)s].x = makeCPU({ B, NN_SQ_PLANES, 8, 8 }, torch::kFloat32);
+            hostStage[(size_t)s].idx = makeCPU({ B, AI_MAX_MOVES }, torch::kInt64);
+            hostStage[(size_t)s].prob = makeCPU({ B, AI_MAX_MOVES }, torch::kFloat32);
+            hostStage[(size_t)s].z = makeCPU({ B, 1 }, torch::kFloat32);
+            hostStage[(size_t)s].nPi = makeCPU({ B }, torch::kInt64);
+        }
 
-            if (useAmp) {
-                CudaAutocastGuard ampGuard(true, ampDtype);
-                std::tie(loss, lossP, lossV, entropyT, vMAET) = runForwardLoss();
-            } else {
-                std::tie(loss, lossP, lossV, entropyT, vMAET) = runForwardLoss();
+        if (useCuda) {
+            for (int s = 0; s < 2; ++s) {
+                devStage[(size_t)s].x = torch::empty(
+                    { B, NN_SQ_PLANES, 8, 8 },
+                    torch::TensorOptions().dtype(torch::kFloat32).device(device));
+
+                devStage[(size_t)s].idx = torch::empty(
+                    { B, AI_MAX_MOVES },
+                    torch::TensorOptions().dtype(torch::kInt64).device(device));
+
+                devStage[(size_t)s].prob = torch::empty(
+                    { B, AI_MAX_MOVES },
+                    torch::TensorOptions().dtype(torch::kFloat32).device(device));
+
+                devStage[(size_t)s].z = torch::empty(
+                    { B, 1 },
+                    torch::TensorOptions().dtype(torch::kFloat32).device(device));
+
+                devStage[(size_t)s].nPi = torch::empty(
+                    { B },
+                    torch::TensorOptions().dtype(torch::kInt64).device(device));
+            }
+        }
+        else {
+            // CPU fallback: just alias host buffers
+            for (int s = 0; s < 2; ++s) {
+                devStage[(size_t)s] = hostStage[(size_t)s];
+            }
+        }
+
+        // slot ids for masking legal part: [1, 255] = 0..254
+        slotIdsDev = torch::arange(
+            AI_MAX_MOVES,
+            torch::TensorOptions().dtype(torch::kInt64).device(device)
+        ).view({ 1, AI_MAX_MOVES });
+
+        if (useCuda) {
+            initAsyncPipeline();
+        }
+    }
+
+    int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
+        int budgetMs,
+        int maxStepsHard,
+        int warmupBatches = 1000) {
+        if (budgetMs <= 0 || maxStepsHard <= 0) return 0;
+
+        const size_t need = (size_t)B * (size_t)std::max(1, warmupBatches);
+        if (rb.currentSize() < need) return 0;
+
+        const auto tEnd = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
+
+        std::array<std::vector<TrainSample>, 2> batchBuf;
+        batchBuf[0].reserve((size_t)B);
+        batchBuf[1].reserve((size_t)B);
+
+        int done = 0;
+
+        int skippedConsecutive = 0;
+        int skippedTotal = 0;
+        static constexpr int MAX_SKIPPED_CONSECUTIVE = 32;
+        static constexpr int MAX_SKIPPED_TOTAL = 256;
+
+        // Trainer::trainBlockBudgetMs
+        static constexpr uint64_t HOST_STATS_EVERY = 64;
+
+        int cur = 0;
+        int next = 1;
+
+        // Preload first batch
+        if (!rb.sampleBatch(batchBuf[(size_t)cur], B, rng)) return 0;
+
+        if (useCuda) {
+            waitHostSlotReusable(cur);
+        }
+        fillStageFromBatch(hostStage[(size_t)cur], batchBuf[(size_t)cur], B);
+        if (useCuda) {
+            enqueueStageToDeviceAsync(cur);
+        }
+
+        for (int it = 0; it < maxStepsHard; ++it) {
+            if (std::chrono::steady_clock::now() >= tEnd) break;
+
+            torch::Tensor xBatch;
+            torch::Tensor idxBatch;
+            torch::Tensor probBatch;
+            torch::Tensor zBatch;
+            torch::Tensor nPiBatch;
+
+            if (useCuda) {
+                waitDeviceSlotReadyOnComputeStream(cur);
+
+                xBatch = devStage[(size_t)cur].x;
+                idxBatch = devStage[(size_t)cur].idx;
+                probBatch = devStage[(size_t)cur].prob;
+                zBatch = devStage[(size_t)cur].z;
+                nPiBatch = devStage[(size_t)cur].nPi;
+            }
+            else {
+                xBatch = hostStage[(size_t)cur].x;
+                idxBatch = hostStage[(size_t)cur].idx;
+                probBatch = hostStage[(size_t)cur].prob;
+                zBatch = hostStage[(size_t)cur].z;
+                nPiBatch = hostStage[(size_t)cur].nPi;
             }
 
-            const bool finiteLoss = torch::isfinite(loss).all().item<bool>();
-            if (finiteLoss) {
+            const bool needHostStats =
+                (((steps + (uint64_t)done + 1ull) % HOST_STATS_EVERY) == 0ull);
+
+            float lossScalar = lastLoss;
+            float lossPScalar = lastLossP;
+            float lossVScalar = lastLossV;
+            float entropyScalar = lastEntropy;
+            float vMaeScalar = lastVMAE;
+            float gradNormScalar = lastGradNorm;
+            bool didStep = false;
+
+            {
+                std::lock_guard<std::mutex> lk(g_modelMutex);
+
+                opt->zero_grad();
+
+                auto runForwardLoss = [&]() {
+                    auto out = model->forward(xBatch);
+                    auto pol = out.first;         // [B,73,8,8]
+                    auto valLogits = out.second;  // [B,1]
+
+                    // =========================================================
+                    // POLICY LOSS over LEGAL MOVES ONLY
+                    // =========================================================
+                    auto polFlat = pol.flatten(1).to(torch::kFloat32); // [B, POLICY_SIZE]
+
+                    auto nPiClamped = nPiBatch.clamp(0, AI_MAX_MOVES); // [B], int64
+                    auto validMask = slotIdsDev.lt(nPiClamped.view({ -1, 1 })); // [B, AI_MAX_MOVES], bool
+
+                    auto idxSafe = idxBatch.clamp(0, POLICY_SIZE - 1); // [B, AI_MAX_MOVES], int64
+                    auto gathered = polFlat.gather(1, idxSafe);        // [B, AI_MAX_MOVES], FP32
+
+                    constexpr float kMaskedLogit = -1e9f;
+                    auto maskedLogits = gathered.masked_fill(torch::logical_not(validMask), kMaskedLogit);
+
+                    auto logp_valid = torch::log_softmax(maskedLogits, 1); // [B, AI_MAX_MOVES], FP32
+                    auto p_valid = torch::softmax(maskedLogits, 1);        // [B, AI_MAX_MOVES], FP32
+
+                    auto tgtProb = probBatch.to(torch::kFloat32)
+                        .masked_fill(torch::logical_not(validMask), 0.0f);
+
+                    auto rowLossP = -(tgtProb * logp_valid).sum(1); // [B]
+
+                    auto rowHasTarget = nPiClamped.gt(0).to(torch::kFloat32); // [B]
+                    auto denomP = rowHasTarget.sum().clamp_min(1.0f);
+
+                    auto lossP = (rowLossP * rowHasTarget).sum() / denomP;
+
+                    // Entropy model policy on legal moves
+                    auto rowEntropy = -(p_valid * logp_valid).sum(1); // [B]
+                    auto entropy = (rowEntropy * rowHasTarget).sum() / denomP;
+
+                    // =========================================================
+                    // VALUE LOSS
+                    // =========================================================
+                    auto zF = zBatch.to(torch::kFloat32);
+                    auto valLogitsF = valLogits.to(torch::kFloat32);
+
+                    auto lossV = torch::binary_cross_entropy_with_logits(valLogitsF, zF);
+
+                    auto valProb = torch::sigmoid(valLogitsF);
+                    auto vMAE = torch::mean(torch::abs(valProb - zF));
+
+                    auto loss = lossP + lossV;
+                    return std::make_tuple(loss, lossP, lossV, entropy, vMAE);
+                    };
+
+                torch::Tensor loss, lossP, lossV, entropyT, vMAET;
+
                 if (useAmp) {
-                    scaler.scaleLoss(loss).backward();
+                    CudaAutocastGuard ampGuard(true, ampDtype);
+                    std::tie(loss, lossP, lossV, entropyT, vMAET) = runForwardLoss();
+                }
+                else {
+                    std::tie(loss, lossP, lossV, entropyT, vMAET) = runForwardLoss();
+                }
 
-                    scaler.unscale(model->parameters());
+                const bool finiteLoss = torch::isfinite(loss).all().item<bool>();
+                if (finiteLoss) {
+                    if (useAmp) {
+                        scaler.scaleLoss(loss).backward();
 
-                    double currentGradNorm =
-                        torch::nn::utils::clip_grad_norm_(model->parameters(), 1.0);
+                        scaler.unscale(model->parameters());
 
-                    bool gradsFinite = std::isfinite(currentGradNorm);
+                        double currentGradNorm =
+                            torch::nn::utils::clip_grad_norm_(model->parameters(), 1.0);
 
-                    if (gradsFinite) {
-                        opt->step();
-                        emaUpdateCached(emaCache, ema_decay);
+                        bool gradsFinite = std::isfinite(currentGradNorm);
 
-                        if (needHostStats) {
-                            lossScalar = loss.detach().item<float>();
-                            lossPScalar = lossP.detach().item<float>();
-                            lossVScalar = lossV.detach().item<float>();
-                            entropyScalar = entropyT.detach().item<float>();
-                            vMaeScalar = vMAET.detach().item<float>();
+                        if (gradsFinite) {
+                            opt->step();
+                            emaUpdateCached(emaCache, ema_decay);
+
+                            if (needHostStats) {
+                                lossScalar = loss.detach().item<float>();
+                                lossPScalar = lossP.detach().item<float>();
+                                lossVScalar = lossV.detach().item<float>();
+                                entropyScalar = entropyT.detach().item<float>();
+                                vMaeScalar = vMAET.detach().item<float>();
+                            }
+
+                            gradNormScalar = static_cast<float>(currentGradNorm);
+                            didStep = true;
                         }
 
-                        gradNormScalar = static_cast<float>(currentGradNorm);
-                        didStep = true;
+                        scaler.update(gradsFinite);
+                        lastAmpScale = scaler.scale;
+
+                        if (!didStep) {
+                            ++ampSkippedSteps;
+                        }
                     }
+                    else {
+                        loss.backward();
 
-                    scaler.update(gradsFinite);
-                    lastAmpScale = scaler.scale;
+                        double currentGradNorm =
+                            torch::nn::utils::clip_grad_norm_(model->parameters(), 1.0);
 
-                    if (!didStep) {
+                        if (std::isfinite(currentGradNorm)) {
+                            opt->step();
+                            emaUpdateCached(emaCache, ema_decay);
+
+                            if (needHostStats) {
+                                lossScalar = loss.detach().item<float>();
+                                lossPScalar = lossP.detach().item<float>();
+                                lossVScalar = lossV.detach().item<float>();
+                                entropyScalar = entropyT.detach().item<float>();
+                                vMaeScalar = vMAET.detach().item<float>();
+                            }
+
+                            gradNormScalar = static_cast<float>(currentGradNorm);
+                            didStep = true;
+                        }
+                    }
+                }
+                else {
+                    if (useAmp) {
+                        scaler.update(false);
+                        lastAmpScale = scaler.scale;
                         ++ampSkippedSteps;
                     }
-                } else {
-                    loss.backward();
-
-                    double currentGradNorm =
-                        torch::nn::utils::clip_grad_norm_(model->parameters(), 1.0);
-
-                    if (std::isfinite(currentGradNorm)) {
-                        opt->step();
-                        emaUpdateCached(emaCache, ema_decay);
-
-                        if (needHostStats) {
-                            lossScalar = loss.detach().item<float>();
-                            lossPScalar = lossP.detach().item<float>();
-                            lossVScalar = lossV.detach().item<float>();
-                            entropyScalar = entropyT.detach().item<float>();
-                            vMaeScalar = vMAET.detach().item<float>();
-                        }
-
-                        gradNormScalar = static_cast<float>(currentGradNorm);
-                        didStep = true;
-                    }
-                }
-            } else {
-                if (useAmp) {
-                    scaler.update(false);
-                    lastAmpScale = scaler.scale;
-                    ++ampSkippedSteps;
                 }
             }
-        }
 
-        if (!didStep) {
-            ++skippedConsecutive;
-            ++skippedTotal;
+            if (!didStep) {
+                ++skippedConsecutive;
+                ++skippedTotal;
 
-            if (skippedConsecutive == 1 ||
-                skippedConsecutive == 8 ||
-                skippedConsecutive == 32) {
-                std::cerr << "[Trainer] skipped batch"
-                          << " consec=" << skippedConsecutive
-                          << " total=" << skippedTotal
-                          << " ampScale=" << lastAmpScale
-                          << "\n";
+                if (skippedConsecutive == 1 ||
+                    skippedConsecutive == 8 ||
+                    skippedConsecutive == 32) {
+                    std::cerr << "[Trainer] skipped batch"
+                        << " consec=" << skippedConsecutive
+                        << " total=" << skippedTotal
+                        << " ampScale=" << lastAmpScale
+                        << "\n";
+                }
+
+                if (skippedConsecutive >= MAX_SKIPPED_CONSECUTIVE ||
+                    skippedTotal >= MAX_SKIPPED_TOTAL) {
+                    std::cerr << "[Trainer] too many skipped batches, stopping train block"
+                        << " consec=" << skippedConsecutive
+                        << " total=" << skippedTotal
+                        << "\n";
+                    break;
+                }
+            }
+            else {
+                skippedConsecutive = 0;
+
+                ++done;
+                ++steps;
+
+                if (needHostStats) {
+                    lastLoss = lossScalar;
+                    lastLossP = lossPScalar;
+                    lastLossV = lossVScalar;
+                    lastEntropy = entropyScalar;
+                    lastVMAE = vMaeScalar;
+                }
+
+                lastGradNorm = gradNormScalar;
+                updateLR();
             }
 
-            if (skippedConsecutive >= MAX_SKIPPED_CONSECUTIVE ||
-                skippedTotal >= MAX_SKIPPED_TOTAL) {
-                std::cerr << "[Trainer] too many skipped batches, stopping train block"
-                          << " consec=" << skippedConsecutive
-                          << " total=" << skippedTotal
-                          << "\n";
-                break;
-            }
-        } else {
-            skippedConsecutive = 0;
-
-            ++done;
-            ++steps;
-
-            if (needHostStats) {
-                lastLoss = lossScalar;
-                lastLossP = lossPScalar;
-                lastLossV = lossVScalar;
-                lastEntropy = entropyScalar;
-                lastVMAE = vMaeScalar;
+            if (useCuda) {
+                markComputeUsesSlot(cur);
             }
 
-            lastGradNorm = gradNormScalar;
-            updateLR();
+            // ---------------------------------------------------------
+            // Prefetch/build next batch on CPU while current GPU work is
+            // still draining asynchronously.
+            // ---------------------------------------------------------
+            if ((it + 1) >= maxStepsHard) break;
+            if (std::chrono::steady_clock::now() >= tEnd) break;
+
+            if (!rb.sampleBatch(batchBuf[(size_t)next], B, rng)) break;
+
+            if (useCuda) {
+                waitHostSlotReusable(next);
+            }
+            fillStageFromBatch(hostStage[(size_t)next], batchBuf[(size_t)next], B);
+            if (useCuda) {
+                enqueueStageToDeviceAsync(next);
+            }
+
+            std::swap(cur, next);
         }
 
         if (useCuda) {
-            markComputeUsesSlot(cur);
+            try { torch::cuda::synchronize(); }
+            catch (...) {}
         }
 
-        // ---------------------------------------------------------
-        // Prefetch/build next batch on CPU while current GPU work is
-        // still draining asynchronously.
-        // ---------------------------------------------------------
-        if ((it + 1) >= maxStepsHard) break;
-        if (std::chrono::steady_clock::now() >= tEnd) break;
-
-        if (!rb.sampleBatch(batchBuf[(size_t)next], B, rng)) break;
-
-        if (useCuda) {
-            waitHostSlotReusable(next);
-        }
-        fillStageFromBatch(hostStage[(size_t)next], batchBuf[(size_t)next], B);
-        if (useCuda) {
-            enqueueStageToDeviceAsync(next);
-        }
-
-        std::swap(cur, next);
+        return done;
     }
-
-    if (useCuda) {
-        try { torch::cuda::synchronize(); }
-        catch (...) {}
-    }
-
-    return done;
-}
 };
 // init / load / save
 // ------------------------------------------------------------
@@ -8379,7 +8397,7 @@ static bool loadOrCreateEmaModel(const std::string& emaFile, Net& emaModel, Net&
         }
         catch (const std::exception& e) {
             std::cerr << "torch::load(ema) failed: " << e.what()
-                      << " -> fallback to current model\n";
+                << " -> fallback to current model\n";
         }
     }
 
@@ -8413,22 +8431,22 @@ static bool syncCurrentRunnerFromModel(Net& emaModel) {
 }
 
 static bool snapshotCurrentIntoOld(Net& currentEmaModel,
-                                   Net& oldModel,
-                                   const std::string& planFile) {
-    {
-        std::lock_guard<std::mutex> lk(g_modelMutex);
-        oldModel->to(torch::kCPU);
-        copyNetState(oldModel, currentEmaModel);
-        oldModel->eval();
-    }
+    Net& oldModel,
+    const std::string& planFile) {
+        {
+            std::lock_guard<std::mutex> lk(g_modelMutex);
+            oldModel->to(torch::kCPU);
+            copyNetState(oldModel, currentEmaModel);
+            oldModel->eval();
+        }
 
-    if (!ensureOldRunnerReady(planFile)) return false;
+        if (!ensureOldRunnerReady(planFile)) return false;
 
-    {
-        std::lock_guard<std::mutex> lk(g_trtOldMutex);
-        torch::NoGradGuard ng;
-        return trtRefitFromTorchModel(g_trt_old, oldModel);
-    }
+        {
+            std::lock_guard<std::mutex> lk(g_trtOldMutex);
+            torch::NoGradGuard ng;
+            return trtRefitFromTorchModel(g_trt_old, oldModel);
+        }
 }
 
 static inline bool isFiniteF(float x) {
@@ -8497,7 +8515,7 @@ static void initAllOrExit(Net& model,
             std::cerr << "TRT refit from net_ema.pt failed at startup.\n";
         }
     }
-//std::cerr << "[TRT] AI_HAVE_CUDA_KERNELS=" << AI_HAVE_CUDA_KERNELS << "\n";
+    //std::cerr << "[TRT] AI_HAVE_CUDA_KERNELS=" << AI_HAVE_CUDA_KERNELS << "\n";
 }
 
 static void saveAll(const std::string& ptFile,
@@ -8508,38 +8526,38 @@ static void saveAll(const std::string& ptFile,
     Net& model,
     Net& emaModel,
     Trainer& trainer) {
-    {
-        std::lock_guard<std::mutex> lk(g_modelMutex);
+        {
+            std::lock_guard<std::mutex> lk(g_modelMutex);
 
-        try {
-            torch::save(model, ptFile);
-        }
-        catch (const std::exception& e) {
-            std::cerr << "torch::save(model) failed: " << e.what() << "\n";
+            try {
+                torch::save(model, ptFile);
+            }
+            catch (const std::exception& e) {
+                std::cerr << "torch::save(model) failed: " << e.what() << "\n";
+            }
+
+            try {
+                torch::save(emaModel, emaFile);
+            }
+            catch (const std::exception& e) {
+                std::cerr << "torch::save(emaModel) failed: " << e.what() << "\n";
+            }
+
+            if (!saveOptimizerState(optFile, trainer)) {
+                std::cerr << "save optimizer state failed.\n";
+            }
+
+            if (!saveTrainerState(trainerStateFile, trainer)) {
+                std::cerr << "save trainer state failed.\n";
+            }
         }
 
-        try {
-            torch::save(emaModel, emaFile);
+        {
+            std::lock_guard<std::mutex> lk(g_trtMutex);
+            if (!trtSavePlanToDisk(g_trt, planFile)) {
+                std::cerr << "TRT plan serialize failed.\n";
+            }
         }
-        catch (const std::exception& e) {
-            std::cerr << "torch::save(emaModel) failed: " << e.what() << "\n";
-        }
-
-        if (!saveOptimizerState(optFile, trainer)) {
-            std::cerr << "save optimizer state failed.\n";
-        }
-
-        if (!saveTrainerState(trainerStateFile, trainer)) {
-            std::cerr << "save trainer state failed.\n";
-        }
-    }
-
-    {
-        std::lock_guard<std::mutex> lk(g_trtMutex);
-        if (!trtSavePlanToDisk(g_trt, planFile)) {
-            std::cerr << "TRT plan serialize failed.\n";
-        }
-    }
 }
 
 // ------------------------------------------------------------
@@ -8563,9 +8581,9 @@ static AI_FORCEINLINE bool tryClaimGameBudget(std::atomic<int>& gamesLeft) {
     int cur = gamesLeft.load(std::memory_order_relaxed);
     while (cur > 0) {
         if (gamesLeft.compare_exchange_weak(
-                cur, cur - 1,
-                std::memory_order_relaxed,
-                std::memory_order_relaxed)) {
+            cur, cur - 1,
+            std::memory_order_relaxed,
+            std::memory_order_relaxed)) {
             return true;
         }
     }
@@ -8585,10 +8603,10 @@ static SearchPoolStatsSnapshot snapshotAllSearchStats(
     for (const auto& sp : gamesCtx) {
         if (!sp) continue;
         auto s = sp->pool.snapshotStats();
-        out.simsOk   += s.simsOk;
+        out.simsOk += s.simsOk;
         out.simsFail += s.simsFail;
-        out.ttHit    += s.ttHit;
-        out.ttMiss   += s.ttMiss;
+        out.ttHit += s.ttHit;
+        out.ttMiss += s.ttMiss;
         out.depthSum += s.depthSum;
     }
     return out;
@@ -8662,9 +8680,9 @@ static void runParallelSelfPlayBlock(
 
                     if (sp.T.abort.load(std::memory_order_relaxed)) {
                         std::cerr << "[selfplay] game_ctx=" << i
-                                  << " aborted: oomCode="
-                                  << sp.T.oomCode.load(std::memory_order_relaxed)
-                                  << " -> reset table\n";
+                            << " aborted: oomCode="
+                            << sp.T.oomCode.load(std::memory_order_relaxed)
+                            << " -> reset table\n";
                         sp.resetForNewGame();
                     }
                 }
@@ -8674,7 +8692,7 @@ static void runParallelSelfPlayBlock(
                 std::lock_guard<std::mutex> lk(exM);
                 if (!ex) ex = std::current_exception();
             }
-        });
+            });
     }
 
     for (auto& th : outer) {
@@ -8693,11 +8711,14 @@ static std::string fmtCompactU64(uint64_t x) {
     std::ostringstream oss;
     if (x >= 1000000000ull) {
         oss << std::fixed << std::setprecision(1) << (double)x / 1e9 << "b";
-    } else if (x >= 1000000ull) {
+    }
+    else if (x >= 1000000ull) {
         oss << std::fixed << std::setprecision(1) << (double)x / 1e6 << "m";
-    } else if (x >= 1000ull) {
+    }
+    else if (x >= 1000ull) {
         oss << std::fixed << std::setprecision(0) << (double)x / 1e3 << "k";
-    } else {
+    }
+    else {
         oss << x;
     }
     return oss.str();
@@ -8746,7 +8767,7 @@ void Training(int targetGames) {
     else {
         if (trainer.steps != 0) {
             std::cerr << "[Trainer] warning: steps restored, but optimizer state not found/failed to load. "
-                         "Optimizer starts fresh.\n";
+                "Optimizer starts fresh.\n";
         }
         else {
             std::cerr << "[Trainer] no optimizer state found, starting fresh.\n";
@@ -8769,8 +8790,8 @@ void Training(int targetGames) {
 
     const unsigned PARALLEL_GAMES =
         (hwSP >= 32 ? 6u :
-         hwSP >= 20 ? 4u :
-         hwSP >= 12 ? 3u : 2u);
+            hwSP >= 20 ? 4u :
+            hwSP >= 12 ? 3u : 2u);
 
     unsigned SEARCH_THREADS_PER_GAME = 1u;
     if (hwSP >= PARALLEL_GAMES * 3u) {
@@ -8779,11 +8800,11 @@ void Training(int targetGames) {
 
     const size_t SP_NODE_POW2 =
         (PARALLEL_GAMES >= 6 ? (1u << 18) :
-         PARALLEL_GAMES >= 4 ? (1u << 19) : (1u << 20));
+            PARALLEL_GAMES >= 4 ? (1u << 19) : (1u << 20));
 
     const size_t SP_EDGE_CAP =
         (PARALLEL_GAMES >= 6 ? (1u << 22) :
-         PARALLEL_GAMES >= 4 ? (1u << 23) : (1u << 24));
+            PARALLEL_GAMES >= 4 ? (1u << 23) : (1u << 24));
 
     std::vector<std::unique_ptr<GameContext>> gamesCtx;
     gamesCtx.reserve(PARALLEL_GAMES);
@@ -8799,9 +8820,9 @@ void Training(int targetGames) {
     bool stopTraining = false;
 
     std::cout << "[selfplay] parallel_games=" << PARALLEL_GAMES
-              << " search_threads_per_game=" << SEARCH_THREADS_PER_GAME
-              << " shared_nn_server=1"
-              << "\n";
+        << " search_threads_per_game=" << SEARCH_THREADS_PER_GAME
+        << " shared_nn_server=1"
+        << "\n";
 
     // -------------------------------
     // SCHEDULER
@@ -8871,8 +8892,8 @@ void Training(int targetGames) {
         if (!trainSchedulerActive && rb.currentSize() >= MIN_REPLAY_TO_TRAIN) {
             trainSchedulerActive = true;
             std::cerr << "[trainer] replay warmup reached: "
-                      << rb.currentSize()
-                      << " samples, sample-based schedule enabled\n";
+                << rb.currentSize()
+                << " samples, sample-based schedule enabled\n";
         }
 
         if (trainSchedulerActive && spBlk.samples > 0) {
@@ -8887,7 +8908,7 @@ void Training(int targetGames) {
         if (trainSchedulerActive) {
             const int targetSteps =
                 std::min(TRAIN_MAX_STEPS_PER_BLOCK,
-                         (int)(trainSampleCredits / (double)trainer.B));
+                    (int)(trainSampleCredits / (double)trainer.B));
 
             if (targetSteps > 0) {
                 safeRefitBarrierShared(sharedSrv);
@@ -8952,13 +8973,13 @@ void Training(int targetGames) {
 
             if (arenaOk) {
                 std::cout << "\n[arena] start: current vs old, games=1000, sims=200, triggerGames="
-                          << nextArenaAt << "\n";
+                    << nextArenaAt << "\n";
 
                 ArenaStats ar = runArenaMatch(/*games=*/1000, /*simsPerPos=*/200);
 
                 std::cout << "[arena] done: W/D/L = "
-                          << ar.curWins << "/" << ar.draws << "/" << ar.oldWins
-                          << "  score=" << ar.currentScore() << "\n";
+                    << ar.curWins << "/" << ar.draws << "/" << ar.oldWins
+                    << "  score=" << ar.currentScore() << "\n";
 
                 // promotion rule: если current > old, old := current
                 if (ar.currentScore() > 0.5) {
@@ -9016,11 +9037,11 @@ void Training(int targetGames) {
             auto dtSec = std::chrono::duration<double>(now - statWindowStart).count();
             if (dtSec <= 0.0) dtSec = 1e-9;
 
-            const uint64_t dSimsOk   = curStats.simsOk   - prevSearchStats.simsOk;
+            const uint64_t dSimsOk = curStats.simsOk - prevSearchStats.simsOk;
             const uint64_t dSimsFail = curStats.simsFail - prevSearchStats.simsFail;
-            const uint64_t dTTHit    = curStats.ttHit    - prevSearchStats.ttHit;
-            const uint64_t dTTMiss   = curStats.ttMiss   - prevSearchStats.ttMiss;
-            const uint64_t dDepth    = curStats.depthSum - prevSearchStats.depthSum;
+            const uint64_t dTTHit = curStats.ttHit - prevSearchStats.ttHit;
+            const uint64_t dTTMiss = curStats.ttMiss - prevSearchStats.ttMiss;
+            const uint64_t dDepth = curStats.depthSum - prevSearchStats.depthSum;
 
             const double nps = (double)dSimsOk / dtSec;
             const double ttHitPct = (dTTHit + dTTMiss)
@@ -9038,21 +9059,21 @@ void Training(int targetGames) {
                 : 0.0;
 
             std::cout
-                << "Games: " << games << "/" << targetGames
+                << "Games: " << games
                 << " | Replay: " << fmtCompactU64((uint64_t)rb.currentSize())
                 << " | LR: " << fmtFixed(trainer.current_lr, 4)
                 << " | Loss: " << fmtFixed(trainer.lastLoss, 2)
                 << " (P: " << fmtFixed(trainer.lastLossP, 2)
                 << " V: " << fmtFixed(trainer.lastLossV, 2) << ")"
-                << " | Entropy: " << fmtFixed(trainer.lastEntropy, 2)
-                << " | vMAE: " << fmtFixed(trainer.lastVMAE, 2)
+                << " | p: " << fmtFixed(trainer.lastEntropy, 2)
+                << " | v: " << fmtFixed(trainer.lastVMAE, 2)
                 << " | Grad: " << fmtFixed(trainer.lastGradNorm, 1)
-                << " | AvgLen: " << fmtFixed(avgLen, 1)
-                << " | Truncated: " << fmtFixed(truncatedPct, 0) << "%"
+                << " | Len: " << fmtFixed(avgLen, 1)
+                << " | 256: " << fmtFixed(truncatedPct, 0) << "%"
                 << " | NPS: " << fmtFixed(nps, 0)
-                << " | Q_size: " << sharedSrv.size()
-                << " | TT_hit: " << fmtFixed(ttHitPct, 0) << "%"
-                << " | AvgDepth: " << fmtFixed(avgDepth, 0)
+                << " | NN: " << sharedSrv.size()
+                << " | TT: " << fmtFixed(ttHitPct, 0) << "%"
+                << " | Depth: " << fmtFixed(avgDepth, 0)
                 << "\n";
 
             prevSearchStats = curStats;
@@ -9112,9 +9133,9 @@ void Training(int targetGames) {
         std::lock_guard<std::mutex> lkT(g_trtMutex);
         g_trt.shutdown();
         g_trtReady = false;
-if (::remove(planFile.c_str()) != 0) {
-    // не фатально: файла могло не быть
-}
+        if (::remove(planFile.c_str()) != 0) {
+            // не фатально: файла могло не быть
+        }
     }
 
     // 2) rebuild/load new plan
@@ -9191,10 +9212,10 @@ int main() {
 
     std::cout << "slider_backend " << (g_usePext ? "pext" : "magics") << "\n";
 
-MoveList ml;
-int term = 0;
-Position tmp = pos;
-genLegal(tmp, path, mask, ml, term);
+    MoveList ml;
+    int term = 0;
+    Position tmp = pos;
+    genLegal(tmp, path, mask, ml, term);
 
     std::cout << "moves " << ml.n << "\n";
     for (int i = 0; i < ml.n; ++i) {
@@ -9205,7 +9226,7 @@ genLegal(tmp, path, mask, ml, term);
     float mctsEvalWhite = 0.5f;
     std::vector<int> pvBeforeRoll;
     std::vector<moveState> rootMoves;
-mctsBatchedMT(pos, path, mask, 10.0, mctsEvalWhite, rootMoves, pvBeforeRoll);
+    mctsBatchedMT(pos, path, mask, 10.0, mctsEvalWhite, rootMoves, pvBeforeRoll);
 
     float v = 0.5f;
     std::vector<float> pol((size_t)POLICY_SIZE, 0.0f);
@@ -9215,17 +9236,17 @@ mctsBatchedMT(pos, path, mask, 10.0, mctsEvalWhite, rootMoves, pvBeforeRoll);
     std::cout << "eval=" << v << std::endl;
     std::cout << "mcts_eval_white " << mctsEvalWhite << "\n";
     for (size_t i = 0; i < pvBeforeRoll.size(); ++i) {
-    if (i) std::cout << ' ';
-    std::cout << moveToStr(pvBeforeRoll[i]);
-}
-std::cout << "\n";
+        if (i) std::cout << ' ';
+        std::cout << moveToStr(pvBeforeRoll[i]);
+    }
+    std::cout << "\n";
     std::cout << "root_moves " << rootMoves.size() << "\n";
     for (auto& ms : rootMoves) {
-    std::cout << moveToStr(ms.move)
-        << " eval " << ms.eval
-        << " visits " << ms.visits
-        << " prior " << ms.prior << "\n";
-}
+        std::cout << moveToStr(ms.move)
+            << " eval " << ms.eval
+            << " visits " << ms.visits
+            << " prior " << ms.prior << "\n";
+    }
 
     cin.get();
 
