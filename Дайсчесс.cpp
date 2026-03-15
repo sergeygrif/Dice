@@ -3730,8 +3730,15 @@ static constexpr uint16_t INVALID_POLICY_IDX = 0xFFFFu;
 static std::mutex g_pendingMutex;
 static std::vector<std::unique_ptr<PendingNN>> g_pendingPool;
 
-// Ограничиваем рост пула, чтобы он не раздувался бесконечно после пиков.
+// global pool cap
 static constexpr size_t AI_MAX_PENDING_POOL = 4096;
+
+// block allocator params
+static constexpr size_t AI_PENDING_BLOCK_SIZE = 64;
+static constexpr size_t AI_PENDING_TLS_KEEP   = 128;
+
+// per-thread local cache
+static thread_local std::vector<std::unique_ptr<PendingNN>> g_pendingTLS;
 
 static AI_FORCEINLINE void resetPendingNN(PendingNN& p) {
     p.leaf = nullptr;
@@ -3740,17 +3747,52 @@ static AI_FORCEINLINE void resetPendingNN(PendingNN& p) {
     p.policyIdx.fill(INVALID_POLICY_IDX);
 }
 
-static std::unique_ptr<PendingNN> allocPendingNN() {
-    std::lock_guard<std::mutex> lk(g_pendingMutex);
+static AI_FORCEINLINE void refillPendingTLSIfNeeded() {
+    if (!g_pendingTLS.empty()) return;
 
-    if (!g_pendingPool.empty()) {
-        auto p = std::move(g_pendingPool.back());
-        g_pendingPool.pop_back();
-        resetPendingNN(*p);
-        return p;
+    // First try to grab a block from the global pool.
+    {
+        std::lock_guard<std::mutex> lk(g_pendingMutex);
+
+        const size_t take = std::min(AI_PENDING_BLOCK_SIZE, g_pendingPool.size());
+        g_pendingTLS.reserve(AI_PENDING_TLS_KEEP);
+
+        for (size_t i = 0; i < take; ++i) {
+            g_pendingTLS.push_back(std::move(g_pendingPool.back()));
+            g_pendingPool.pop_back();
+        }
     }
 
-    auto p = std::make_unique<PendingNN>();
+    if (!g_pendingTLS.empty()) return;
+
+    // Global pool empty: allocate a fresh local block.
+    g_pendingTLS.reserve(AI_PENDING_TLS_KEEP);
+    for (size_t i = 0; i < AI_PENDING_BLOCK_SIZE; ++i) {
+        auto p = std::make_unique<PendingNN>();
+        resetPendingNN(*p);
+        g_pendingTLS.push_back(std::move(p));
+    }
+}
+
+static AI_FORCEINLINE void flushPendingTLSPartial() {
+    // Keep one block locally, flush excess to global pool.
+    if (g_pendingTLS.size() <= AI_PENDING_TLS_KEEP) return;
+
+    std::lock_guard<std::mutex> lk(g_pendingMutex);
+
+    while (g_pendingTLS.size() > AI_PENDING_BLOCK_SIZE &&
+           g_pendingPool.size() < AI_MAX_PENDING_POOL) {
+        g_pendingPool.push_back(std::move(g_pendingTLS.back()));
+        g_pendingTLS.pop_back();
+    }
+}
+
+static std::unique_ptr<PendingNN> allocPendingNN() {
+    refillPendingTLSIfNeeded();
+
+    auto p = std::move(g_pendingTLS.back());
+    g_pendingTLS.pop_back();
+
     resetPendingNN(*p);
     return p;
 }
@@ -3759,30 +3801,26 @@ static void freePendingNN(std::unique_ptr<PendingNN> p) {
     if (!p) return;
 
     resetPendingNN(*p);
-
-    std::lock_guard<std::mutex> lk(g_pendingMutex);
-    if (g_pendingPool.size() < AI_MAX_PENDING_POOL) {
-        g_pendingPool.push_back(std::move(p));
-    }
-    // иначе объект просто уничтожится при выходе из функции
+    g_pendingTLS.push_back(std::move(p));
+    flushPendingTLSPartial();
 }
 
 template<class TVec>
 static void freePendingBatch(TVec& jobs) {
-    std::lock_guard<std::mutex> lk(g_pendingMutex);
-
     for (auto& p : jobs) {
         if (!p) continue;
-
         resetPendingNN(*p);
 
-        if (g_pendingPool.size() < AI_MAX_PENDING_POOL) {
-            g_pendingPool.push_back(std::move(p));
+        g_pendingTLS.push_back(std::move(p));
+
+        // Flush in chunks if batch is large.
+        if (g_pendingTLS.size() > (AI_PENDING_TLS_KEEP + AI_PENDING_BLOCK_SIZE)) {
+            flushPendingTLSPartial();
         }
-        // иначе unique_ptr останется в контейнере и удалится на clear()
     }
 
     jobs.clear();
+    flushPendingTLSPartial();
 }
 
 static AI_FORCEINLINE float pendingPolicyLogitFromFullCHW(
@@ -8044,22 +8082,184 @@ static void safeRefitBarrier(SelfPlayContext& sp) {
     waitForNoInferenceInFlight();
 }
 
-static bool restartSelfPlayContextAfterArena(SelfPlayContext& sp) {
-    try {
-        sp.start();
-        return true;
-    }
-    catch (const std::exception& e) {
-        std::cerr << "[arena] failed to restart main self-play context: "
-                  << e.what() << "\n";
-    }
-    catch (...) {
-        std::cerr << "[arena] failed to restart main self-play context: unknown exception\n";
+static AI_FORCEINLINE bool tryClaimGameBudget(std::atomic<int>& gamesLeft) {
+    int cur = gamesLeft.load(std::memory_order_relaxed);
+    while (cur > 0) {
+        if (gamesLeft.compare_exchange_weak(
+                cur, cur - 1,
+                std::memory_order_relaxed,
+                std::memory_order_relaxed)) {
+            return true;
+        }
     }
     return false;
 }
 
+struct SelfPlayBlockStats {
+    uint64_t games = 0;
+    uint64_t plies = 0;
+    uint64_t truncated = 0;
+    uint64_t samples = 0;
+};
 
+static SearchPoolStatsSnapshot snapshotAllSearchStats(
+    const std::vector<std::unique_ptr<SelfPlayContext>>& sps) {
+    SearchPoolStatsSnapshot out{};
+    for (const auto& sp : sps) {
+        if (!sp) continue;
+        auto s = sp->pool.snapshotStats();
+        out.simsOk   += s.simsOk;
+        out.simsFail += s.simsFail;
+        out.ttHit    += s.ttHit;
+        out.ttMiss   += s.ttMiss;
+        out.depthSum += s.depthSum;
+    }
+    return out;
+}
+
+static int totalNNQueueSize(
+    const std::vector<std::unique_ptr<SelfPlayContext>>& sps) {
+    int q = 0;
+    for (const auto& sp : sps) {
+        if (!sp) continue;
+        q += sp->server.size();
+    }
+    return q;
+}
+
+static void safeRefitBarrierAll(
+    std::vector<std::unique_ptr<SelfPlayContext>>& sps) {
+    for (auto& sp : sps) {
+        if (!sp) continue;
+        safeRefitBarrier(*sp);
+    }
+}
+
+static void stopAllSelfPlayContexts(
+    std::vector<std::unique_ptr<SelfPlayContext>>& sps) {
+    for (auto& sp : sps) {
+        if (!sp) continue;
+        sp->stop();
+    }
+}
+
+static bool restartAllSelfPlayContexts(
+    std::vector<std::unique_ptr<SelfPlayContext>>& sps,
+    unsigned forcedThreads) {
+    try {
+        for (auto& sp : sps) {
+            if (!sp) continue;
+            sp->start(forcedThreads);
+        }
+        return true;
+    }
+    catch (const std::exception& e) {
+        std::cerr << "[selfplay] failed to restart all contexts: "
+                  << e.what() << "\n";
+    }
+    catch (...) {
+        std::cerr << "[selfplay] failed to restart all contexts: unknown exception\n";
+    }
+
+    // best-effort cleanup
+    for (auto& sp : sps) {
+        try {
+            if (sp) sp->stop();
+        } catch (...) {
+        }
+    }
+    return false;
+}
+
+static void runParallelSelfPlayBlock(
+    std::vector<std::unique_ptr<SelfPlayContext>>& sps,
+    ReplayBuffer& rb,
+    int simsPerPos,
+    int maxPlies,
+    bool addRootNoise,
+    int maxGamesThisBlock,
+    int gamesRemainingTotal,
+    std::chrono::steady_clock::time_point deadline,
+    SelfPlayBlockStats& outStats) {
+
+    outStats = {};
+
+    const int budget = std::max(0, std::min(maxGamesThisBlock, gamesRemainingTotal));
+    if (budget <= 0 || sps.empty()) return;
+
+    std::atomic<int> gamesLeft{ budget };
+    std::atomic<uint64_t> gamesDone{ 0 };
+    std::atomic<uint64_t> pliesDone{ 0 };
+    std::atomic<uint64_t> truncatedDone{ 0 };
+    std::atomic<uint64_t> samplesDone{ 0 };
+    std::atomic<bool> abortAll{ false };
+
+    std::mutex exM;
+    std::exception_ptr ex;
+
+    std::vector<std::thread> outer;
+    outer.reserve(sps.size());
+
+    for (size_t i = 0; i < sps.size(); ++i) {
+        outer.emplace_back([&, i] {
+            try {
+                SelfPlayContext& sp = *sps[i];
+
+                for (;;) {
+                    if (abortAll.load(std::memory_order_relaxed)) break;
+                    if (std::chrono::steady_clock::now() >= deadline) break;
+                    if (!tryClaimGameBudget(gamesLeft)) break;
+
+                    int plyCount = 0;
+                    bool terminated = false;
+                    int samplesAdded = 0;
+
+                    selfPlayOneGame960(
+                        sp, rb,
+                        simsPerPos,
+                        maxPlies,
+                        addRootNoise,
+                        plyCount,
+                        terminated,
+                        samplesAdded
+                    );
+
+                    gamesDone.fetch_add(1, std::memory_order_relaxed);
+                    pliesDone.fetch_add((uint64_t)std::max(0, plyCount), std::memory_order_relaxed);
+                    samplesDone.fetch_add((uint64_t)std::max(0, samplesAdded), std::memory_order_relaxed);
+
+                    if (!terminated && plyCount >= maxPlies) {
+                        truncatedDone.fetch_add(1, std::memory_order_relaxed);
+                    }
+
+                    if (sp.T.abort.load(std::memory_order_relaxed)) {
+                        std::cerr << "[selfplay] ctx=" << i
+                                  << " aborted: oomCode="
+                                  << sp.T.oomCode.load(std::memory_order_relaxed)
+                                  << " -> reset table\n";
+                        sp.resetForNewGame();
+                    }
+                }
+            }
+            catch (...) {
+                abortAll.store(true, std::memory_order_relaxed);
+                std::lock_guard<std::mutex> lk(exM);
+                if (!ex) ex = std::current_exception();
+            }
+        });
+    }
+
+    for (auto& th : outer) {
+        if (th.joinable()) th.join();
+    }
+
+    if (ex) std::rethrow_exception(ex);
+
+    outStats.games = gamesDone.load(std::memory_order_relaxed);
+    outStats.plies = pliesDone.load(std::memory_order_relaxed);
+    outStats.truncated = truncatedDone.load(std::memory_order_relaxed);
+    outStats.samples = samplesDone.load(std::memory_order_relaxed);
+}
 
 static std::string fmtCompactU64(uint64_t x) {
     std::ostringstream oss;
@@ -8133,12 +8333,53 @@ void Training(int targetGames) {
         std::cerr << "[arena] failed to initialize old snapshot in memory.\n";
     }
 
-    // One self-play context for the whole training
-    SelfPlayContext sp((1u << 20), (1u << 24), g_trt, g_trtMutex);
-    sp.start();
+    // ------------------------------------------------------------
+    // Parallel self-play contexts
+    // ------------------------------------------------------------
+    const unsigned hwSP = std::max(1u, std::thread::hardware_concurrency());
+
+    // Safe v1 defaults:
+    // - 1 game on small CPUs
+    // - 2 games on medium CPUs
+    // - 4 games on larger CPUs
+    const unsigned PARALLEL_GAMES =
+        (hwSP >= 24 ? 4u :
+         hwSP >= 12 ? 2u : 1u);
+
+    // Total threads per game ~= search threads + 1 inference thread + 1 outer game thread.
+    // Keep this conservative to avoid oversubscription.
+    unsigned SEARCH_THREADS_PER_GAME = 1u;
+    if (hwSP / PARALLEL_GAMES > 2u) {
+        SEARCH_THREADS_PER_GAME = std::max(1u, hwSP / PARALLEL_GAMES - 2u);
+    }
+    SEARCH_THREADS_PER_GAME = std::min(SEARCH_THREADS_PER_GAME, 3u);
+
+    // IMPORTANT: multiple tables => reduce per-context memory footprint.
+    const size_t SP_NODE_POW2 =
+        (PARALLEL_GAMES >= 4 ? (1u << 18) : (1u << 19));
+    const size_t SP_EDGE_CAP =
+        (PARALLEL_GAMES >= 4 ? (1u << 22) : (1u << 23));
+
+    std::vector<std::unique_ptr<SelfPlayContext>> spGames;
+    spGames.reserve(PARALLEL_GAMES);
+
+    for (unsigned i = 0; i < PARALLEL_GAMES; ++i) {
+        auto sp = std::make_unique<SelfPlayContext>(
+            SP_NODE_POW2, SP_EDGE_CAP, g_trt, g_trtMutex
+        );
+        sp->start(SEARCH_THREADS_PER_GAME);
+        spGames.push_back(std::move(sp));
+    }
+
     bool spRunning = true;
-    SearchPoolStatsSnapshot prevSearchStats = sp.pool.snapshotStats();
+    SearchPoolStatsSnapshot prevSearchStats = snapshotAllSearchStats(spGames);
     bool stopTraining = false;
+
+    std::cout << "[selfplay] parallel_games=" << PARALLEL_GAMES
+              << " search_threads_per_game=" << SEARCH_THREADS_PER_GAME
+              << " nodePow2=" << SP_NODE_POW2
+              << " edgeCap=" << SP_EDGE_CAP
+              << "\n";
 
     // -------------------------------
     // SCHEDULER
@@ -8181,50 +8422,37 @@ void Training(int targetGames) {
         // ===========================
         // 1) SELF-PLAY BLOCK
         // ===========================
-        const auto spEnd = std::chrono::steady_clock::now() + std::chrono::milliseconds(SELFPLAY_BLOCK_MS);
-        int gamesThisBlock = 0;
+        const auto spEnd =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(SELFPLAY_BLOCK_MS);
 
-        while (std::chrono::steady_clock::now() < spEnd &&
-            gamesThisBlock < MAX_GAMES_PER_BLOCK &&
-            games < targetGames) {
+        SelfPlayBlockStats spBlk;
+        runParallelSelfPlayBlock(
+            spGames,
+            rb,
+            simsPerPos,
+            maxPlies,
+            addRootNoise,
+            MAX_GAMES_PER_BLOCK,
+            targetGames - games,
+            spEnd,
+            spBlk
+        );
 
-            int plyCount = 0;
-            bool terminated = false;
-            int samplesAdded = 0;
+        games += (int)spBlk.games;
 
-            selfPlayOneGame960(sp, rb,
-                simsPerPos,
-                maxPlies,
-                addRootNoise,
-                plyCount,
-                terminated,
-                samplesAdded);
+        statGamesWindow += spBlk.games;
+        statPlyWindow += spBlk.plies;
+        statTruncatedWindow += spBlk.truncated;
 
-            ++games;
-            ++gamesThisBlock;
+        if (!trainSchedulerActive && rb.currentSize() >= MIN_REPLAY_TO_TRAIN) {
+            trainSchedulerActive = true;
+            std::cerr << "[trainer] replay warmup reached: "
+                      << rb.currentSize()
+                      << " samples, sample-based schedule enabled\n";
+        }
 
-            ++statGamesWindow;
-            statPlyWindow += (uint64_t)plyCount;
-
-            const bool truncated = (!terminated && plyCount >= maxPlies);
-            if (truncated) ++statTruncatedWindow;
-
-            if (!trainSchedulerActive && rb.currentSize() >= MIN_REPLAY_TO_TRAIN) {
-                trainSchedulerActive = true;
-                std::cerr << "[trainer] replay warmup reached: "
-                          << rb.currentSize()
-                          << " samples, sample-based schedule enabled\n";
-            }
-
-            if (trainSchedulerActive && samplesAdded > 0) {
-                trainSampleCredits += REPLAY_RATIO * (double)samplesAdded;
-            }
-
-            if (sp.T.abort.load(std::memory_order_relaxed)) {
-                std::cerr << "[selfplay] MCTS aborted: oomCode=" << sp.T.oomCode.load()
-                    << " -> reset table.\n";
-                sp.resetForNewGame();
-            }
+        if (trainSchedulerActive && spBlk.samples > 0) {
+            trainSampleCredits += REPLAY_RATIO * (double)spBlk.samples;
         }
 
         // ===========================
@@ -8238,7 +8466,7 @@ void Training(int targetGames) {
                          (int)(trainSampleCredits / (double)trainer.B));
 
             if (targetSteps > 0) {
-                safeRefitBarrier(sp);
+                safeRefitBarrierAll(spGames);
 
                 // use old function as fixed-step runner by giving it a huge time budget
                 didTrain = trainer.trainBlockBudgetMs(rb, model, emaModel,
@@ -8259,7 +8487,7 @@ void Training(int targetGames) {
         // 3) REFIT TRT
         // ===========================
         if (didTrain > 0 && (trainBlocks % REFIT_EVERY_TRAIN_BLOCKS) == 0) {
-            safeRefitBarrier(sp);
+            safeRefitBarrierAll(spGames);
 
             std::scoped_lock lk(g_modelMutex, g_trtMutex);
             torch::NoGradGuard ng;
@@ -8276,8 +8504,8 @@ void Training(int targetGames) {
             // Полностью ставим основной self-play на паузу на время арены:
             // убираем лишние worker threads / inference server activity.
             if (spRunning) {
-                safeRefitBarrier(sp);
-                sp.stop();
+                safeRefitBarrierAll(spGames);
+                stopAllSelfPlayContexts(spGames);
                 spRunning = false;
             }
 
@@ -8324,12 +8552,12 @@ void Training(int targetGames) {
             }
 
             // ВАЖНО: всегда поднимаем основной self-play обратно после арены.
-            if (!restartSelfPlayContextAfterArena(sp)) {
+            if (!restartAllSelfPlayContexts(spGames, SEARCH_THREADS_PER_GAME)) {
                 stopTraining = true;
                 break;
             }
             spRunning = true;
-            prevSearchStats = sp.pool.snapshotStats();
+            prevSearchStats = snapshotAllSearchStats(spGames);
             statWindowStart = std::chrono::steady_clock::now();
 
             // Даже если arena setup failed, не зацикливаемся на том же пороге.
@@ -8348,7 +8576,7 @@ void Training(int targetGames) {
         auto now = std::chrono::steady_clock::now();
 
         if (now >= nextSave) {
-            safeRefitBarrier(sp);
+            safeRefitBarrierAll(spGames);
             nextSave += std::chrono::hours(1);
 
             saveAll(ptFile, emaFile, planFile, optFile, trainerStateFile, model, emaModel, trainer);
@@ -8359,7 +8587,7 @@ void Training(int targetGames) {
         if (now >= nextStat) {
             nextStat += std::chrono::seconds(10);
 
-            auto curStats = sp.pool.snapshotStats();
+            auto curStats = snapshotAllSearchStats(spGames);
             auto dtSec = std::chrono::duration<double>(now - statWindowStart).count();
             if (dtSec <= 0.0) dtSec = 1e-9;
 
@@ -8397,7 +8625,7 @@ void Training(int targetGames) {
                 << " | AvgLen: " << fmtFixed(avgLen, 1)
                 << " | Truncated: " << fmtFixed(truncatedPct, 0) << "%"
                 << " | NPS: " << fmtFixed(nps, 0)
-                << " | Q_size: " << sp.server.size()
+                << " | Q_size: " << totalNNQueueSize(spGames)
                 << " | TT_hit: " << fmtFixed(ttHitPct, 0) << "%"
                 << " | AvgDepth: " << fmtFixed(avgDepth, 0)
                 << "\n";
@@ -8415,8 +8643,8 @@ void Training(int targetGames) {
     // 5) CLEAN STOP & FINAL SAVE + FINAL REBUILD
     // ==========================================
     if (spRunning) {
-        safeRefitBarrier(sp);
-        sp.stop();
+        safeRefitBarrierAll(spGames);
+        stopAllSelfPlayContexts(spGames);
         spRunning = false;
     }
 
