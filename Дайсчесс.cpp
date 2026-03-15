@@ -5737,13 +5737,31 @@ struct InferenceServerTrain {
         });
     }
 
-    void clearQueueUnsafeWhenIdle() {
-        std::lock_guard<std::mutex> lk(m);
-        q.clear();
-        qSize.store(0, std::memory_order_relaxed);
-        cvNotFull.notify_all();
-        if (!busyFlag) cvIdle.notify_all();
+void clearQueueUnsafeWhenIdle() {
+    std::deque<std::unique_ptr<PendingNN>> dropped;
+
+    {
+        std::unique_lock<std::mutex> lk(m);
+
+        // Безопасно чистим только когда сервер НЕ обрабатывает batch.
+        cvIdle.wait(lk, [&] {
+            return !busyFlag;
+        });
+
+        dropped.swap(q);
+        qSize.store((int)q.size(), std::memory_order_relaxed);
     }
+
+    // ВНЕ lock-а: корректно откатываем все pending jobs.
+    for (auto& p : dropped) {
+        if (!p) continue;
+        cancelPendingNN(*p);
+        freePendingNN(std::move(p));
+    }
+
+    cvNotFull.notify_all();
+    cvIdle.notify_all();
+}
 
 private:
     bool popBatchUnlocked(std::vector<std::unique_ptr<PendingNN>>& batch, int wantB) {
@@ -6464,25 +6482,40 @@ else if (needNN && !server) {
 //  - does NOT apply Dirichlet noise in permanent expansion
 //  - marks GPU inference as "in flight" so trainer yields (InferInFlightGuard)
 //  - protects TensorRT with g_trtMutex
-static void ensureExpandedTrain(MCTSTable& T,
+static bool ensureExpandedTrain(MCTSTable& T,
     BackendBinding backend,
     const Position& rootPos,
     const std::array<uint64_t, 4>& path,
     const std::array<int, 64>& mask) {
-    if (T.abort.load(std::memory_order_relaxed)) return;
+    if (T.abort.load(std::memory_order_relaxed)) return false;
 
     TTNode* root = T.getNode(rootPos.key);
-    if (!root) return;
+    if (!root) return false;
 
-    uint8_t ex = root->expanded.load(std::memory_order_acquire);
-    if (ex == 1) return;
-    if (ex == 2) { waitWhileExpanding(root); return; }
+    // Надёжно дожидаемся/захватываем expansion root-а.
+    for (;;) {
+        uint8_t ex = root->expanded.load(std::memory_order_acquire);
 
-    uint8_t expected = 0;
-    if (!root->expanded.compare_exchange_strong(expected, 2,
-        std::memory_order_acq_rel,
-        std::memory_order_relaxed)) {
-        return;
+        if (ex == 1) return true;
+
+        if (ex == 2) {
+            if (!waitWhileExpanding(root)) {
+                std::cerr << "[ensureExpandedTrain] timeout while waiting for root expansion, key="
+                          << rootPos.key << "\n";
+                T.abort.store(true, std::memory_order_release);
+                return false;
+            }
+            continue; // перечитать состояние root
+        }
+
+        uint8_t expected = 0;
+        if (root->expanded.compare_exchange_strong(expected, 2,
+            std::memory_order_acq_rel,
+            std::memory_order_relaxed)) {
+            break; // мы захватили expansion
+        }
+
+        // кто-то успел изменить expanded — пробуем снова
     }
 
     MoveList ml;
@@ -6501,12 +6534,12 @@ static void ensureExpandedTrain(MCTSTable& T,
         Trace empty; empty.reset();
         backprop(root, 1.0f, empty);
         publishReady(root, rootPos.key, 0, 0, 1, 0);
-        return;
+        return true;
     }
 
     if (ml.n == 0) {
         publishReady(root, rootPos.key, 0, 0, 0, 1);
-        return;
+        return true;
     }
 
     PendingNN p;
@@ -6556,8 +6589,9 @@ static void ensureExpandedTrain(MCTSTable& T,
 
     expandLeafWithOutputs(T, p, v, pol.data());
 #endif
-}
 
+    return root->expanded.load(std::memory_order_acquire) == 1;
+}
 static void collectRootMoves(MCTSTable& T,
     const Position& rootPos,
     float& outQSideToMove,
@@ -6672,7 +6706,7 @@ static void runFixedSims(MCTSTable& T,
     bool rootNoise) {
     if (T.abort.load(std::memory_order_relaxed)) return;
 
-    ensureExpandedTrain(T, backend, rootPos, path, mask);
+    if (!ensureExpandedTrain(T, backend, rootPos, path, mask)) return;
     if (T.abort.load(std::memory_order_relaxed)) return;
 
     RootNoiseGuard rootNoiseGuard(T, rootPos, rootNoise);
@@ -6681,7 +6715,6 @@ static void runFixedSims(MCTSTable& T,
 
     srv.waitIdle();
 }
-
 // ------------------------------------------------------------
 // Self-play: переиспользуем один MCTSTable + один InferenceServerTrain + SearchPool
 // ------------------------------------------------------------
