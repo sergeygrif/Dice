@@ -24,6 +24,7 @@
 #include <deque>
 #include <torch/torch.h>
 #include <ATen/autocast_mode.h>
+#include <ATen/cuda/CUDAContext.h>
 #if defined(_MSC_VER)
 #include <intrin.h>
 #if defined(_M_X64) || defined(_M_IX86)
@@ -5984,6 +5985,9 @@ private:
         return n != 0;
     }
 
+    // IMPORTANT:
+    // processBatch() only expands/cancels jobs.
+    // Logical completion + reset + recycle are done by freePendingBatch() in the caller.
     void processBatch(std::vector<std::unique_ptr<PendingNN>>& jobs,
                       std::vector<const PendingNN*>& batchPtrs,
                       std::vector<float>& values
@@ -6020,7 +6024,6 @@ private:
                 MCTSTable* owner = resolveOwner(job);
                 if (owner) owner->abort.store(true, std::memory_order_release);
                 cancelPendingNN(job);
-                completePendingNNJob(job);
             }
             return;
         }
@@ -6031,7 +6034,6 @@ private:
 
             if (!owner || owner->abort.load(std::memory_order_relaxed)) {
                 cancelPendingNN(job);
-                completePendingNNJob(job);
                 continue;
             }
 
@@ -6039,7 +6041,6 @@ private:
             const float* lg = logits.data() + (size_t)i * (size_t)AI_MAX_MOVES;
 
             expandLeafWithGatheredLogits(*owner, job, v, lg);
-            completePendingNNJob(job);
         }
 #else
         posBatch.clear();
@@ -6065,7 +6066,6 @@ private:
                 MCTSTable* owner = resolveOwner(job);
                 if (owner) owner->abort.store(true, std::memory_order_release);
                 cancelPendingNN(job);
-                completePendingNNJob(job);
             }
             return;
         }
@@ -6076,7 +6076,6 @@ private:
 
             if (!owner || owner->abort.load(std::memory_order_relaxed)) {
                 cancelPendingNN(job);
-                completePendingNNJob(job);
                 continue;
             }
 
@@ -6084,9 +6083,63 @@ private:
             const float* pol = policy.data() + (size_t)i * (size_t)POLICY_SIZE;
 
             expandLeafWithOutputs(*owner, job, v, pol);
-            completePendingNNJob(job);
         }
 #endif
+    }
+
+
+    template<class TVec>
+    void abortAndRecycleBatch(TVec& jobs) noexcept {
+        for (auto& up : jobs) {
+            if (!up) continue;
+
+            PendingNN& job = *up;
+            MCTSTable* owner = resolveOwner(job);
+            if (owner) {
+                owner->abort.store(true, std::memory_order_release);
+            }
+
+            cancelPendingNN(job);
+        }
+
+        freePendingBatch(jobs); // completion + reset + pool recycle exactly once
+    }
+
+    void emergencyAbortAndDrain(std::vector<std::unique_ptr<PendingNN>>& batch,
+                                std::vector<std::unique_ptr<PendingNN>>& add,
+                                const char* what) noexcept {
+        try {
+            std::cerr << "[UnifiedInferenceServerTrain] FATAL in run(): "
+                      << (what ? what : "unknown exception") << "\n";
+        }
+        catch (...) {
+        }
+
+        stop.store(true, std::memory_order_relaxed);
+
+        abortAndRecycleBatch(batch);
+        abortAndRecycleBatch(add);
+
+        std::vector<std::unique_ptr<PendingNN>> tail;
+        try {
+            std::lock_guard<std::mutex> lk(m);
+
+            while (!q.empty()) {
+                tail.emplace_back(std::move(q.front()));
+                q.pop_front();
+            }
+
+            qSize.store(0, std::memory_order_relaxed);
+            busyFlag = false;
+        }
+        catch (...) {
+        }
+
+        abortAndRecycleBatch(tail);
+
+        cvNotEmpty.notify_all();
+        cvNotFull.notify_all();
+        cvIdle.notify_all();
     }
 
     void run() {
@@ -6106,86 +6159,95 @@ private:
         posBatch.reserve((size_t)TRT_MAX_BATCH);
 #endif
 
-        for (;;) {
-            {
-                std::unique_lock<std::mutex> lk(m);
+        try {
+            for (;;) {
+                {
+                    std::unique_lock<std::mutex> lk(m);
 
-                busyFlag = false;
-                if (q.empty()) cvIdle.notify_all();
+                    busyFlag = false;
+                    if (q.empty()) cvIdle.notify_all();
 
-                cvNotEmpty.wait(lk, [&] {
-                    return stop.load(std::memory_order_relaxed) || !q.empty();
-                });
-
-                if (stop.load(std::memory_order_relaxed) && q.empty()) break;
-
-                busyFlag = true;
-                (void)popBatchUnlocked(batch, TRT_MAX_BATCH);
-            }
-
-            cvNotFull.notify_all();
-
-            const auto tFillEnd =
-                std::chrono::steady_clock::now() + std::chrono::microseconds(200);
-
-            while ((int)batch.size() < TRT_MAX_BATCH &&
-                   std::chrono::steady_clock::now() < tFillEnd) {
-                std::unique_lock<std::mutex> lk(m);
-
-                if (q.empty()) {
-                    cvNotEmpty.wait_until(lk, tFillEnd, [&] {
+                    cvNotEmpty.wait(lk, [&] {
                         return stop.load(std::memory_order_relaxed) || !q.empty();
                     });
+
+                    if (stop.load(std::memory_order_relaxed) && q.empty()) break;
+
+                    busyFlag = true;
+                    (void)popBatchUnlocked(batch, TRT_MAX_BATCH);
                 }
-
-                if (q.empty()) break;
-
-                add.clear();
-                const int need = TRT_MAX_BATCH - (int)batch.size();
-                (void)popBatchUnlocked(add, need);
-                lk.unlock();
 
                 cvNotFull.notify_all();
 
-                for (auto& j : add) batch.emplace_back(std::move(j));
-            }
+                const auto tFillEnd =
+                    std::chrono::steady_clock::now() + std::chrono::microseconds(200);
+
+                while ((int)batch.size() < TRT_MAX_BATCH &&
+                       std::chrono::steady_clock::now() < tFillEnd) {
+                    std::unique_lock<std::mutex> lk(m);
+
+                    if (q.empty()) {
+                        cvNotEmpty.wait_until(lk, tFillEnd, [&] {
+                            return stop.load(std::memory_order_relaxed) || !q.empty();
+                        });
+                    }
+
+                    if (q.empty()) break;
+
+                    add.clear();
+                    const int need = TRT_MAX_BATCH - (int)batch.size();
+                    (void)popBatchUnlocked(add, need);
+                    lk.unlock();
+
+                    cvNotFull.notify_all();
+
+                    for (auto& j : add) batch.emplace_back(std::move(j));
+                }
 
 #if AI_HAVE_CUDA_KERNELS
-            processBatch(batch, batchPtrs, values, logits);
+                processBatch(batch, batchPtrs, values, logits);
 #else
-            processBatch(batch, batchPtrs, values, policy, posBatch);
+                processBatch(batch, batchPtrs, values, policy, posBatch);
 #endif
-            freePendingBatch(batch);
-        }
+                freePendingBatch(batch);
+            }
 
-        for (;;) {
-            std::vector<std::unique_ptr<PendingNN>> tail;
+            for (;;) {
+                std::vector<std::unique_ptr<PendingNN>> tail;
+                {
+                    std::lock_guard<std::mutex> lk(m);
+                    if (q.empty()) break;
+                    busyFlag = true;
+                    (void)popBatchUnlocked(tail, TRT_MAX_BATCH);
+                }
+
+                cvNotFull.notify_all();
+
+#if AI_HAVE_CUDA_KERNELS
+                processBatch(tail, batchPtrs, values, logits);
+#else
+                processBatch(tail, batchPtrs, values, policy, posBatch);
+#endif
+                freePendingBatch(tail);
+            }
+
             {
                 std::lock_guard<std::mutex> lk(m);
-                if (q.empty()) break;
-                busyFlag = true;
-                (void)popBatchUnlocked(tail, TRT_MAX_BATCH);
+                busyFlag = false;
+                qSize.store((int)q.size(), std::memory_order_relaxed);
+                if (q.empty()) cvIdle.notify_all();
             }
 
             cvNotFull.notify_all();
-
-#if AI_HAVE_CUDA_KERNELS
-            processBatch(tail, batchPtrs, values, logits);
-#else
-            processBatch(tail, batchPtrs, values, policy, posBatch);
-#endif
-            freePendingBatch(tail);
         }
-
-        {
-            std::lock_guard<std::mutex> lk(m);
-            busyFlag = false;
-            qSize.store((int)q.size(), std::memory_order_relaxed);
-            if (q.empty()) cvIdle.notify_all();
+        catch (const std::exception& e) {
+            emergencyAbortAndDrain(batch, add, e.what());
         }
-
-        cvNotFull.notify_all();
+        catch (...) {
+            emergencyAbortAndDrain(batch, add, "unknown exception");
+        }
     }
+
 };
 
 struct InferenceServerTrain final : UnifiedInferenceServerTrain {
@@ -7521,16 +7583,20 @@ struct Trainer {
 
     // Hyperparams
     double initial_lr = 2e-4;
+    double min_lr = 2e-5;
     double current_lr = initial_lr;
     double wd = 1e-4;
     double ema_decay = 0.999;
-// restart-warmup
-uint64_t resumeStartStep = 0;              // step at process start / resume
-uint64_t warmupStepsAfterRestart = 2000;   // tune: 1000..5000
-double   warmupStartFactor = 0.10;         // 0.05..0.25 usually good
-    // LR schedule
-    std::vector<uint64_t> lr_milestones = { 300000, 600000, 850000 };
-    double lr_gamma = 0.5;
+
+    // Cosine Annealing with Warmup
+    uint64_t lr_warmup_steps = 10000;
+    uint64_t lr_total_steps  = 1000000;
+    double   lr_warmup_start_factor = 0.10;
+
+    // Optional short smoothing after process restart/resume
+    uint64_t resumeStartStep = 0;
+    uint64_t warmupStepsAfterRestart = 2000;
+    double   warmupStartFactor = 0.10;
 
     // Batch
     int B = 256;
@@ -7553,6 +7619,13 @@ double   warmupStartFactor = 0.10;         // 0.05..0.25 usually good
     // [1, AI_MAX_MOVES] => 0..254 on the active device
     torch::Tensor slotIdsDev;
 
+    // Async H2D pipeline
+    cudaStream_t h2dStream = nullptr;
+    std::array<cudaEvent_t, 2> h2dDone{{nullptr, nullptr}};
+    std::array<cudaEvent_t, 2> computeDone{{nullptr, nullptr}};
+    std::array<bool, 2> h2dDoneValid{{false, false}};
+    std::array<bool, 2> computeDoneValid{{false, false}};
+
     // State
     uint64_t steps = 0;
     float lastLoss = 0.0f;
@@ -7561,48 +7634,164 @@ double   warmupStartFactor = 0.10;         // 0.05..0.25 usually good
     float lastEntropy = 0.0f;
     float lastVMAE = 0.0f;
     float lastGradNorm = 0.0f;
-double computeBaseLRFromSteps(uint64_t s) const {
-    double lr = initial_lr;
-    for (uint64_t ms : lr_milestones) {
-        if (s >= ms) lr *= lr_gamma;
+
+    ~Trainer() {
+        shutdownAsyncPipeline();
     }
-    return lr;
-}
-double computeRestartWarmupMultiplier(uint64_t s) const {
-    if (warmupStepsAfterRestart == 0) return 1.0;
 
-    uint64_t delta = (s >= resumeStartStep) ? (s - resumeStartStep) : 0;
-    if (delta >= warmupStepsAfterRestart) return 1.0;
+    static AI_FORCEINLINE size_t tensorBytes(const torch::Tensor& t) {
+        return (size_t)t.numel() * (size_t)t.element_size();
+    }
 
-    double t = (double)delta / (double)warmupStepsAfterRestart; // 0..1
-    return warmupStartFactor + (1.0 - warmupStartFactor) * t;
-}
+    AI_FORCEINLINE cudaStream_t currentComputeStream() const {
+        if (!useCuda) return nullptr;
+        return at::cuda::getCurrentCUDAStream(device.index()).stream();
+    }
+
+    void initAsyncPipeline() {
+        if (!useCuda) return;
+
+        if (!h2dStream) {
+            CUDA_CHECK(cudaStreamCreateWithFlags(&h2dStream, cudaStreamNonBlocking));
+        }
+
+        for (int s = 0; s < 2; ++s) {
+            if (!h2dDone[(size_t)s]) {
+                CUDA_CHECK(cudaEventCreateWithFlags(&h2dDone[(size_t)s], cudaEventDisableTiming));
+            }
+            if (!computeDone[(size_t)s]) {
+                CUDA_CHECK(cudaEventCreateWithFlags(&computeDone[(size_t)s], cudaEventDisableTiming));
+            }
+        }
+
+        cudaStream_t cs = currentComputeStream();
+        for (int s = 0; s < 2; ++s) {
+            CUDA_CHECK(cudaEventRecord(h2dDone[(size_t)s], cs));
+            CUDA_CHECK(cudaEventRecord(computeDone[(size_t)s], cs));
+            h2dDoneValid[(size_t)s] = true;
+            computeDoneValid[(size_t)s] = true;
+        }
+    }
+
+    void shutdownAsyncPipeline() {
+        if (!useCuda) return;
+
+        if (h2dStream) {
+            cudaStreamSynchronize(h2dStream);
+        }
+
+        for (int s = 0; s < 2; ++s) {
+            if (h2dDone[(size_t)s]) {
+                cudaEventDestroy(h2dDone[(size_t)s]);
+                h2dDone[(size_t)s] = nullptr;
+            }
+            if (computeDone[(size_t)s]) {
+                cudaEventDestroy(computeDone[(size_t)s]);
+                computeDone[(size_t)s] = nullptr;
+            }
+            h2dDoneValid[(size_t)s] = false;
+            computeDoneValid[(size_t)s] = false;
+        }
+
+        if (h2dStream) {
+            cudaStreamDestroy(h2dStream);
+            h2dStream = nullptr;
+        }
+    }
+
+    void waitHostSlotReusable(int slot) {
+        if (!useCuda) return;
+        if (!h2dDoneValid[(size_t)slot]) return;
+        CUDA_CHECK(cudaEventSynchronize(h2dDone[(size_t)slot]));
+    }
+
+    void enqueueStageToDeviceAsync(int slot) {
+        if (!useCuda) return;
+
+        if (computeDoneValid[(size_t)slot]) {
+            CUDA_CHECK(cudaStreamWaitEvent(h2dStream, computeDone[(size_t)slot], 0));
+        }
+
+        CUDA_CHECK(cudaMemcpyAsync(devStage[(size_t)slot].x.data_ptr<float>(), hostStage[(size_t)slot].x.data_ptr<float>(), tensorBytes(hostStage[(size_t)slot].x), cudaMemcpyHostToDevice, h2dStream));
+        CUDA_CHECK(cudaMemcpyAsync(devStage[(size_t)slot].idx.data_ptr<int64_t>(), hostStage[(size_t)slot].idx.data_ptr<int64_t>(), tensorBytes(hostStage[(size_t)slot].idx), cudaMemcpyHostToDevice, h2dStream));
+        CUDA_CHECK(cudaMemcpyAsync(devStage[(size_t)slot].prob.data_ptr<float>(), hostStage[(size_t)slot].prob.data_ptr<float>(), tensorBytes(hostStage[(size_t)slot].prob), cudaMemcpyHostToDevice, h2dStream));
+        CUDA_CHECK(cudaMemcpyAsync(devStage[(size_t)slot].z.data_ptr<float>(), hostStage[(size_t)slot].z.data_ptr<float>(), tensorBytes(hostStage[(size_t)slot].z), cudaMemcpyHostToDevice, h2dStream));
+        CUDA_CHECK(cudaMemcpyAsync(devStage[(size_t)slot].nPi.data_ptr<int64_t>(), hostStage[(size_t)slot].nPi.data_ptr<int64_t>(), tensorBytes(hostStage[(size_t)slot].nPi), cudaMemcpyHostToDevice, h2dStream));
+
+        CUDA_CHECK(cudaEventRecord(h2dDone[(size_t)slot], h2dStream));
+        h2dDoneValid[(size_t)slot] = true;
+    }
+
+    void waitDeviceSlotReadyOnComputeStream(int slot) {
+        if (!useCuda) return;
+        if (!h2dDoneValid[(size_t)slot]) return;
+        CUDA_CHECK(cudaStreamWaitEvent(currentComputeStream(), h2dDone[(size_t)slot], 0));
+    }
+
+    void markComputeUsesSlot(int slot) {
+        if (!useCuda) return;
+        CUDA_CHECK(cudaEventRecord(computeDone[(size_t)slot], currentComputeStream()));
+        computeDoneValid[(size_t)slot] = true;
+    }
+
+    static constexpr double kPi = 3.1415926535897932384626433832795;
+
+    double computeCosineBaseLR(uint64_t s) const {
+        const double base = initial_lr;
+        const double floor = std::min(min_lr, base);
+
+        if (lr_total_steps <= 1) return floor;
+
+        if (s < lr_warmup_steps) {
+            const double t = (double)s / (double)std::max<uint64_t>(1, lr_warmup_steps);
+            const double mult = lr_warmup_start_factor + (1.0 - lr_warmup_start_factor) * t;
+            return base * mult;
+        }
+
+        const uint64_t decaySpan = (lr_total_steps > lr_warmup_steps) ? (lr_total_steps - lr_warmup_steps) : 1ull;
+        const uint64_t decayPos = std::min<uint64_t>(s - lr_warmup_steps, decaySpan);
+
+        const double u = (double)decayPos / (double)decaySpan;
+        const double c = 0.5 * (1.0 + std::cos(kPi * u));
+
+        return floor + (base - floor) * c;
+    }
+
+    double computeRestartWarmupMultiplier(uint64_t s) const {
+        if (warmupStepsAfterRestart == 0) return 1.0;
+
+        uint64_t delta = (s >= resumeStartStep) ? (s - resumeStartStep) : 0;
+        if (delta >= warmupStepsAfterRestart) return 1.0;
+
+        double t = (double)delta / (double)warmupStepsAfterRestart;
+        return warmupStartFactor + (1.0 - warmupStartFactor) * t;
+    }
+
     void updateLR(bool forceLog = false) {
-    const uint64_t prevStep = (steps > 0 ? steps - 1 : 0);
+        const double prev = current_lr;
 
-    double prevBase = computeBaseLRFromSteps(prevStep);
-    double base_lr = computeBaseLRFromSteps(steps);
-    double warm_mult = computeRestartWarmupMultiplier(steps);
-    double target_lr = base_lr * warm_mult;
+        const double cosine_lr = computeCosineBaseLR(steps);
+        const double restart_mult = computeRestartWarmupMultiplier(steps);
+        const double target_lr = cosine_lr * restart_mult;
 
-    for (auto& group : opt->param_groups()) {
-        static_cast<torch::optim::AdamWOptions&>(group.options()).lr(target_lr);
+        for (auto& group : opt->param_groups()) {
+            static_cast<torch::optim::AdamWOptions&>(group.options()).lr(target_lr);
+        }
+
+        current_lr = target_lr;
+
+        const bool changed = std::fabs(current_lr - prev) > 1e-15;
+        const bool restartWarmupJustFinished =
+            (warmupStepsAfterRestart > 0 &&
+             steps == resumeStartStep + warmupStepsAfterRestart);
+
+        if (forceLog || changed || restartWarmupJustFinished) {
+            std::cerr << "[Trainer] LR=" << current_lr
+                      << " (cosine=" << cosine_lr
+                      << ", restart_x=" << restart_mult
+                      << ", step=" << steps << ")\n";
+        }
     }
-
-    const bool baseChanged = std::fabs(base_lr - prevBase) > 1e-15;
-    const bool warmupJustFinished =
-        (warmupStepsAfterRestart > 0 &&
-         steps == resumeStartStep + warmupStepsAfterRestart);
-
-    current_lr = target_lr;
-
-    if (forceLog || baseChanged || warmupJustFinished) {
-        std::cerr << "[Trainer] LR=" << current_lr
-                  << " (base=" << base_lr
-                  << ", warmup_x=" << warm_mult
-                  << ", step=" << steps << ")\n";
-    }
-}
 static AI_FORCEINLINE bool endsWithStr(const std::string& s, const char* suf) {
     const size_t n = std::strlen(suf);
     return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
@@ -7645,15 +7834,7 @@ static AI_FORCEINLINE void fillStageFromBatch(
 
 void copyStageToDevice(int slot) {
     if (!useCuda) return;
-
-    // SAFE VERSION:
-    // blocking copies, because this stage will be reused later and we do not
-    // track per-buffer H2D completion events yet.
-    devStage[(size_t)slot].x.copy_(hostStage[(size_t)slot].x, /*non_blocking=*/false);
-    devStage[(size_t)slot].idx.copy_(hostStage[(size_t)slot].idx, /*non_blocking=*/false);
-    devStage[(size_t)slot].prob.copy_(hostStage[(size_t)slot].prob, /*non_blocking=*/false);
-    devStage[(size_t)slot].z.copy_(hostStage[(size_t)slot].z, /*non_blocking=*/false);
-    devStage[(size_t)slot].nPi.copy_(hostStage[(size_t)slot].nPi, /*non_blocking=*/false);
+    enqueueStageToDeviceAsync(slot);
 }
 void init(Net& model, Net& emaModel) {
     try { torch::set_num_threads(1); }
@@ -7813,6 +7994,10 @@ void init(Net& model, Net& emaModel) {
         AI_MAX_MOVES,
         torch::TensorOptions().dtype(torch::kInt64).device(device)
     ).view({ 1, AI_MAX_MOVES });
+
+    if (useCuda) {
+        initAsyncPipeline();
+    }
 }
 
 int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
@@ -7839,20 +8024,19 @@ int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
 
     static constexpr uint64_t HOST_STATS_EVERY = 16;
 
-    // ---------------------------------------------------------
-    // Safe V1 double buffering:
-    // - two host staging buffers
-    // - two device buffers
-    // - CPU prepares the next batch after current GPU step is launched
-    // - no extra copy stream/events yet
-    // ---------------------------------------------------------
     int cur = 0;
     int next = 1;
 
     // Preload first batch
     if (!rb.sampleBatch(batchBuf[(size_t)cur], B, rng)) return 0;
+
+    if (useCuda) {
+        waitHostSlotReusable(cur);
+    }
     fillStageFromBatch(hostStage[(size_t)cur], batchBuf[(size_t)cur], B);
-    copyStageToDevice(cur);
+    if (useCuda) {
+        enqueueStageToDeviceAsync(cur);
+    }
 
     for (int it = 0; it < maxStepsHard; ++it) {
         if (std::chrono::steady_clock::now() >= tEnd) break;
@@ -7864,6 +8048,8 @@ int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
         torch::Tensor nPiBatch;
 
         if (useCuda) {
+            waitDeviceSlotReadyOnComputeStream(cur);
+
             xBatch   = devStage[(size_t)cur].x;
             idxBatch = devStage[(size_t)cur].idx;
             probBatch= devStage[(size_t)cur].prob;
@@ -8058,6 +8244,10 @@ int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
             updateLR();
         }
 
+        if (useCuda) {
+            markComputeUsesSlot(cur);
+        }
+
         // ---------------------------------------------------------
         // Prefetch/build next batch on CPU while current GPU work is
         // still draining asynchronously.
@@ -8067,8 +8257,13 @@ int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
 
         if (!rb.sampleBatch(batchBuf[(size_t)next], B, rng)) break;
 
+        if (useCuda) {
+            waitHostSlotReusable(next);
+        }
         fillStageFromBatch(hostStage[(size_t)next], batchBuf[(size_t)next], B);
-        copyStageToDevice(next);
+        if (useCuda) {
+            enqueueStageToDeviceAsync(next);
+        }
 
         std::swap(cur, next);
     }
