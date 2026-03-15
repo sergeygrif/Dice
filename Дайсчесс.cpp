@@ -7022,6 +7022,14 @@ struct SimpleGradScaler {
     }
 };
 
+struct TrainTensorStage {
+    torch::Tensor x;
+    torch::Tensor idx;
+    torch::Tensor prob;
+    torch::Tensor z;
+    torch::Tensor nPi;
+};
+
 struct Trainer {
     torch::Device device{ torch::kCPU };
     bool useCuda = false;
@@ -7058,11 +7066,11 @@ double   warmupStartFactor = 0.10;         // 0.05..0.25 usually good
     // Cached EMA dst/src tensor pairs
     ModulePairCache emaCache;
 
-    // CPU staging (pinned if CUDA)
-    torch::Tensor xCPU, idxCPU, probCPU, zCPU, nPiCPU;
+    // Double-buffered CPU staging (pinned if CUDA)
+    std::array<TrainTensorStage, 2> hostStage{};
 
-    // Device tensors (allocated once)
-    torch::Tensor xDev, idxDev, probDev, zDev, nPiDev;
+    // Double-buffered device tensors
+    std::array<TrainTensorStage, 2> devStage{};
 
     // [1, AI_MAX_MOVES] => 0..254 on the active device
     torch::Tensor slotIdsDev;
@@ -7109,6 +7117,53 @@ double computeRestartWarmupMultiplier(uint64_t s) const {
 static AI_FORCEINLINE bool endsWithStr(const std::string& s, const char* suf) {
     const size_t n = std::strlen(suf);
     return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
+}
+
+static AI_FORCEINLINE void fillStageFromBatch(
+    TrainTensorStage& st,
+    const std::vector<TrainSample>& batch,
+    int B)
+{
+    float*   xp = st.x.data_ptr<float>();
+    int64_t* ip = st.idx.data_ptr<int64_t>();
+    float*   pp = st.prob.data_ptr<float>();
+    float*   zp = st.z.data_ptr<float>();
+    int64_t* np = st.nPi.data_ptr<int64_t>();
+
+    for (int i = 0; i < B; ++i) {
+        const TrainSample& s = batch[(size_t)i];
+
+        NNInput enc;
+        positionToNNInput(s.pos, enc);
+
+        std::memcpy(
+            xp + (size_t)i * (size_t)NN_INPUT_SIZE,
+            enc.data(),
+            (size_t)NN_INPUT_SIZE * sizeof(float)
+        );
+
+        np[(size_t)i] = (int64_t)s.nPi;
+
+        for (int j = 0; j < AI_MAX_MOVES; ++j) {
+            ip[(size_t)i * (size_t)AI_MAX_MOVES + (size_t)j] = (int64_t)s.piIdx[(size_t)j];
+            pp[(size_t)i * (size_t)AI_MAX_MOVES + (size_t)j] = s.piProb[(size_t)j];
+        }
+
+        zp[(size_t)i] = s.z;
+    }
+}
+
+void copyStageToDevice(int slot) {
+    if (!useCuda) return;
+
+    // SAFE VERSION:
+    // blocking copies, because this stage will be reused later and we do not
+    // track per-buffer H2D completion events yet.
+    devStage[(size_t)slot].x.copy_(hostStage[(size_t)slot].x, /*non_blocking=*/false);
+    devStage[(size_t)slot].idx.copy_(hostStage[(size_t)slot].idx, /*non_blocking=*/false);
+    devStage[(size_t)slot].prob.copy_(hostStage[(size_t)slot].prob, /*non_blocking=*/false);
+    devStage[(size_t)slot].z.copy_(hostStage[(size_t)slot].z, /*non_blocking=*/false);
+    devStage[(size_t)slot].nPi.copy_(hostStage[(size_t)slot].nPi, /*non_blocking=*/false);
 }
 void init(Net& model, Net& emaModel) {
     try { torch::set_num_threads(1); }
@@ -7225,25 +7280,42 @@ void init(Net& model, Net& emaModel) {
         return ten;
     };
 
-    xCPU   = makeCPU({ B, NN_SQ_PLANES, 8, 8 }, torch::kFloat32);
-    idxCPU = makeCPU({ B, AI_MAX_MOVES },       torch::kInt64);
-    probCPU= makeCPU({ B, AI_MAX_MOVES },       torch::kFloat32);
-    zCPU   = makeCPU({ B, 1 },                  torch::kFloat32);
-    nPiCPU = makeCPU({ B },                     torch::kInt64);
+    for (int s = 0; s < 2; ++s) {
+        hostStage[(size_t)s].x    = makeCPU({ B, NN_SQ_PLANES, 8, 8 }, torch::kFloat32);
+        hostStage[(size_t)s].idx  = makeCPU({ B, AI_MAX_MOVES },       torch::kInt64);
+        hostStage[(size_t)s].prob = makeCPU({ B, AI_MAX_MOVES },       torch::kFloat32);
+        hostStage[(size_t)s].z    = makeCPU({ B, 1 },                  torch::kFloat32);
+        hostStage[(size_t)s].nPi  = makeCPU({ B },                     torch::kInt64);
+    }
 
     if (useCuda) {
-        xDev   = torch::empty({ B, NN_SQ_PLANES, 8, 8 }, torch::TensorOptions().dtype(torch::kFloat32).device(device));
-        idxDev = torch::empty({ B, AI_MAX_MOVES },       torch::TensorOptions().dtype(torch::kInt64).device(device));
-        probDev= torch::empty({ B, AI_MAX_MOVES },       torch::TensorOptions().dtype(torch::kFloat32).device(device));
-        zDev   = torch::empty({ B, 1 },                  torch::TensorOptions().dtype(torch::kFloat32).device(device));
-        nPiDev = torch::empty({ B },                     torch::TensorOptions().dtype(torch::kInt64).device(device));
+        for (int s = 0; s < 2; ++s) {
+            devStage[(size_t)s].x = torch::empty(
+                { B, NN_SQ_PLANES, 8, 8 },
+                torch::TensorOptions().dtype(torch::kFloat32).device(device));
+
+            devStage[(size_t)s].idx = torch::empty(
+                { B, AI_MAX_MOVES },
+                torch::TensorOptions().dtype(torch::kInt64).device(device));
+
+            devStage[(size_t)s].prob = torch::empty(
+                { B, AI_MAX_MOVES },
+                torch::TensorOptions().dtype(torch::kFloat32).device(device));
+
+            devStage[(size_t)s].z = torch::empty(
+                { B, 1 },
+                torch::TensorOptions().dtype(torch::kFloat32).device(device));
+
+            devStage[(size_t)s].nPi = torch::empty(
+                { B },
+                torch::TensorOptions().dtype(torch::kInt64).device(device));
+        }
     }
     else {
-        xDev   = xCPU;
-        idxDev = idxCPU;
-        probDev= probCPU;
-        zDev   = zCPU;
-        nPiDev = nPiCPU;
+        // CPU fallback: just alias host buffers
+        for (int s = 0; s < 2; ++s) {
+            devStage[(size_t)s] = hostStage[(size_t)s];
+        }
     }
 
     // slot ids for masking legal part: [1, 255] = 0..254
@@ -7264,8 +7336,9 @@ int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
 
     const auto tEnd = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
 
-    std::vector<TrainSample> batch;
-    batch.reserve((size_t)B);
+    std::array<std::vector<TrainSample>, 2> batchBuf;
+    batchBuf[0].reserve((size_t)B);
+    batchBuf[1].reserve((size_t)B);
 
     int done = 0;
 
@@ -7274,59 +7347,46 @@ int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
     static constexpr int MAX_SKIPPED_CONSECUTIVE = 32;
     static constexpr int MAX_SKIPPED_TOTAL = 256;
 
-    // Не читаем CUDA scalars на CPU каждый батч:
-    // обновляем host-статистику только периодически.
     static constexpr uint64_t HOST_STATS_EVERY = 16;
+
+    // ---------------------------------------------------------
+    // Safe V1 double buffering:
+    // - two host staging buffers
+    // - two device buffers
+    // - CPU prepares the next batch after current GPU step is launched
+    // - no extra copy stream/events yet
+    // ---------------------------------------------------------
+    int cur = 0;
+    int next = 1;
+
+    // Preload first batch
+    if (!rb.sampleBatch(batchBuf[(size_t)cur], B, rng)) return 0;
+    fillStageFromBatch(hostStage[(size_t)cur], batchBuf[(size_t)cur], B);
+    copyStageToDevice(cur);
 
     for (int it = 0; it < maxStepsHard; ++it) {
         if (std::chrono::steady_clock::now() >= tEnd) break;
-        if (!rb.sampleBatch(batch, B, rng)) break;
 
-        // ---- Fill CPU staging ----
-        float*   xp = xCPU.data_ptr<float>();
-        int64_t* ip = idxCPU.data_ptr<int64_t>();
-        float*   pp = probCPU.data_ptr<float>();
-        float*   zp = zCPU.data_ptr<float>();
-        int64_t* np = nPiCPU.data_ptr<int64_t>();
+        torch::Tensor xBatch;
+        torch::Tensor idxBatch;
+        torch::Tensor probBatch;
+        torch::Tensor zBatch;
+        torch::Tensor nPiBatch;
 
-        for (int i = 0; i < B; ++i) {
-            const TrainSample& s = batch[(size_t)i];
-
-            NNInput enc;
-            positionToNNInput(s.pos, enc);
-
-            std::memcpy(
-                xp + (size_t)i * (size_t)NN_INPUT_SIZE,
-                enc.data(),
-                (size_t)NN_INPUT_SIZE * sizeof(float)
-            );
-
-            np[(size_t)i] = (int64_t)s.nPi;
-
-            for (int j = 0; j < AI_MAX_MOVES; ++j) {
-                ip[(size_t)i * (size_t)AI_MAX_MOVES + (size_t)j] = (int64_t)s.piIdx[(size_t)j];
-                pp[(size_t)i * (size_t)AI_MAX_MOVES + (size_t)j] = s.piProb[(size_t)j];
-            }
-
-            zp[(size_t)i] = s.z;
+        if (useCuda) {
+            xBatch   = devStage[(size_t)cur].x;
+            idxBatch = devStage[(size_t)cur].idx;
+            probBatch= devStage[(size_t)cur].prob;
+            zBatch   = devStage[(size_t)cur].z;
+            nPiBatch = devStage[(size_t)cur].nPi;
+        } else {
+            xBatch   = hostStage[(size_t)cur].x;
+            idxBatch = hostStage[(size_t)cur].idx;
+            probBatch= hostStage[(size_t)cur].prob;
+            zBatch   = hostStage[(size_t)cur].z;
+            nPiBatch = hostStage[(size_t)cur].nPi;
         }
 
-// ---- H2D (SAFE: blocking copies) ----
-// IMPORTANT:
-// CPU staging tensors (xCPU/idxCPU/probCPU/zCPU/nPiCPU) are reused
-// on the next loop iteration. With pinned memory + non_blocking=true,
-// CPU may start overwriting them before CUDA finishes reading them.
-// So copies here must be blocking unless we implement double buffering.
-if (useCuda) {
-    xDev.copy_(xCPU,     /*non_blocking=*/false);
-    idxDev.copy_(idxCPU, /*non_blocking=*/false);
-    probDev.copy_(probCPU,/*non_blocking=*/false);
-    zDev.copy_(zCPU,     /*non_blocking=*/false);
-    nPiDev.copy_(nPiCPU, /*non_blocking=*/false);
-}
-
-        // Обновляем host-метрики только раз в N успешных шагов.
-        // +1 => проверка по "следующему" успешному global step.
         const bool needHostStats =
             (((steps + (uint64_t)done + 1ull) % HOST_STATS_EVERY) == 0ull);
 
@@ -7341,69 +7401,52 @@ if (useCuda) {
 
             opt->zero_grad();
 
-auto runForwardLoss = [&]() {
-    auto out = model->forward(xDev);
-    auto pol = out.first;         // [B,73,8,8]
-    auto valLogits = out.second;  // [B,1]
+            auto runForwardLoss = [&]() {
+                auto out = model->forward(xBatch);
+                auto pol = out.first;         // [B,73,8,8]
+                auto valLogits = out.second;  // [B,1]
 
-    // =========================================================
-    // POLICY LOSS over LEGAL MOVES ONLY (SAFE VERSION)
-    // =========================================================
+                // =========================================================
+                // POLICY LOSS over LEGAL MOVES ONLY (SAFE VERSION)
+                // =========================================================
+                auto polFlat = pol.flatten(1).to(torch::kFloat32); // [B, POLICY_SIZE]
 
-    // Always compute policy loss in FP32, even under AMP.
-    // This avoids FP16 saturation to -Inf on masked logits.
-    auto polFlat = pol.flatten(1).to(torch::kFloat32); // [B, POLICY_SIZE]
+                auto nPiClamped = nPiBatch.clamp(0, AI_MAX_MOVES); // [B], int64
+                auto validMask = slotIdsDev.lt(nPiClamped.view({ -1, 1 })); // [B, AI_MAX_MOVES], bool
 
-    // Clamp nPi to valid range just in case.
-    auto nPiClamped = nPiDev.clamp(0, AI_MAX_MOVES);   // [B], int64
+                auto idxSafe = idxBatch.clamp(0, POLICY_SIZE - 1); // [B, AI_MAX_MOVES], int64
+                auto gathered = polFlat.gather(1, idxSafe);        // [B, AI_MAX_MOVES], FP32
 
-    // validMask[b, j] == true iff slot j is a real legal move for sample b
-    auto validMask = slotIdsDev.lt(nPiClamped.view({ -1, 1 })); // [B, AI_MAX_MOVES], bool
+                constexpr float kMaskedLogit = -1e9f;
+                auto maskedLogits = gathered.masked_fill(torch::logical_not(validMask), kMaskedLogit);
 
-    // Safety for gather:
-    // padded / corrupted indices must not crash gather.
-    auto idxSafe = idxDev.clamp(0, POLICY_SIZE - 1);   // [B, AI_MAX_MOVES], int64
+                auto logp_valid = torch::log_softmax(maskedLogits, 1); // [B, AI_MAX_MOVES], FP32
 
-    auto gathered = polFlat.gather(1, idxSafe);        // [B, AI_MAX_MOVES], FP32
+                auto tgtProb = probBatch.to(torch::kFloat32)
+                    .masked_fill(torch::logical_not(validMask), 0.0f);
 
-    // IMPORTANT:
-    // use a large finite negative number, not -inf.
-    // Since gathered is FP32 here, -1e9 is perfectly safe.
-    constexpr float kMaskedLogit = -1e9f;
-    auto maskedLogits = gathered.masked_fill(torch::logical_not(validMask), kMaskedLogit);
+                auto rowLossP = -(tgtProb * logp_valid).sum(1); // [B]
 
-    // log-softmax over move slots
-    auto logp_valid = torch::log_softmax(maskedLogits, 1); // [B, AI_MAX_MOVES], FP32
+                auto rowHasTarget = nPiClamped.gt(0).to(torch::kFloat32); // [B]
+                auto denomP = rowHasTarget.sum().clamp_min(1.0f);
 
-    // Zero out invalid target slots explicitly.
-    // This prevents any chance of 0 * (-inf) style NaNs if code changes later.
-    auto tgtProb = probDev.to(torch::kFloat32)
-        .masked_fill(torch::logical_not(validMask), 0.0f); // [B, AI_MAX_MOVES]
+                auto lossP = (rowLossP * rowHasTarget).sum() / denomP;
 
-    // Per-row policy CE
-    auto rowLossP = -(tgtProb * logp_valid).sum(1); // [B]
+                // =========================================================
+                // VALUE LOSS
+                // =========================================================
+                auto lossV = torch::binary_cross_entropy_with_logits(
+                    valLogits.to(torch::kFloat32),
+                    zBatch.to(torch::kFloat32)
+                );
 
-    // Ignore rows with nPi == 0 instead of letting them distort the mean.
-    auto rowHasTarget = nPiClamped.gt(0).to(torch::kFloat32); // [B]
-    auto denomP = rowHasTarget.sum().clamp_min(1.0f);
-
-    auto lossP = (rowLossP * rowHasTarget).sum() / denomP;
-
-    // =========================================================
-    // VALUE LOSS (also in FP32)
-    // =========================================================
-    auto lossV = torch::binary_cross_entropy_with_logits(
-        valLogits.to(torch::kFloat32),
-        zDev.to(torch::kFloat32)
-    );
-
-    auto loss = lossP + lossV;
-    return std::make_tuple(loss, lossP, lossV);
-};
+                auto loss = lossP + lossV;
+                return std::make_tuple(loss, lossP, lossV);
+            };
 
             torch::Tensor loss, lossP, lossV;
 
-    if (useAmp) {
+            if (useAmp) {
                 CudaAutocastGuard ampGuard(true, ampDtype);
                 std::tie(loss, lossP, lossV) = runForwardLoss();
             } else {
@@ -7412,56 +7455,56 @@ auto runForwardLoss = [&]() {
 
             const bool finiteLoss = torch::isfinite(loss).all().item<bool>();
             if (finiteLoss) {
-if (useAmp) {
-    scaler.scaleLoss(loss).backward();
+                if (useAmp) {
+                    scaler.scaleLoss(loss).backward();
 
-    scaler.unscale(model->parameters());
+                    scaler.unscale(model->parameters());
 
-    double currentGradNorm =
-        torch::nn::utils::clip_grad_norm_(model->parameters(), 1.0);
+                    double currentGradNorm =
+                        torch::nn::utils::clip_grad_norm_(model->parameters(), 1.0);
 
-    bool gradsFinite = std::isfinite(currentGradNorm);
+                    bool gradsFinite = std::isfinite(currentGradNorm);
 
-    if (gradsFinite) {
-        opt->step();
-        emaUpdateCached(emaCache, ema_decay);
+                    if (gradsFinite) {
+                        opt->step();
+                        emaUpdateCached(emaCache, ema_decay);
 
-        if (needHostStats) {
-            lossScalar = loss.detach().item<float>();
-            lossPScalar = lossP.detach().item<float>();
-            lossVScalar = lossV.detach().item<float>();
-        }
+                        if (needHostStats) {
+                            lossScalar = loss.detach().item<float>();
+                            lossPScalar = lossP.detach().item<float>();
+                            lossVScalar = lossV.detach().item<float>();
+                        }
 
-        gradNormScalar = static_cast<float>(currentGradNorm);
-        didStep = true;
-    }
+                        gradNormScalar = static_cast<float>(currentGradNorm);
+                        didStep = true;
+                    }
 
-    scaler.update(gradsFinite);
-    lastAmpScale = scaler.scale;
+                    scaler.update(gradsFinite);
+                    lastAmpScale = scaler.scale;
 
-    if (!didStep) {
-        ++ampSkippedSteps;
-    }
-} else {
-    loss.backward();
+                    if (!didStep) {
+                        ++ampSkippedSteps;
+                    }
+                } else {
+                    loss.backward();
 
-    double currentGradNorm =
-        torch::nn::utils::clip_grad_norm_(model->parameters(), 1.0);
+                    double currentGradNorm =
+                        torch::nn::utils::clip_grad_norm_(model->parameters(), 1.0);
 
-    if (std::isfinite(currentGradNorm)) {
-        opt->step();
-        emaUpdateCached(emaCache, ema_decay);
+                    if (std::isfinite(currentGradNorm)) {
+                        opt->step();
+                        emaUpdateCached(emaCache, ema_decay);
 
-        if (needHostStats) {
-            lossScalar = loss.detach().item<float>();
-            lossPScalar = lossP.detach().item<float>();
-            lossVScalar = lossV.detach().item<float>();
-        }
+                        if (needHostStats) {
+                            lossScalar = loss.detach().item<float>();
+                            lossPScalar = lossP.detach().item<float>();
+                            lossVScalar = lossV.detach().item<float>();
+                        }
 
-        gradNormScalar = static_cast<float>(currentGradNorm);
-        didStep = true;
-    }
-}
+                        gradNormScalar = static_cast<float>(currentGradNorm);
+                        didStep = true;
+                    }
+                }
             } else {
                 if (useAmp) {
                     scaler.update(false);
@@ -7493,23 +7536,35 @@ if (useAmp) {
                           << "\n";
                 break;
             }
+        } else {
+            skippedConsecutive = 0;
 
-            continue;
+            ++done;
+            ++steps;
+
+            if (needHostStats) {
+                lastLoss = lossScalar;
+                lastLossP = lossPScalar;
+                lastLossV = lossVScalar;
+            }
+
+            lastGradNorm = gradNormScalar;
+            updateLR();
         }
 
-        skippedConsecutive = 0;
+        // ---------------------------------------------------------
+        // Prefetch/build next batch on CPU while current GPU work is
+        // still draining asynchronously.
+        // ---------------------------------------------------------
+        if ((it + 1) >= maxStepsHard) break;
+        if (std::chrono::steady_clock::now() >= tEnd) break;
 
-        ++done;
-        ++steps;
+        if (!rb.sampleBatch(batchBuf[(size_t)next], B, rng)) break;
 
-        if (needHostStats) {
-            lastLoss = lossScalar;
-            lastLossP = lossPScalar;
-            lastLossV = lossVScalar;
-        }
+        fillStageFromBatch(hostStage[(size_t)next], batchBuf[(size_t)next], B);
+        copyStageToDevice(next);
 
-        lastGradNorm = gradNormScalar;
-        updateLR();
+        std::swap(cur, next);
     }
 
     if (useCuda) {
