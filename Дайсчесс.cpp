@@ -5731,7 +5731,7 @@ private:
 
         // drain tail after stop request
         for (;;) {
-            std::vector<PendingNN> tail;
+            std::vector<std::unique_ptr<PendingNN>> tail;
             {
                 std::lock_guard<std::mutex> lk(m);
                 if (q.empty()) break;
