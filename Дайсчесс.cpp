@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <iostream>
 #include <sstream>
+#include <iomanip>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -4606,13 +4607,20 @@ static void ensureRootExpanded(MCTSTable& T,
 #endif
 }
 
+struct SimDiag {
+    uint32_t ttHit = 0;
+    uint32_t ttMiss = 0;
+    uint32_t depth = 0;
+};
+
 static bool runOneSim(MCTSTable& T,
     const Position& rootPos,
     const std::array<uint64_t, 4>& path,
     const std::array<int, 64>& mask,
     PendingNN& outPending,
     bool& outNeedNN,
-    uint32_t rngJitter) {
+    uint32_t rngJitter,
+    SimDiag* diag = nullptr) {
 
     outNeedNN = false;
 
@@ -4641,6 +4649,11 @@ static bool runOneSim(MCTSTable& T,
         }
 
         uint8_t ex = node->expanded.load(std::memory_order_acquire);
+
+        if (diag) {
+            if (ex == 0) ++diag->ttMiss;
+            else         ++diag->ttHit;
+        }
 
         // Someone else expanding
         if (ex == 2) {
@@ -4678,6 +4691,7 @@ static bool runOneSim(MCTSTable& T,
 
                 backprop(node, 1.0f, tr);
                 publishReady(node, pos.key, 0, 0, 1, 0);
+                if (diag) diag->depth = (uint32_t)tr.n;
                 return true;
             }
 
@@ -4698,12 +4712,14 @@ static bool runOneSim(MCTSTable& T,
             outPending.ml = ml;
             outPending.trace = tr;
             fillPendingPolicyIdx(outPending);
+            if (diag) diag->depth = (uint32_t)tr.n;
             return true;
         }
 
         // Expanded
         if (node->terminal) {
             backprop(node, 1.0f, tr);
+            if (diag) diag->depth = (uint32_t)tr.n;
             return true;
         }
 
@@ -4717,6 +4733,7 @@ static bool runOneSim(MCTSTable& T,
             else {
                 float vLeaf = nodeQ(*node);
                 backprop(node, vLeaf, tr);
+                if (diag) diag->depth = (uint32_t)tr.n;
                 return true;
             }
         }
@@ -5913,6 +5930,14 @@ static AI_FORCEINLINE void refundSimBudget(std::atomic<int>& simsLeft) {
     simsLeft.fetch_add(1, std::memory_order_relaxed);
 }
 
+struct SearchPoolStatsSnapshot {
+    uint64_t simsOk = 0;
+    uint64_t simsFail = 0;
+    uint64_t ttHit = 0;
+    uint64_t ttMiss = 0;
+    uint64_t depthSum = 0;
+};
+
 struct SearchPool {
     std::vector<std::thread> pool;
     std::mutex m;
@@ -5934,6 +5959,11 @@ struct SearchPool {
     std::atomic<int> workersBusy{ 0 };
     std::atomic<int> simsLeft{ 0 };
 std::atomic<uint64_t> progressTick{ 0 };
+    std::atomic<uint64_t> statSimsOk{ 0 };
+    std::atomic<uint64_t> statSimsFail{ 0 };
+    std::atomic<uint64_t> statTTHit{ 0 };
+    std::atomic<uint64_t> statTTMiss{ 0 };
+    std::atomic<uint64_t> statDepthSum{ 0 };
 
 AI_FORCEINLINE void noteProgress() {
     const uint64_t t = progressTick.fetch_add(1, std::memory_order_relaxed) + 1ull;
@@ -5950,6 +5980,16 @@ AI_FORCEINLINE void noteProgress() {
     const std::array<int, 64>* mask = nullptr;
 
     unsigned threads = 1;
+
+SearchPoolStatsSnapshot snapshotStats() const {
+    SearchPoolStatsSnapshot s;
+    s.simsOk = statSimsOk.load(std::memory_order_relaxed);
+    s.simsFail = statSimsFail.load(std::memory_order_relaxed);
+    s.ttHit = statTTHit.load(std::memory_order_relaxed);
+    s.ttMiss = statTTMiss.load(std::memory_order_relaxed);
+    s.depthSum = statDepthSum.load(std::memory_order_relaxed);
+    return s;
+}
 
 void start(unsigned nThreads) {
     if (!pool.empty()) {
@@ -5979,6 +6019,11 @@ void start(unsigned nThreads) {
     workersBusy.store(0, std::memory_order_relaxed);
     simsLeft.store(0, std::memory_order_relaxed);
     progressTick.store(0, std::memory_order_relaxed);
+    statSimsOk.store(0, std::memory_order_relaxed);
+    statSimsFail.store(0, std::memory_order_relaxed);
+    statTTHit.store(0, std::memory_order_relaxed);
+    statTTMiss.store(0, std::memory_order_relaxed);
+    statDepthSum.store(0, std::memory_order_relaxed);
 
     {
         std::lock_guard<std::mutex> lk(fatalM);
@@ -6315,12 +6360,15 @@ PendingNN localPending;
 resetPendingNN(localPending);
 
 bool needNN = false;
+SimDiag sd{};
 
 bool ok = runOneSim(*TT, *rp, *pth, *msk,
                     localPending, needNN,
-                    jitterBase + (uint32_t)(k++) * 1337u);
+                    jitterBase + (uint32_t)(k++) * 1337u,
+                    &sd);
 
 if (!ok) {
+    statSimsFail.fetch_add(1, std::memory_order_relaxed);
     refundSimBudget(simsLeft);
 
     if (fatal.load(std::memory_order_relaxed)) break;
@@ -6330,6 +6378,11 @@ if (!ok) {
     cpuRelax();
     continue;
 }
+
+statSimsOk.fetch_add(1, std::memory_order_relaxed);
+statTTHit.fetch_add(sd.ttHit, std::memory_order_relaxed);
+statTTMiss.fetch_add(sd.ttMiss, std::memory_order_relaxed);
+statDepthSum.fetch_add(sd.depth, std::memory_order_relaxed);
 
 noteProgress();
 
@@ -7143,8 +7196,10 @@ double   warmupStartFactor = 0.10;         // 0.05..0.25 usually good
     // State
     uint64_t steps = 0;
     float lastLoss = 0.0f;
-    float lastLossP = 0.0f; // <--- ДОБАВИТЬ ЭТО
-    float lastLossV = 0.0f; // <--- ДОБАВИТЬ ЭТО
+    float lastLossP = 0.0f;
+    float lastLossV = 0.0f;
+    float lastEntropy = 0.0f;
+    float lastVMAE = 0.0f;
     float lastGradNorm = 0.0f;
 double computeBaseLRFromSteps(uint64_t s) const {
     double lr = initial_lr;
@@ -7163,16 +7218,25 @@ double computeRestartWarmupMultiplier(uint64_t s) const {
     return warmupStartFactor + (1.0 - warmupStartFactor) * t;
 }
     void updateLR(bool forceLog = false) {
+    const uint64_t prevStep = (steps > 0 ? steps - 1 : 0);
+
+    double prevBase = computeBaseLRFromSteps(prevStep);
     double base_lr = computeBaseLRFromSteps(steps);
     double warm_mult = computeRestartWarmupMultiplier(steps);
     double target_lr = base_lr * warm_mult;
 
-    if (forceLog || std::fabs(target_lr - current_lr) > 1e-15) {
-        current_lr = target_lr;
-        for (auto& group : opt->param_groups()) {
-            static_cast<torch::optim::AdamWOptions&>(group.options()).lr(current_lr);
-        }
+    for (auto& group : opt->param_groups()) {
+        static_cast<torch::optim::AdamWOptions&>(group.options()).lr(target_lr);
+    }
 
+    const bool baseChanged = std::fabs(base_lr - prevBase) > 1e-15;
+    const bool warmupJustFinished =
+        (warmupStepsAfterRestart > 0 &&
+         steps == resumeStartStep + warmupStepsAfterRestart);
+
+    current_lr = target_lr;
+
+    if (forceLog || baseChanged || warmupJustFinished) {
         std::cerr << "[Trainer] LR=" << current_lr
                   << " (base=" << base_lr
                   << ", warmup_x=" << warm_mult
@@ -7459,6 +7523,8 @@ int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
         float lossScalar = lastLoss;
         float lossPScalar = lastLossP;
         float lossVScalar = lastLossV;
+        float entropyScalar = lastEntropy;
+        float vMaeScalar = lastVMAE;
         float gradNormScalar = lastGradNorm;
         bool didStep = false;
 
@@ -7473,7 +7539,7 @@ int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
                 auto valLogits = out.second;  // [B,1]
 
                 // =========================================================
-                // POLICY LOSS over LEGAL MOVES ONLY (SAFE VERSION)
+                // POLICY LOSS over LEGAL MOVES ONLY
                 // =========================================================
                 auto polFlat = pol.flatten(1).to(torch::kFloat32); // [B, POLICY_SIZE]
 
@@ -7487,6 +7553,7 @@ int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
                 auto maskedLogits = gathered.masked_fill(torch::logical_not(validMask), kMaskedLogit);
 
                 auto logp_valid = torch::log_softmax(maskedLogits, 1); // [B, AI_MAX_MOVES], FP32
+                auto p_valid = torch::softmax(maskedLogits, 1);        // [B, AI_MAX_MOVES], FP32
 
                 auto tgtProb = probBatch.to(torch::kFloat32)
                     .masked_fill(torch::logical_not(validMask), 0.0f);
@@ -7498,25 +7565,32 @@ int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
 
                 auto lossP = (rowLossP * rowHasTarget).sum() / denomP;
 
+                // Entropy model policy on legal moves
+                auto rowEntropy = -(p_valid * logp_valid).sum(1); // [B]
+                auto entropy = (rowEntropy * rowHasTarget).sum() / denomP;
+
                 // =========================================================
                 // VALUE LOSS
                 // =========================================================
-                auto lossV = torch::binary_cross_entropy_with_logits(
-                    valLogits.to(torch::kFloat32),
-                    zBatch.to(torch::kFloat32)
-                );
+                auto zF = zBatch.to(torch::kFloat32);
+                auto valLogitsF = valLogits.to(torch::kFloat32);
+
+                auto lossV = torch::binary_cross_entropy_with_logits(valLogitsF, zF);
+
+                auto valProb = torch::sigmoid(valLogitsF);
+                auto vMAE = torch::mean(torch::abs(valProb - zF));
 
                 auto loss = lossP + lossV;
-                return std::make_tuple(loss, lossP, lossV);
+                return std::make_tuple(loss, lossP, lossV, entropy, vMAE);
             };
 
-            torch::Tensor loss, lossP, lossV;
+            torch::Tensor loss, lossP, lossV, entropyT, vMAET;
 
             if (useAmp) {
                 CudaAutocastGuard ampGuard(true, ampDtype);
-                std::tie(loss, lossP, lossV) = runForwardLoss();
+                std::tie(loss, lossP, lossV, entropyT, vMAET) = runForwardLoss();
             } else {
-                std::tie(loss, lossP, lossV) = runForwardLoss();
+                std::tie(loss, lossP, lossV, entropyT, vMAET) = runForwardLoss();
             }
 
             const bool finiteLoss = torch::isfinite(loss).all().item<bool>();
@@ -7539,6 +7613,8 @@ int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
                             lossScalar = loss.detach().item<float>();
                             lossPScalar = lossP.detach().item<float>();
                             lossVScalar = lossV.detach().item<float>();
+                            entropyScalar = entropyT.detach().item<float>();
+                            vMaeScalar = vMAET.detach().item<float>();
                         }
 
                         gradNormScalar = static_cast<float>(currentGradNorm);
@@ -7565,6 +7641,8 @@ int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
                             lossScalar = loss.detach().item<float>();
                             lossPScalar = lossP.detach().item<float>();
                             lossVScalar = lossV.detach().item<float>();
+                            entropyScalar = entropyT.detach().item<float>();
+                            vMaeScalar = vMAET.detach().item<float>();
                         }
 
                         gradNormScalar = static_cast<float>(currentGradNorm);
@@ -7612,6 +7690,8 @@ int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
                 lastLoss = lossScalar;
                 lastLossP = lossPScalar;
                 lastLossV = lossVScalar;
+                lastEntropy = entropyScalar;
+                lastVMAE = vMaeScalar;
             }
 
             lastGradNorm = gradNormScalar;
@@ -7948,6 +8028,26 @@ static bool restartSelfPlayContextAfterArena(SelfPlayContext& sp) {
 
 
 
+static std::string fmtCompactU64(uint64_t x) {
+    std::ostringstream oss;
+    if (x >= 1000000000ull) {
+        oss << std::fixed << std::setprecision(1) << (double)x / 1e9 << "b";
+    } else if (x >= 1000000ull) {
+        oss << std::fixed << std::setprecision(1) << (double)x / 1e6 << "m";
+    } else if (x >= 1000ull) {
+        oss << std::fixed << std::setprecision(0) << (double)x / 1e3 << "k";
+    } else {
+        oss << x;
+    }
+    return oss.str();
+}
+
+static std::string fmtFixed(double x, int prec) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(prec) << x;
+    return oss.str();
+}
+
 void Training(int targetGames) {
     const std::string ptFile = "net.pt";
     const std::string emaFile = "net_ema.pt";
@@ -8004,6 +8104,7 @@ void Training(int targetGames) {
     SelfPlayContext sp((1u << 20), (1u << 24), g_trt, g_trtMutex);
     sp.start();
     bool spRunning = true;
+    SearchPoolStatsSnapshot prevSearchStats = sp.pool.snapshotStats();
     bool stopTraining = false;
 
     // -------------------------------
@@ -8035,6 +8136,10 @@ void Training(int targetGames) {
     int games = 0;
     int trainBlocks = 0;
     int refits = 0;
+    uint64_t statGamesWindow = 0;
+    uint64_t statPlyWindow = 0;
+    uint64_t statTruncatedWindow = 0;
+    auto statWindowStart = std::chrono::steady_clock::now();
     int nextArenaAt = 10000;
 
     std::cout << "Начинаем тренировку на " << targetGames << " партий...\n";
@@ -8064,6 +8169,12 @@ void Training(int targetGames) {
 
             ++games;
             ++gamesThisBlock;
+
+            ++statGamesWindow;
+            statPlyWindow += (uint64_t)plyCount;
+
+            const bool truncated = (!terminated && plyCount >= maxPlies);
+            if (truncated) ++statTruncatedWindow;
 
             if (!trainSchedulerActive && rb.currentSize() >= MIN_REPLAY_TO_TRAIN) {
                 trainSchedulerActive = true;
@@ -8185,6 +8296,8 @@ void Training(int targetGames) {
                 break;
             }
             spRunning = true;
+            prevSearchStats = sp.pool.snapshotStats();
+            statWindowStart = std::chrono::steady_clock::now();
 
             // Даже если arena setup failed, не зацикливаемся на том же пороге.
             nextArenaAt += 10000;
@@ -8212,22 +8325,56 @@ void Training(int targetGames) {
 
         if (now >= nextStat) {
             nextStat += std::chrono::seconds(10);
-            std::cerr << "[stat] games=" << games << "/" << targetGames
-                << " replay=" << rb.currentSize()
-                << " trainSteps=" << trainer.steps
-                << " LR=" << trainer.current_lr
-                << " lastLoss=" << trainer.lastLoss
-                << " (P:" << trainer.lastLossP << " V:" << trainer.lastLossV << ")"
-                << " Grad=" << trainer.lastGradNorm
-                << " amp=" << (trainer.useAmp ? "fp16" : "off")
-                << " ampScale=" << trainer.lastAmpScale
-                << " ampSkipped=" << trainer.ampSkippedSteps
-                << " nnQueue=" << sp.server.size()
-                << " refits=" << refits
-                << " sched=" << (trainSchedulerActive ? "on" : "warmup")
-                << " credits=" << trainSampleCredits
-                << " pendingSteps=" << (int)(trainSampleCredits / (double)trainer.B)
+
+            auto curStats = sp.pool.snapshotStats();
+            auto dtSec = std::chrono::duration<double>(now - statWindowStart).count();
+            if (dtSec <= 0.0) dtSec = 1e-9;
+
+            const uint64_t dSimsOk   = curStats.simsOk   - prevSearchStats.simsOk;
+            const uint64_t dSimsFail = curStats.simsFail - prevSearchStats.simsFail;
+            const uint64_t dTTHit    = curStats.ttHit    - prevSearchStats.ttHit;
+            const uint64_t dTTMiss   = curStats.ttMiss   - prevSearchStats.ttMiss;
+            const uint64_t dDepth    = curStats.depthSum - prevSearchStats.depthSum;
+
+            const double nps = (double)dSimsOk / dtSec;
+            const double ttHitPct = (dTTHit + dTTMiss)
+                ? (100.0 * (double)dTTHit / (double)(dTTHit + dTTMiss))
+                : 0.0;
+            const double avgDepth = dSimsOk
+                ? ((double)dDepth / (double)dSimsOk)
+                : 0.0;
+
+            const double avgLen = statGamesWindow
+                ? ((double)statPlyWindow / (double)statGamesWindow)
+                : 0.0;
+            const double truncatedPct = statGamesWindow
+                ? (100.0 * (double)statTruncatedWindow / (double)statGamesWindow)
+                : 0.0;
+
+            std::cout
+                << "Games: " << games << "/" << targetGames
+                << " | Replay: " << fmtCompactU64((uint64_t)rb.currentSize())
+                << " | LR: " << fmtFixed(trainer.current_lr, 4)
+                << " | Loss: " << fmtFixed(trainer.lastLoss, 2)
+                << " (P: " << fmtFixed(trainer.lastLossP, 2)
+                << " V: " << fmtFixed(trainer.lastLossV, 2) << ")"
+                << " | Entropy: " << fmtFixed(trainer.lastEntropy, 2)
+                << " | vMAE: " << fmtFixed(trainer.lastVMAE, 2)
+                << " | Grad: " << fmtFixed(trainer.lastGradNorm, 1)
+                << " | AvgLen: " << fmtFixed(avgLen, 1)
+                << " | Truncated: " << fmtFixed(truncatedPct, 0) << "%"
+                << " | NPS: " << fmtFixed(nps, 0)
+                << " | Q_size: " << sp.server.size()
+                << " | TT_hit: " << fmtFixed(ttHitPct, 0) << "%"
+                << " | AvgDepth: " << fmtFixed(avgDepth, 0)
                 << "\n";
+
+            prevSearchStats = curStats;
+            statWindowStart = now;
+            statGamesWindow = 0;
+            statPlyWindow = 0;
+            statTruncatedWindow = 0;
+            (void)dSimsFail;
         }
     }
 
