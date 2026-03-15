@@ -7078,8 +7078,6 @@ static void runFixedSims(MCTSTable& T,
     RootNoiseGuard rootNoiseGuard(T, rootPos, rootNoise);
 
     pool.runSims(T, srv, rootPos, path, mask, sims);
-
-    srv.waitIdle();
 }
 // ------------------------------------------------------------
 // Self-play: переиспользуем один MCTSTable + один InferenceServerTrain + SearchPool
@@ -8022,7 +8020,8 @@ int trainBlockBudgetMs(ReplayBuffer& rb, Net& model, Net& emaModel,
     static constexpr int MAX_SKIPPED_CONSECUTIVE = 32;
     static constexpr int MAX_SKIPPED_TOTAL = 256;
 
-    static constexpr uint64_t HOST_STATS_EVERY = 16;
+// Trainer::trainBlockBudgetMs
+static constexpr uint64_t HOST_STATS_EVERY = 64;
 
     int cur = 0;
     int next = 1;
