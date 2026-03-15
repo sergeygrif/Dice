@@ -3841,6 +3841,7 @@ static std::unique_ptr<PendingNN> allocPendingNN() {
 static void freePendingNN(std::unique_ptr<PendingNN> p) {
     if (!p) return;
 
+    completePendingNNJob(*p);
     resetPendingNN(*p);
     g_pendingTLS.push_back(std::move(p));
     flushPendingTLSPartial();
@@ -3850,6 +3851,7 @@ template<class TVec>
 static void freePendingBatch(TVec& jobs) {
     for (auto& p : jobs) {
         if (!p) continue;
+        completePendingNNJob(*p);
         resetPendingNN(*p);
 
         g_pendingTLS.push_back(std::move(p));
@@ -3952,6 +3954,90 @@ static AI_FORCEINLINE void cancelPendingNN(PendingNN& p) {
     p.trace.reset();
     p.policyIdx.fill(INVALID_POLICY_IDX);
 }
+
+struct ExpansionClaimGuard {
+    TTNode* node = nullptr;
+    bool active = false;
+
+    ExpansionClaimGuard() = default;
+    explicit ExpansionClaimGuard(TTNode* n) noexcept
+        : node(n), active(n != nullptr) {}
+
+    void arm(TTNode* n) noexcept {
+        node = n;
+        active = (n != nullptr);
+    }
+
+    void release() noexcept {
+        active = false;
+    }
+
+    ~ExpansionClaimGuard() noexcept {
+        if (!active || !node) return;
+
+        if (node->expanded.load(std::memory_order_acquire) == 2) {
+            node->expanded.store(0, std::memory_order_release);
+        }
+    }
+
+    ExpansionClaimGuard(const ExpansionClaimGuard&) = delete;
+    ExpansionClaimGuard& operator=(const ExpansionClaimGuard&) = delete;
+};
+
+struct PendingNNGuard {
+    PendingNN* p = nullptr;
+    bool active = false;
+
+    PendingNNGuard() = default;
+    explicit PendingNNGuard(PendingNN& ref) noexcept
+        : p(&ref), active(true) {}
+
+    void reset(PendingNN& ref) noexcept {
+        p = &ref;
+        active = true;
+    }
+
+    void release() noexcept {
+        active = false;
+    }
+
+    ~PendingNNGuard() noexcept {
+        if (!active || !p) return;
+        cancelPendingNN(*p);
+        completePendingNNJob(*p);
+    }
+
+    PendingNNGuard(const PendingNNGuard&) = delete;
+    PendingNNGuard& operator=(const PendingNNGuard&) = delete;
+};
+
+struct PendingNNPtrGuard {
+    std::unique_ptr<PendingNN>* up = nullptr;
+    bool active = false;
+
+    PendingNNPtrGuard() = default;
+    explicit PendingNNPtrGuard(std::unique_ptr<PendingNN>& p) noexcept
+        : up(&p), active(true) {}
+
+    void reset(std::unique_ptr<PendingNN>& p) noexcept {
+        up = &p;
+        active = true;
+    }
+
+    void release() noexcept {
+        active = false;
+    }
+
+    ~PendingNNPtrGuard() noexcept {
+        if (!active || !up || !(*up)) return;
+        cancelPendingNN(**up);
+        completePendingNNJob(**up);
+        freePendingNN(std::move(*up));
+    }
+
+    PendingNNPtrGuard(const PendingNNPtrGuard&) = delete;
+    PendingNNPtrGuard& operator=(const PendingNNPtrGuard&) = delete;
+};
 
 static AI_FORCEINLINE void abortPendingNNInferFailure(
     PendingNN& p,
@@ -4657,6 +4743,7 @@ static void ensureRootExpanded(MCTSTable& T,
         std::memory_order_relaxed)) {
         return;
     }
+    ExpansionClaimGuard rootClaim(root);
 
     if (term) {
         root->key = rootPos.key;
@@ -4668,21 +4755,27 @@ static void ensureRootExpanded(MCTSTable& T,
         Trace empty; empty.reset();
         backprop(root, 1.0f, empty);
         publishReady(root, rootPos.key, 0, 0, 1, 0);
+        rootClaim.release();
         return;
     }
 
     if (ml.n == 0) {
         publishReady(root, rootPos.key, 0, 0, 0, 1);
+        rootClaim.release();
         return;
     }
 
     PendingNN p;
+    resetPendingNN(p);
+    PendingNNGuard pGuard(p);
+
     p.leaf = root;
     p.pos = rootPos;
     p.ml = ml;
     p.trace.reset();
     fillPendingPolicyIdx(p);
 
+    rootClaim.release(); // cleanup of expansion now owned by pGuard / p
     float v = 0.5f;
 
 #if AI_HAVE_CUDA_KERNELS
@@ -4690,11 +4783,13 @@ static void ensureRootExpanded(MCTSTable& T,
         v = 0.5f;
         std::vector<float> z((size_t)AI_MAX_MOVES, 0.0f);
         expandLeafWithGatheredLogits(T, p, v, z.data());
+        pGuard.release();
         return;
     }
     v = g_trt.valueHost(0);
     const float* logits = g_trt.gatherLogitsHostPtr(0);
     expandLeafWithGatheredLogits(T, p, v, logits);
+    pGuard.release();
 #else
     std::vector<float> pol((size_t)POLICY_SIZE, 0.0f);
     if (!g_trt.inferBatch(&p.pos, 1, &v, pol.data())) {
@@ -4702,6 +4797,7 @@ static void ensureRootExpanded(MCTSTable& T,
         std::fill(pol.begin(), pol.end(), 0.0f);
     }
     expandLeafWithOutputs(T, p, v, pol.data());
+    pGuard.release();
 #endif
 }
 
@@ -4770,6 +4866,7 @@ static bool runOneSim(MCTSTable& T,
                 std::memory_order_relaxed)) {
                 continue;
             }
+            ExpansionClaimGuard claim(node);
 
             MoveList ml;
             int term = 0;
@@ -4789,6 +4886,7 @@ static bool runOneSim(MCTSTable& T,
 
                 backprop(node, 1.0f, tr);
                 publishReady(node, pos.key, 0, 0, 1, 0);
+                claim.release();
                 if (diag) diag->depth = (uint32_t)tr.n;
                 return true;
             }
@@ -4796,6 +4894,7 @@ static bool runOneSim(MCTSTable& T,
             if (ml.n == 0) {
                 // Chance node
                 publishReady(node, pos.key, 0, 0, 0, 1);
+                claim.release();
 
                 tr.push(node, nullptr, /*flip=*/true, /*vloss=*/false);
                 makeRandom(pos,node);
@@ -4810,6 +4909,8 @@ static bool runOneSim(MCTSTable& T,
             outPending.ml = ml;
             outPending.trace = tr;
             fillPendingPolicyIdx(outPending);
+
+            claim.release(); // ownership of expansion cleanup transferred to PendingNN
             if (diag) diag->depth = (uint32_t)tr.n;
             return true;
         }
@@ -5757,11 +5858,10 @@ struct ITrainInferenceServer {
     virtual void join() = 0;
 };
 
-struct InferenceServerTrain : ITrainInferenceServer {
-    static constexpr int NN_QUEUE_CAP = 8 * TRT_MAX_BATCH;
-
-    MCTSTable& T;
+struct UnifiedInferenceServerTrain : ITrainInferenceServer {
     BackendBinding backend;
+    MCTSTable* defaultOwner = nullptr;   // nullptr => ownerT must be set per job
+    int queueCap = 0;
 
     std::atomic<bool> stop{ false };
     std::atomic<int>  qSize{ 0 };
@@ -5776,8 +5876,10 @@ struct InferenceServerTrain : ITrainInferenceServer {
 
     bool busyFlag = false;
 
-    explicit InferenceServerTrain(MCTSTable& tab, BackendBinding be)
-        : T(tab), backend(be) {}
+    explicit UnifiedInferenceServerTrain(BackendBinding be,
+                                         MCTSTable* fallbackOwner,
+                                         int qCap)
+        : backend(be), defaultOwner(fallbackOwner), queueCap(qCap) {}
 
     void start() {
         {
@@ -5819,7 +5921,7 @@ struct InferenceServerTrain : ITrainInferenceServer {
 
         std::unique_lock<std::mutex> lk(m);
 
-        while ((int)q.size() >= NN_QUEUE_CAP && !cancelled()) {
+        while ((int)q.size() >= queueCap && !cancelled()) {
             cvNotFull.wait_for(lk, std::chrono::microseconds(AI_SUBMIT_WAIT_US));
         }
 
@@ -5863,6 +5965,10 @@ struct InferenceServerTrain : ITrainInferenceServer {
     }
 
 private:
+    AI_FORCEINLINE MCTSTable* resolveOwner(PendingNN& job) const noexcept {
+        return job.ownerT ? job.ownerT : defaultOwner;
+    }
+
     bool popBatchUnlocked(std::vector<std::unique_ptr<PendingNN>>& batch, int wantB) {
         batch.clear();
         batch.reserve((size_t)wantB);
@@ -5876,6 +5982,111 @@ private:
 
         qSize.store((int)q.size(), std::memory_order_relaxed);
         return n != 0;
+    }
+
+    void processBatch(std::vector<std::unique_ptr<PendingNN>>& jobs,
+                      std::vector<const PendingNN*>& batchPtrs,
+                      std::vector<float>& values
+#if AI_HAVE_CUDA_KERNELS
+                      , std::vector<float>& logits
+#else
+                      , std::vector<float>& policy
+                      , std::vector<Position>& posBatch
+#endif
+    ) {
+        const int B = (int)jobs.size();
+        if (B <= 0) return;
+
+        batchPtrs.resize((size_t)B);
+        for (int i = 0; i < B; ++i) batchPtrs[(size_t)i] = jobs[(size_t)i].get();
+
+#if AI_HAVE_CUDA_KERNELS
+        bool ok = false;
+        {
+            InferInFlightGuard ig;
+            std::lock_guard<std::mutex> lk(backend.mtx);
+
+            ok = backend.trt.inferBatchGather(batchPtrs.data(), B);
+            if (ok) {
+                backend.trt.copyValuesTo(values.data(), B);
+                backend.trt.copyGatherLogitsTo(logits.data(), B);
+            }
+        }
+
+        if (!ok) {
+            std::cerr << "[UnifiedInferenceServerTrain] inferBatchGather failed, abort batch B=" << B << "\n";
+            for (int i = 0; i < B; ++i) {
+                PendingNN& job = *jobs[(size_t)i];
+                MCTSTable* owner = resolveOwner(job);
+                if (owner) owner->abort.store(true, std::memory_order_release);
+                cancelPendingNN(job);
+                completePendingNNJob(job);
+            }
+            return;
+        }
+
+        for (int i = 0; i < B; ++i) {
+            PendingNN& job = *jobs[(size_t)i];
+            MCTSTable* owner = resolveOwner(job);
+
+            if (!owner || owner->abort.load(std::memory_order_relaxed)) {
+                cancelPendingNN(job);
+                completePendingNNJob(job);
+                continue;
+            }
+
+            float v = values[(size_t)i];
+            const float* lg = logits.data() + (size_t)i * (size_t)AI_MAX_MOVES;
+
+            expandLeafWithGatheredLogits(*owner, job, v, lg);
+            completePendingNNJob(job);
+        }
+#else
+        posBatch.clear();
+        posBatch.resize((size_t)B);
+        for (int i = 0; i < B; ++i) posBatch[(size_t)i] = jobs[(size_t)i]->pos;
+
+        bool ok = false;
+        {
+            InferInFlightGuard ig;
+            std::lock_guard<std::mutex> lk(backend.mtx);
+
+            ok = backend.trt.inferBatch(posBatch.data(), B);
+            if (ok) {
+                backend.trt.copyValuesTo(values.data(), B);
+                backend.trt.copyPolicyTo(policy.data(), B);
+            }
+        }
+
+        if (!ok) {
+            std::cerr << "[UnifiedInferenceServerTrain] inferBatch failed, abort batch B=" << B << "\n";
+            for (int i = 0; i < B; ++i) {
+                PendingNN& job = *jobs[(size_t)i];
+                MCTSTable* owner = resolveOwner(job);
+                if (owner) owner->abort.store(true, std::memory_order_release);
+                cancelPendingNN(job);
+                completePendingNNJob(job);
+            }
+            return;
+        }
+
+        for (int i = 0; i < B; ++i) {
+            PendingNN& job = *jobs[(size_t)i];
+            MCTSTable* owner = resolveOwner(job);
+
+            if (!owner || owner->abort.load(std::memory_order_relaxed)) {
+                cancelPendingNN(job);
+                completePendingNNJob(job);
+                continue;
+            }
+
+            float v = values[(size_t)i];
+            const float* pol = policy.data() + (size_t)i * (size_t)POLICY_SIZE;
+
+            expandLeafWithOutputs(*owner, job, v, pol);
+            completePendingNNJob(job);
+        }
+#endif
     }
 
     void run() {
@@ -5894,96 +6105,6 @@ private:
         std::vector<Position> posBatch;
         posBatch.reserve((size_t)TRT_MAX_BATCH);
 #endif
-
-        auto processBatch = [&](std::vector<std::unique_ptr<PendingNN>>& jobs) {
-            const int B = (int)jobs.size();
-            if (B <= 0) return;
-
-            batchPtrs.resize((size_t)B);
-            for (int i = 0; i < B; ++i) batchPtrs[(size_t)i] = jobs[(size_t)i].get();
-
-#if AI_HAVE_CUDA_KERNELS
-            bool ok = false;
-            {
-                InferInFlightGuard ig;
-                std::lock_guard<std::mutex> lk(backend.mtx);
-
-                ok = backend.trt.inferBatchGather(batchPtrs.data(), B);
-                if (ok) {
-                    backend.trt.copyValuesTo(values.data(), B);
-                    backend.trt.copyGatherLogitsTo(logits.data(), B);
-                }
-            }
-
-            if (!ok) {
-                std::cerr << "[InferenceServerTrain] inferBatchGather failed, abort batch B=" << B << "\n";
-                for (int i = 0; i < B; ++i) {
-                    PendingNN& job = *jobs[(size_t)i];
-                    abortPendingNNInferFailure(job, &T, "InferenceServerTrain");
-                }
-                return;
-            }
-
-            for (int i = 0; i < B; ++i) {
-                PendingNN& job = *jobs[(size_t)i];
-                MCTSTable* TOwner = job.ownerT ? job.ownerT : &T;
-
-                if (!TOwner || TOwner->abort.load(std::memory_order_relaxed)) {
-                    cancelPendingNN(job);
-                    completePendingNNJob(job);
-                    continue;
-                }
-
-                float v = values[(size_t)i];
-                const float* lg = logits.data() + (size_t)i * (size_t)AI_MAX_MOVES;
-
-                expandLeafWithGatheredLogits(*TOwner, job, v, lg);
-                completePendingNNJob(job);
-            }
-#else
-            posBatch.clear();
-            posBatch.resize((size_t)B);
-            for (int i = 0; i < B; ++i) posBatch[(size_t)i] = jobs[(size_t)i]->pos;
-
-            bool ok = false;
-            {
-                InferInFlightGuard ig;
-                std::lock_guard<std::mutex> lk(backend.mtx);
-
-                ok = backend.trt.inferBatch(posBatch.data(), B);
-                if (ok) {
-                    backend.trt.copyValuesTo(values.data(), B);
-                    backend.trt.copyPolicyTo(policy.data(), B);
-                }
-            }
-
-            if (!ok) {
-                std::cerr << "[InferenceServerTrain] inferBatch failed, abort batch B=" << B << "\n";
-                for (int i = 0; i < B; ++i) {
-                    PendingNN& job = *jobs[(size_t)i];
-                    abortPendingNNInferFailure(job, &T, "InferenceServerTrain");
-                }
-                return;
-            }
-
-            for (int i = 0; i < B; ++i) {
-                PendingNN& job = *jobs[(size_t)i];
-                MCTSTable* TOwner = job.ownerT ? job.ownerT : &T;
-
-                if (!TOwner || TOwner->abort.load(std::memory_order_relaxed)) {
-                    cancelPendingNN(job);
-                    completePendingNNJob(job);
-                    continue;
-                }
-
-                float v = values[(size_t)i];
-                const float* pol = policy.data() + (size_t)i * (size_t)POLICY_SIZE;
-
-                expandLeafWithOutputs(*TOwner, job, v, pol);
-                completePendingNNJob(job);
-            }
-#endif
-        };
 
         for (;;) {
             {
@@ -6029,7 +6150,11 @@ private:
                 for (auto& j : add) batch.emplace_back(std::move(j));
             }
 
-            processBatch(batch);
+#if AI_HAVE_CUDA_KERNELS
+            processBatch(batch, batchPtrs, values, logits);
+#else
+            processBatch(batch, batchPtrs, values, policy, posBatch);
+#endif
             freePendingBatch(batch);
         }
 
@@ -6043,7 +6168,12 @@ private:
             }
 
             cvNotFull.notify_all();
-            processBatch(tail);
+
+#if AI_HAVE_CUDA_KERNELS
+            processBatch(tail, batchPtrs, values, logits);
+#else
+            processBatch(tail, batchPtrs, values, policy, posBatch);
+#endif
             freePendingBatch(tail);
         }
 
@@ -6058,304 +6188,14 @@ private:
     }
 };
 
-struct SharedInferenceServerTrain : ITrainInferenceServer {
-    static constexpr int NN_QUEUE_CAP = 16 * TRT_MAX_BATCH;
+struct InferenceServerTrain final : UnifiedInferenceServerTrain {
+    explicit InferenceServerTrain(MCTSTable& tab, BackendBinding be)
+        : UnifiedInferenceServerTrain(be, &tab, 8 * TRT_MAX_BATCH) {}
+};
 
-    BackendBinding backend;
-
-    std::atomic<bool> stop{ false };
-    std::atomic<int>  qSize{ 0 };
-
-    std::mutex m;
-    std::condition_variable cvNotEmpty;
-    std::condition_variable cvNotFull;
-    std::condition_variable cvIdle;
-
-    std::deque<std::unique_ptr<PendingNN>> q;
-    std::thread th;
-
-    bool busyFlag = false;
-
+struct SharedInferenceServerTrain final : UnifiedInferenceServerTrain {
     explicit SharedInferenceServerTrain(BackendBinding be)
-        : backend(be) {}
-
-    void start() {
-        {
-            std::lock_guard<std::mutex> lk(m);
-            stop.store(false, std::memory_order_relaxed);
-            busyFlag = false;
-            q.clear();
-            qSize.store(0, std::memory_order_relaxed);
-        }
-        th = std::thread([this] { this->run(); });
-    }
-
-    void requestStop() override {
-        {
-            std::lock_guard<std::mutex> lk(m);
-            stop.store(true, std::memory_order_relaxed);
-        }
-        cvNotEmpty.notify_all();
-        cvNotFull.notify_all();
-        cvIdle.notify_all();
-    }
-
-    void join() override {
-        if (th.joinable()) th.join();
-    }
-
-    int size() const override {
-        return qSize.load(std::memory_order_relaxed);
-    }
-
-    bool submit(std::unique_ptr<PendingNN>&& job,
-                const std::atomic<bool>* extCancel = nullptr,
-                const std::atomic<bool>* extAbort  = nullptr) override {
-        auto cancelled = [&]() -> bool {
-            return stop.load(std::memory_order_relaxed) ||
-                   (extCancel && extCancel->load(std::memory_order_relaxed)) ||
-                   (extAbort && extAbort->load(std::memory_order_relaxed));
-        };
-
-        std::unique_lock<std::mutex> lk(m);
-
-        while ((int)q.size() >= NN_QUEUE_CAP && !cancelled()) {
-            cvNotFull.wait_for(lk, std::chrono::microseconds(AI_SUBMIT_WAIT_US));
-        }
-
-        if (cancelled()) return false;
-
-        q.emplace_back(std::move(job));
-        qSize.store((int)q.size(), std::memory_order_relaxed);
-
-        lk.unlock();
-        cvNotEmpty.notify_one();
-        return true;
-    }
-
-    void waitIdle() override {
-        std::unique_lock<std::mutex> lk(m);
-        cvIdle.wait(lk, [&] {
-            return q.empty() && !busyFlag;
-        });
-    }
-
-    void clearQueueUnsafeWhenIdle() {
-        std::deque<std::unique_ptr<PendingNN>> dropped;
-
-        {
-            std::unique_lock<std::mutex> lk(m);
-            cvIdle.wait(lk, [&] { return !busyFlag; });
-
-            dropped.swap(q);
-            qSize.store((int)q.size(), std::memory_order_relaxed);
-        }
-
-        for (auto& p : dropped) {
-            if (!p) continue;
-            cancelPendingNN(*p);
-            completePendingNNJob(*p);
-            freePendingNN(std::move(p));
-        }
-
-        cvNotFull.notify_all();
-        cvIdle.notify_all();
-    }
-
-private:
-    bool popBatchUnlocked(std::vector<std::unique_ptr<PendingNN>>& batch, int wantB) {
-        batch.clear();
-        batch.reserve((size_t)wantB);
-
-        int n = 0;
-        while (n < wantB && !q.empty()) {
-            batch.emplace_back(std::move(q.front()));
-            q.pop_front();
-            ++n;
-        }
-
-        qSize.store((int)q.size(), std::memory_order_relaxed);
-        return n != 0;
-    }
-
-    void run() {
-        std::vector<std::unique_ptr<PendingNN>> batch;
-        std::vector<std::unique_ptr<PendingNN>> add;
-        std::vector<const PendingNN*> batchPtrs;
-        batch.reserve((size_t)TRT_MAX_BATCH);
-        add.reserve((size_t)TRT_MAX_BATCH);
-
-        std::vector<float> values((size_t)TRT_MAX_BATCH, 0.5f);
-
-#if AI_HAVE_CUDA_KERNELS
-        std::vector<float> logits((size_t)TRT_MAX_BATCH * (size_t)AI_MAX_MOVES, 0.0f);
-#else
-        std::vector<float> policy((size_t)TRT_MAX_BATCH * (size_t)POLICY_SIZE, 0.0f);
-        std::vector<Position> posBatch;
-        posBatch.reserve((size_t)TRT_MAX_BATCH);
-#endif
-
-        auto processBatch = [&](std::vector<std::unique_ptr<PendingNN>>& jobs) {
-            const int B = (int)jobs.size();
-            if (B <= 0) return;
-
-            batchPtrs.resize((size_t)B);
-            for (int i = 0; i < B; ++i) batchPtrs[(size_t)i] = jobs[(size_t)i].get();
-
-#if AI_HAVE_CUDA_KERNELS
-            bool ok = false;
-            {
-                InferInFlightGuard ig;
-                std::lock_guard<std::mutex> lk(backend.mtx);
-
-                ok = backend.trt.inferBatchGather(batchPtrs.data(), B);
-                if (ok) {
-                    backend.trt.copyValuesTo(values.data(), B);
-                    backend.trt.copyGatherLogitsTo(logits.data(), B);
-                }
-            }
-
-            if (!ok) {
-                std::cerr << "[SharedInferenceServerTrain] inferBatchGather failed, abort batch B=" << B << "\n";
-                for (int i = 0; i < B; ++i) {
-                    PendingNN& job = *jobs[(size_t)i];
-                    abortPendingNNInferFailure(job, nullptr, "SharedInferenceServerTrain");
-                }
-                return;
-            }
-
-            for (int i = 0; i < B; ++i) {
-                PendingNN& job = *jobs[(size_t)i];
-                MCTSTable* T = job.ownerT;
-
-                if (!T || T->abort.load(std::memory_order_relaxed)) {
-                    cancelPendingNN(job);
-                    completePendingNNJob(job);
-                    continue;
-                }
-
-                float v = values[(size_t)i];
-                const float* lg = logits.data() + (size_t)i * (size_t)AI_MAX_MOVES;
-
-                expandLeafWithGatheredLogits(*T, job, v, lg);
-                completePendingNNJob(job);
-            }
-#else
-            posBatch.clear();
-            posBatch.resize((size_t)B);
-            for (int i = 0; i < B; ++i) posBatch[(size_t)i] = jobs[(size_t)i]->pos;
-
-            bool ok = false;
-            {
-                InferInFlightGuard ig;
-                std::lock_guard<std::mutex> lk(backend.mtx);
-
-                ok = backend.trt.inferBatch(posBatch.data(), B);
-                if (ok) {
-                    backend.trt.copyValuesTo(values.data(), B);
-                    backend.trt.copyPolicyTo(policy.data(), B);
-                }
-            }
-
-            if (!ok) {
-                std::cerr << "[SharedInferenceServerTrain] inferBatch failed, abort batch B=" << B << "\n";
-                for (int i = 0; i < B; ++i) {
-                    PendingNN& job = *jobs[(size_t)i];
-                    abortPendingNNInferFailure(job, nullptr, "SharedInferenceServerTrain");
-                }
-                return;
-            }
-
-            for (int i = 0; i < B; ++i) {
-                PendingNN& job = *jobs[(size_t)i];
-                MCTSTable* T = job.ownerT;
-
-                if (!T || T->abort.load(std::memory_order_relaxed)) {
-                    cancelPendingNN(job);
-                    completePendingNNJob(job);
-                    continue;
-                }
-
-                float v = values[(size_t)i];
-                const float* pol = policy.data() + (size_t)i * (size_t)POLICY_SIZE;
-
-                expandLeafWithOutputs(*T, job, v, pol);
-                completePendingNNJob(job);
-            }
-#endif
-        };
-
-        for (;;) {
-            {
-                std::unique_lock<std::mutex> lk(m);
-
-                busyFlag = false;
-                if (q.empty()) cvIdle.notify_all();
-
-                cvNotEmpty.wait(lk, [&] {
-                    return stop.load(std::memory_order_relaxed) || !q.empty();
-                });
-
-                if (stop.load(std::memory_order_relaxed) && q.empty()) break;
-
-                busyFlag = true;
-                (void)popBatchUnlocked(batch, TRT_MAX_BATCH);
-            }
-
-            cvNotFull.notify_all();
-
-            const auto tFillEnd =
-                std::chrono::steady_clock::now() + std::chrono::microseconds(200);
-
-            while ((int)batch.size() < TRT_MAX_BATCH &&
-                   std::chrono::steady_clock::now() < tFillEnd) {
-                std::unique_lock<std::mutex> lk(m);
-
-                if (q.empty()) {
-                    cvNotEmpty.wait_until(lk, tFillEnd, [&] {
-                        return stop.load(std::memory_order_relaxed) || !q.empty();
-                    });
-                }
-
-                if (q.empty()) break;
-
-                add.clear();
-                const int need = TRT_MAX_BATCH - (int)batch.size();
-                (void)popBatchUnlocked(add, need);
-                lk.unlock();
-
-                cvNotFull.notify_all();
-
-                for (auto& j : add) batch.emplace_back(std::move(j));
-            }
-
-            processBatch(batch);
-            freePendingBatch(batch);
-        }
-
-        for (;;) {
-            std::vector<std::unique_ptr<PendingNN>> tail;
-            {
-                std::lock_guard<std::mutex> lk(m);
-                if (q.empty()) break;
-                busyFlag = true;
-                (void)popBatchUnlocked(tail, TRT_MAX_BATCH);
-            }
-
-            cvNotFull.notify_all();
-            processBatch(tail);
-            freePendingBatch(tail);
-        }
-
-        {
-            std::lock_guard<std::mutex> lk(m);
-            busyFlag = false;
-            qSize.store((int)q.size(), std::memory_order_relaxed);
-            if (q.empty()) cvIdle.notify_all();
-        }
-
-        cvNotFull.notify_all();
-    }
+        : UnifiedInferenceServerTrain(be, nullptr, 16 * TRT_MAX_BATCH) {}
 };
 // ------------------------------------------------------------
 // SearchPool: постоянные MCTS-воркеры (НЕ пересоздаём потоки на каждый search)
@@ -6820,6 +6660,7 @@ void workerMain(unsigned tid) {
 
 PendingNN localPending;
 resetPendingNN(localPending);
+PendingNNGuard localGuard(localPending);
 
 bool needNN = false;
 SimDiag sd{};
@@ -6854,41 +6695,38 @@ if (needNN && server) {
     if (fatal.load(std::memory_order_relaxed) ||
         cancelJob.load(std::memory_order_relaxed) ||
         TT->abort.load(std::memory_order_relaxed)) {
-        cancelPendingNN(localPending);
-        break;
+        break; // localGuard will cleanup
     }
 
     auto p = allocPendingNN();
+    PendingNNPtrGuard heapGuard(p);
+
     *p = localPending;
+    localGuard.release();   // ownership moved from localPending to *p
+
     p->ownerT = TT;
     p->waitGroup = wg;
 
     waitGroupAdd(wg);
 
     if (!server->submit(std::move(p), &cancelJob, &TT->abort)) {
-        if (p) {
-            if (p->waitGroup) {
-                waitGroupDone(p->waitGroup);
-                p->waitGroup = nullptr;
-            }
-            cancelPendingNN(*p);
-            freePendingNN(std::move(p));
-        }
-
         if (!fatal.load(std::memory_order_relaxed) &&
             !cancelJob.load(std::memory_order_relaxed) &&
             !TT->abort.load(std::memory_order_relaxed)) {
             refundSimBudget(simsLeft);
         }
-        break;
+        break; // heapGuard will cleanup + free
     }
 
+    heapGuard.release();
     noteProgress();
 }
 else if (needNN && !server) {
-    cancelPendingNN(localPending);
     refundSimBudget(simsLeft);
-    break;
+    break; // localGuard will cleanup
+}
+else {
+    localGuard.release(); // no pending NN ownership survived this iteration
 }
             }
 
@@ -6970,6 +6808,8 @@ static bool ensureExpandedTrain(MCTSTable& T,
         // кто-то успел изменить expanded — пробуем снова
     }
 
+    ExpansionClaimGuard rootClaim(root);
+
     MoveList ml;
     int term = 0;
     Position tmp = rootPos;
@@ -6986,21 +6826,27 @@ static bool ensureExpandedTrain(MCTSTable& T,
         Trace empty; empty.reset();
         backprop(root, 1.0f, empty);
         publishReady(root, rootPos.key, 0, 0, 1, 0);
+        rootClaim.release();
         return true;
     }
 
     if (ml.n == 0) {
         publishReady(root, rootPos.key, 0, 0, 0, 1);
+        rootClaim.release();
         return true;
     }
 
     PendingNN p;
+    resetPendingNN(p);
+    PendingNNGuard pGuard(p);
+
     p.leaf = root;
     p.pos = rootPos;
     p.ml = ml;
     p.trace.reset();
     fillPendingPolicyIdx(p);
 
+    rootClaim.release();
     float v = 0.5f;
 
 #if AI_HAVE_CUDA_KERNELS
@@ -7022,11 +6868,11 @@ static bool ensureExpandedTrain(MCTSTable& T,
         std::cerr << "[ensureExpandedTrain] inferBatchGather failed for root key="
                   << rootPos.key << "\n";
         T.abort.store(true, std::memory_order_release);
-        cancelPendingNN(p); // releases expanded==2 back to 0
-        return false;
+        return false; // pGuard will cleanup
     }
 
     expandLeafWithGatheredLogits(T, p, v, logitsLocal.data());
+    pGuard.release();
 #else
     std::vector<float> pol((size_t)POLICY_SIZE, 0.0f);
     bool ok = false;
@@ -7041,11 +6887,11 @@ static bool ensureExpandedTrain(MCTSTable& T,
         std::cerr << "[ensureExpandedTrain] inferBatch failed for root key="
                   << rootPos.key << "\n";
         T.abort.store(true, std::memory_order_release);
-        cancelPendingNN(p); // releases expanded==2 back to 0
-        return false;
+        return false; // pGuard will cleanup
     }
 
     expandLeafWithOutputs(T, p, v, pol.data());
+    pGuard.release();
 #endif
 
     return root->expanded.load(std::memory_order_acquire) == 1;
