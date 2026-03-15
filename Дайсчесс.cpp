@@ -2151,6 +2151,16 @@ static AI_FORCEINLINE float clamp01(float v) {
     return v;
 }
 
+static AI_FORCEINLINE uint16_t quantizeProbU16(float p) {
+    if (!(p > 0.0f)) return 0u;
+    if (p >= 1.0f) return 65535u;
+    return (uint16_t)lrintf(p * 65535.0f);
+}
+
+static AI_FORCEINLINE float dequantizeProbU16(uint16_t q) {
+    return (float)q * (1.0f / 65535.0f);
+}
+
 
 
 static void cudaCheck(cudaError_t e, const char* expr, const char* file, int line) {
@@ -5129,10 +5139,44 @@ struct TrainSample {
     // idx = CHW index in [0..POLICY_SIZE-1], i.e. pl*64 + sq
     uint16_t nPi = 0;
     std::array<uint16_t, AI_MAX_MOVES> piIdx{};
-    std::array<float, AI_MAX_MOVES> piProb{};
+    std::array<uint16_t, AI_MAX_MOVES> piProbQ{}; // quantized probs in [0..65535]
     float q = 0.5f;
     float z = 0.5f; // [0..1] from side-to-move perspective
 };
+
+static AI_FORCEINLINE void decodeTrainSamplePolicyRow(
+    const TrainSample& s,
+    int64_t* idxRow,
+    float* probRow) {
+    const int n = std::min<int>((int)s.nPi, AI_MAX_MOVES);
+
+    for (int j = 0; j < AI_MAX_MOVES; ++j) {
+        idxRow[(size_t)j] = (int64_t)s.piIdx[(size_t)j];
+        probRow[(size_t)j] = 0.0f;
+    }
+
+    double sum = 0.0;
+    for (int j = 0; j < n; ++j) {
+        float p = dequantizeProbU16(s.piProbQ[(size_t)j]);
+        if (!(p >= 0.0f) || !std::isfinite(p)) p = 0.0f;
+        probRow[(size_t)j] = p;
+        sum += (double)p;
+    }
+
+    if (n <= 0) return;
+
+    if (sum > 0.0) {
+        const float inv = (float)(1.0 / sum);
+        for (int j = 0; j < n; ++j) {
+            probRow[(size_t)j] *= inv;
+        }
+    } else {
+        const float inv = 1.0f / (float)n;
+        for (int j = 0; j < n; ++j) {
+            probRow[(size_t)j] = inv;
+        }
+    }
+}
 
 struct ReplayBuffer {
     std::vector<TrainSample> buf;
@@ -6512,33 +6556,39 @@ static void buildSparsePolicyTargetCHW(const Position& pos,
     const std::vector<moveState>& mv,
     uint16_t& outN,
     std::array<uint16_t, AI_MAX_MOVES>& outIdx,
-    std::array<float, AI_MAX_MOVES>& outProb) {
+    std::array<uint16_t, AI_MAX_MOVES>& outProbQ) {
     outN = 0;
     outIdx.fill(0);
-    outProb.fill(0.0f);
+    outProbQ.fill(0);
 
     if (mv.empty()) return;
 
     const int n = std::min((int)mv.size(), AI_MAX_MOVES);
 
     double sum = 0.0;
-    for (int i = 0; i < n; ++i) sum += (double)std::max(0, mv[(size_t)i].visits);
+    for (int i = 0; i < n; ++i) {
+        sum += (double)std::max(0, mv[(size_t)i].visits);
+    }
+
+    outN = (uint16_t)n;
 
     if (!(sum > 0.0)) {
-        float inv = 1.0f / (float)n;
-        outN = (uint16_t)n;
+        const float inv = 1.0f / (float)n;
         for (int i = 0; i < n; ++i) {
             int k = policyIndexCHWCanonical(mv[(size_t)i].move, pos);
-            outIdx[(size_t)i] = (uint16_t)k;            outProb[(size_t)i] = inv;
+            outIdx[(size_t)i] = (uint16_t)k;
+            outProbQ[(size_t)i] = quantizeProbU16(inv);
         }
         return;
     }
 
-    float inv = (float)(1.0 / sum);
-    outN = (uint16_t)n;
+    const float inv = (float)(1.0 / sum);
     for (int i = 0; i < n; ++i) {
         int k = policyIndexCHWCanonical(mv[(size_t)i].move, pos);
-        outIdx[(size_t)i] = (uint16_t)k;        outProb[(size_t)i] = (float)std::max(0, mv[(size_t)i].visits) * inv;
+        float p = (float)std::max(0, mv[(size_t)i].visits) * inv;
+
+        outIdx[(size_t)i] = (uint16_t)k;
+        outProbQ[(size_t)i] = quantizeProbU16(p);
     }
 }
 
@@ -6801,7 +6851,7 @@ static void selfPlayOneGame960(SelfPlayContext& sp,
         if (moves.empty()) break;
 
         sample.pos = pos;
-        buildSparsePolicyTargetCHW(pos, moves, sample.nPi, sample.piIdx, sample.piProb);
+        buildSparsePolicyTargetCHW(pos, moves, sample.nPi, sample.piIdx, sample.piProbQ);
 
         game.push_back(sample);
         sideAtSample.push_back(pos.side);
@@ -7144,10 +7194,11 @@ static AI_FORCEINLINE void fillStageFromBatch(
 
         np[(size_t)i] = (int64_t)s.nPi;
 
-        for (int j = 0; j < AI_MAX_MOVES; ++j) {
-            ip[(size_t)i * (size_t)AI_MAX_MOVES + (size_t)j] = (int64_t)s.piIdx[(size_t)j];
-            pp[(size_t)i * (size_t)AI_MAX_MOVES + (size_t)j] = s.piProb[(size_t)j];
-        }
+        decodeTrainSamplePolicyRow(
+            s,
+            ip + (size_t)i * (size_t)AI_MAX_MOVES,
+            pp + (size_t)i * (size_t)AI_MAX_MOVES
+        );
 
         zp[(size_t)i] = s.z;
     }
