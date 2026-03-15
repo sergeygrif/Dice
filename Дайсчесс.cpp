@@ -1985,7 +1985,7 @@ void genLegal(Position& pos, const array<uint64_t, 4>& path, const array<int, 64
 static constexpr int NET_BLOCKS = 10;
 static constexpr int NET_CHANNELS = 128;
 static constexpr int POLICY_P = 73;
-static constexpr float BN_EPS = 1e-5f;
+static constexpr double AI_BN_EPS = 1e-5;
 
 // SE (affine)
 static constexpr int SE_CHANNELS = 16;   // для C=128 обычно 8..16; 16 сильнее
@@ -3188,6 +3188,7 @@ struct TrtRunner {
 
     // Fast path used by MCTS server: fill input + per-move gather indices from PendingNN batch.
     bool inferBatchGather(const PendingNN* jobs, int B);
+    bool inferBatchGather(const PendingNN* const* jobs, int B);
 };
 
 static TrtRunner g_trt;
@@ -4222,6 +4223,41 @@ bool TrtRunner::inferBatchGather(const PendingNN* jobs, int B) {
     return true;
 }
 
+bool TrtRunner::inferBatchGather(const PendingNN* const* jobs, int B) {
+    if (!ctx || B <= 0 || B > maxBatch) return false;
+
+    for (int i = 0; i < B; ++i) {
+        const PendingNN& job = *jobs[i];
+        auto* dst = reinterpret_cast<NNInput*>(
+            hInputPinned + (size_t)i * (size_t)NN_INPUT_SIZE
+            );
+        positionToNNInput(job.pos, *dst);
+    }
+
+#if AI_HAVE_CUDA_KERNELS
+    for (int i = 0; i < B; ++i) {
+        const PendingNN& job = *jobs[i];
+        int* idxBase = hGatherIdxPinned + (size_t)i * (size_t)AI_MAX_MOVES;
+        std::fill_n(idxBase, AI_MAX_MOVES, -1);
+
+        const int n = job.ml.n;
+        for (int j = 0; j < n; ++j) {
+            const uint16_t k = job.policyIdx[(size_t)j];
+            idxBase[j] = (k == INVALID_POLICY_IDX) ? -1 : (int)k;
+        }
+    }
+#endif
+
+    bool ok = runBatchAndSync(B);
+    if (!ok) return false;
+
+    for (int i = 0; i < B; ++i) {
+        hValuePinned[(size_t)i] = clamp01(hValuePinned[(size_t)i]);
+    }
+
+    return true;
+}
+
 // ============================================================
 // Inference server (single TensorRT owner thread)
 // ============================================================
@@ -4239,7 +4275,7 @@ struct InferenceServer {
     std::condition_variable cvNotFull;
     std::condition_variable cvIdle;
 
-    std::deque<PendingNN> q;
+    std::deque<std::unique_ptr<PendingNN>> q;
     std::thread th;
 
     bool busyFlag = false; // protected by m
@@ -4287,7 +4323,7 @@ struct InferenceServer {
         });
     }
 
-    bool submit(PendingNN&& job,
+    bool submit(std::unique_ptr<PendingNN>&& job,
                 const std::atomic<bool>* extCancel = nullptr,
                 const std::atomic<bool>* extAbort  = nullptr) {
         auto cancelled = [&]() -> bool {
@@ -4313,7 +4349,7 @@ struct InferenceServer {
     }
 
 private:
-    int popBatchUnlocked(std::vector<PendingNN>& batch, int wantB) {
+    int popBatchUnlocked(std::vector<std::unique_ptr<PendingNN>>& batch, int wantB) {
         batch.clear();
         batch.reserve((size_t)wantB);
 
@@ -4329,31 +4365,35 @@ private:
     }
 
     void run() {
-        std::vector<PendingNN> batch;
-        std::vector<PendingNN> add;
+        std::vector<std::unique_ptr<PendingNN>> batch;
+        std::vector<std::unique_ptr<PendingNN>> add;
+        std::vector<const PendingNN*> batchPtrs;
         batch.reserve((size_t)TRT_MAX_BATCH);
         add.reserve((size_t)TRT_MAX_BATCH);
 
-        auto processBatch = [&](std::vector<PendingNN>& jobs) {
+        auto processBatch = [&](std::vector<std::unique_ptr<PendingNN>>& jobs) {
             const int B = (int)jobs.size();
             if (B <= 0) return;
 
+            batchPtrs.resize((size_t)B);
+            for (int i = 0; i < B; ++i) batchPtrs[(size_t)i] = jobs[(size_t)i].get();
+
 #if AI_HAVE_CUDA_KERNELS
-            bool ok = g_trt.inferBatchGather(jobs.data(), B);
+            bool ok = g_trt.inferBatchGather(batchPtrs.data(), B);
             for (int i = 0; i < B; ++i) {
                 float v = ok ? g_trt.valueHost(i) : 0.5f;
                 const float* logits = ok ? g_trt.gatherLogitsHostPtr(i) : neutralLogits.data();
-                expandLeafWithGatheredLogits(T, jobs[(size_t)i], v, logits);
+                expandLeafWithGatheredLogits(T, *jobs[(size_t)i], v, logits);
             }
 #else
             std::vector<Position> posBatch((size_t)B);
-            for (int i = 0; i < B; ++i) posBatch[(size_t)i] = jobs[(size_t)i].pos;
+            for (int i = 0; i < B; ++i) posBatch[(size_t)i] = jobs[(size_t)i]->pos;
 
             bool ok = g_trt.inferBatch(posBatch.data(), B);
             for (int i = 0; i < B; ++i) {
                 float v = ok ? g_trt.valueHost(i) : 0.5f;
                 const float* pol = ok ? g_trt.policyHostPtr(i) : neutralPol.data();
-                expandLeafWithOutputs(T, jobs[(size_t)i], v, pol);
+                expandLeafWithOutputs(T, *jobs[(size_t)i], v, pol);
             }
 #endif
         };
@@ -4761,11 +4801,11 @@ auto worker = [&](unsigned tid) {
             if (T.abort.load(std::memory_order_relaxed)) break;
             if (stop.load(std::memory_order_relaxed)) break;
 
-            PendingNN p;
+            auto p = std::make_unique<PendingNN>();
             bool needNN = false;
 
             bool ok = runOneSim(T, rootPos, path, mask,
-                                p, needNN,
+                                *p, needNN,
                                 jitterBase + (uint32_t)k * 1337u);
 
             if (!ok) {
@@ -4785,13 +4825,13 @@ auto worker = [&](unsigned tid) {
 
                 if (stop.load(std::memory_order_relaxed) ||
                     T.abort.load(std::memory_order_relaxed)) {
-                    cancelPendingNN(p);
+                    cancelPendingNN(*p);
                     simFail.fetch_add(1, std::memory_order_relaxed);
                     break;
                 }
 
                 if (!nnServer.submit(std::move(p), &stop, &T.abort)) {
-                    cancelPendingNN(p);
+                    if (p) cancelPendingNN(*p);
                     simFail.fetch_add(1, std::memory_order_relaxed);
                     if (T.abort.load(std::memory_order_relaxed)) break;
                     continue;
@@ -4876,7 +4916,7 @@ auto worker = [&](unsigned tid) {
 // ========================= Torch BN+SE Net (matches TRT) =========================
 
 // ========================= Torch BN + Affine-SE Net (10x128) =========================
-static constexpr double BN_EPS_TORCH = 1e-5;
+
 
 struct SEAffineImpl final : torch::nn::Module {
     int C = 0;
@@ -4922,12 +4962,12 @@ struct ResBlockImpl final : torch::nn::Module {
         conv1 = register_module("conv1",
             torch::nn::Conv2d(torch::nn::Conv2dOptions(C, C, 3).padding(1).bias(false)));
         bn1 = register_module("bn1",
-            torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(C).eps(BN_EPS_TORCH)));
+            torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(C).eps(AI_BN_EPS)));
 
         conv2 = register_module("conv2",
             torch::nn::Conv2d(torch::nn::Conv2dOptions(C, C, 3).padding(1).bias(false)));
         bn2 = register_module("bn2",
-            torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(C).eps(BN_EPS_TORCH)));
+            torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(C).eps(AI_BN_EPS)));
 
         se = register_module("se", SEAffine(C, SE_CHANNELS));
     }
@@ -4963,7 +5003,7 @@ struct NetImpl final : torch::nn::Module {
         stem = register_module("stem",
             torch::nn::Conv2d(torch::nn::Conv2dOptions(NN_SQ_PLANES, NET_CHANNELS, 3).padding(1).bias(false)));
         stemBn = register_module("stemBn",
-            torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(NET_CHANNELS).eps(BN_EPS_TORCH)));
+            torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(NET_CHANNELS).eps(AI_BN_EPS)));
 
         blocks = register_module("blocks", torch::nn::ModuleList());
         for (int i = 0; i < NET_BLOCKS; ++i) blocks->push_back(ResBlock(NET_CHANNELS));
@@ -4971,14 +5011,14 @@ struct NetImpl final : torch::nn::Module {
         polConv1 = register_module("polConv1",
             torch::nn::Conv2d(torch::nn::Conv2dOptions(NET_CHANNELS, HEAD_POLICY_C, 1).padding(0).bias(false)));
         polBn1 = register_module("polBn1",
-            torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(HEAD_POLICY_C).eps(BN_EPS_TORCH)));
+            torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(HEAD_POLICY_C).eps(AI_BN_EPS)));
         polConv2 = register_module("polConv2",
             torch::nn::Conv2d(torch::nn::Conv2dOptions(HEAD_POLICY_C, POLICY_P, 1).padding(0).bias(true)));
 
         valConv1 = register_module("valConv1",
             torch::nn::Conv2d(torch::nn::Conv2dOptions(NET_CHANNELS, HEAD_VALUE_C, 1).padding(0).bias(false)));
         valBn1 = register_module("valBn1",
-            torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(HEAD_VALUE_C).eps(BN_EPS_TORCH)));
+            torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(HEAD_VALUE_C).eps(AI_BN_EPS)));
 
         valFC1 = register_module("valFC1",
             torch::nn::Linear(torch::nn::LinearOptions(HEAD_VALUE_C * 64, HEAD_VALUE_FC).bias(true)));
@@ -5314,7 +5354,7 @@ static bool trtRefitFromTorchModel(TrtRunner& trt, Net& model) {
         std::vector<float> shift((size_t)C);
 
         for (int64_t i = 0; i < C; ++i) {
-            float s = g[i] / std::sqrt(v[i] + BN_EPS);
+            float s = g[i] / std::sqrt(v[i] + static_cast<float>(AI_BN_EPS));
             scale[(size_t)i] = s;
             shift[(size_t)i] = b[i] - m[i] * s;
         }
@@ -5465,7 +5505,7 @@ struct InferenceServerTrain {
     std::condition_variable cvNotFull;
     std::condition_variable cvIdle;
 
-    std::deque<PendingNN> q;
+    std::deque<std::unique_ptr<PendingNN>> q;
     std::thread th;
 
     bool busyFlag = false; // protected by m
@@ -5511,7 +5551,7 @@ struct InferenceServerTrain {
 
     // Blocking bounded submit.
     // IMPORTANT: by lifecycle, producers must stop before requestStop().
-    bool submit(PendingNN&& job,
+    bool submit(std::unique_ptr<PendingNN>&& job,
                 const std::atomic<bool>* extCancel = nullptr,
                 const std::atomic<bool>* extAbort  = nullptr) {
         auto cancelled = [&]() -> bool {
@@ -5552,7 +5592,7 @@ struct InferenceServerTrain {
     }
 
 private:
-    bool popBatchUnlocked(std::vector<PendingNN>& batch, int wantB) {
+    bool popBatchUnlocked(std::vector<std::unique_ptr<PendingNN>>& batch, int wantB) {
         batch.clear();
         batch.reserve((size_t)wantB);
 
@@ -5568,8 +5608,9 @@ private:
     }
 
     void run() {
-        std::vector<PendingNN> batch;
-        std::vector<PendingNN> add;
+        std::vector<std::unique_ptr<PendingNN>> batch;
+        std::vector<std::unique_ptr<PendingNN>> add;
+        std::vector<const PendingNN*> batchPtrs;
         batch.reserve((size_t)TRT_MAX_BATCH);
         add.reserve((size_t)TRT_MAX_BATCH);
 
@@ -5584,9 +5625,12 @@ private:
         std::vector<float> policy((size_t)TRT_MAX_BATCH * (size_t)POLICY_SIZE, 0.0f);
 #endif
 
-        auto processBatch = [&](std::vector<PendingNN>& jobs) {
+        auto processBatch = [&](std::vector<std::unique_ptr<PendingNN>>& jobs) {
             const int B = (int)jobs.size();
             if (B <= 0) return;
+
+            batchPtrs.resize((size_t)B);
+            for (int i = 0; i < B; ++i) batchPtrs[(size_t)i] = jobs[(size_t)i].get();
 
 #if AI_HAVE_CUDA_KERNELS
             bool ok = false;
@@ -5594,7 +5638,7 @@ private:
                 InferInFlightGuard ig;
                 std::lock_guard<std::mutex> lk(backend.mtx);
 
-                ok = backend.trt.inferBatchGather(jobs.data(), B);
+                ok = backend.trt.inferBatchGather(batchPtrs.data(), B);
                 if (ok) {
                     backend.trt.copyValuesTo(values.data(), B);
                     backend.trt.copyGatherLogitsTo(logits.data(), B);
@@ -5607,12 +5651,12 @@ private:
                     ? (logits.data() + (size_t)i * (size_t)AI_MAX_MOVES)
                     : neutralLogits.data();
 
-                expandLeafWithGatheredLogits(T, jobs[(size_t)i], v, lg);
+                expandLeafWithGatheredLogits(T, *jobs[(size_t)i], v, lg);
             }
 #else
             posBatch.clear();
             posBatch.resize((size_t)B);
-            for (int i = 0; i < B; ++i) posBatch[(size_t)i] = jobs[(size_t)i].pos;
+            for (int i = 0; i < B; ++i) posBatch[(size_t)i] = jobs[(size_t)i]->pos;
 
             bool ok = false;
             {
@@ -5632,7 +5676,7 @@ private:
                     ? (policy.data() + (size_t)i * (size_t)POLICY_SIZE)
                     : neutralPol.data();
 
-                expandLeafWithOutputs(T, jobs[(size_t)i], v, pol);
+                expandLeafWithOutputs(T, *jobs[(size_t)i], v, pol);
             }
 #endif
         };
@@ -5734,6 +5778,8 @@ struct SearchPool {
     std::vector<std::thread> pool;
     std::mutex m;
     std::condition_variable cv;
+    std::mutex progressM;
+    std::condition_variable cvProgress;
 
     bool stop = false;
 
@@ -5751,7 +5797,11 @@ struct SearchPool {
 std::atomic<uint64_t> progressTick{ 0 };
 
 AI_FORCEINLINE void noteProgress() {
-    progressTick.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t t = progressTick.fetch_add(1, std::memory_order_relaxed) + 1ull;
+
+    if ((t & 31ull) == 0ull) {
+        cvProgress.notify_one();
+    }
 }
     // job params (valid only during active job)
     MCTSTable* T = nullptr;
@@ -5811,6 +5861,7 @@ void start(unsigned nThreads) {
         cancelJob.store(true, std::memory_order_relaxed);
         simsLeft.store(0, std::memory_order_relaxed);
         cv.notify_all();
+        cvProgress.notify_all();
 
         for (auto& th : newPool) {
             if (th.joinable()) th.join();
@@ -5844,6 +5895,7 @@ void start(unsigned nThreads) {
         simsLeft.store(0, std::memory_order_relaxed);
 
         cv.notify_all();
+        cvProgress.notify_all();
 
         for (auto& th : pool) {
             if (th.joinable()) th.join();
@@ -5879,6 +5931,7 @@ void start(unsigned nThreads) {
         cancelJob.store(true, std::memory_order_relaxed);
         simsLeft.store(0, std::memory_order_relaxed);
         cv.notify_all();
+        cvProgress.notify_all();
     }
 
     bool isPoolThreadId(std::thread::id id) const noexcept {
@@ -5953,6 +6006,7 @@ void runSims(MCTSTable& TT,
         ++jobId;
     }
     cv.notify_all();
+    cvProgress.notify_all();
 
     using Clock = std::chrono::steady_clock;
 
@@ -5970,18 +6024,39 @@ void runSims(MCTSTable& TT,
     auto lastProgressAt = Clock::now();
     auto lastWarnAt = Clock::time_point::min();
 
+    static constexpr auto WATCHDOG_WAIT_SLICE = std::chrono::milliseconds(250);
+
     for (;;) {
         if (isFatal()) {
             failFast(getFatalReason(), &TT);
         }
 
-        const int busy = workersBusy.load(std::memory_order_relaxed);
-        if (busy == 0) break;
+        if (workersBusy.load(std::memory_order_relaxed) == 0) break;
+
+        {
+            std::unique_lock<std::mutex> lk(progressM);
+            cvProgress.wait_for(lk, WATCHDOG_WAIT_SLICE, [&] {
+                return isFatal() ||
+                       workersBusy.load(std::memory_order_relaxed) == 0 ||
+                       progressTick.load(std::memory_order_relaxed) != lastTick ||
+                       simsLeft.load(std::memory_order_relaxed) != lastSimsLeft ||
+                       server.size() != lastQSize ||
+                       g_inferInFlight.load(std::memory_order_relaxed) != lastInFlight ||
+                       TT.abort.load(std::memory_order_relaxed);
+            });
+        }
+
+        if (isFatal()) {
+            failFast(getFatalReason(), &TT);
+        }
 
         if (TT.abort.load(std::memory_order_relaxed)) {
             cancelJob.store(true, std::memory_order_relaxed);
             simsLeft.store(0, std::memory_order_relaxed);
         }
+
+        const int busy = workersBusy.load(std::memory_order_relaxed);
+        if (busy == 0) break;
 
         const auto now = Clock::now();
 
@@ -6033,8 +6108,6 @@ void runSims(MCTSTable& TT,
                           << "\n";
             }
         }
-
-        std::this_thread::sleep_for(std::chrono::microseconds(50));
     }
 
     if (isFatal()) {
@@ -6076,6 +6149,7 @@ void workerMain(unsigned tid) {
 
             if (!TT || TT->abort.load(std::memory_order_relaxed)) {
                 workersBusy.fetch_sub(1, std::memory_order_relaxed);
+                cvProgress.notify_all();
                 busyAccounted = false;
                 continue;
             }
@@ -6098,11 +6172,11 @@ void workerMain(unsigned tid) {
 
                 if (!tryClaimSimBudget(simsLeft)) break;
 
-                PendingNN p;
+                auto p = std::make_unique<PendingNN>();
                 bool needNN = false;
 
                 bool ok = runOneSim(*TT, *rp, *pth, *msk,
-                                    p, needNN,
+                                    *p, needNN,
                                     jitterBase + (uint32_t)(k++) * 1337u);
 
                 if (!ok) {
@@ -6124,12 +6198,12 @@ void workerMain(unsigned tid) {
                     if (fatal.load(std::memory_order_relaxed) ||
                         cancelJob.load(std::memory_order_relaxed) ||
                         TT->abort.load(std::memory_order_relaxed)) {
-                        cancelPendingNN(p);
+                        cancelPendingNN(*p);
                         break;
                     }
 
                     if (!server->submit(std::move(p), &cancelJob, &TT->abort)) {
-                        cancelPendingNN(p);
+                        if (p) cancelPendingNN(*p);
 
                         if (!fatal.load(std::memory_order_relaxed) &&
                             !cancelJob.load(std::memory_order_relaxed) &&
@@ -6144,11 +6218,13 @@ void workerMain(unsigned tid) {
             }
 
             workersBusy.fetch_sub(1, std::memory_order_relaxed);
+            cvProgress.notify_all();
             busyAccounted = false;
         }
         catch (const std::exception& e) {
             if (busyAccounted) {
                 workersBusy.fetch_sub(1, std::memory_order_relaxed);
+                cvProgress.notify_all();
                 busyAccounted = false;
             }
 
@@ -6160,6 +6236,7 @@ void workerMain(unsigned tid) {
         catch (...) {
             if (busyAccounted) {
                 workersBusy.fetch_sub(1, std::memory_order_relaxed);
+                cvProgress.notify_all();
                 busyAccounted = false;
             }
 
