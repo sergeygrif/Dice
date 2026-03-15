@@ -3711,7 +3711,38 @@ AI_FORCEINLINE TraceStep& push(TTNode* node, TTEdge* edge, bool flip, bool vloss
 }
 };
 
+struct SearchWaitGroup {
+    std::atomic<int> pending{ 0 };
+    std::mutex m;
+    std::condition_variable cv;
+};
+
+static AI_FORCEINLINE void waitGroupAdd(SearchWaitGroup* wg) {
+    if (!wg) return;
+    wg->pending.fetch_add(1, std::memory_order_relaxed);
+}
+
+static AI_FORCEINLINE void waitGroupDone(SearchWaitGroup* wg) {
+    if (!wg) return;
+    int prev = wg->pending.fetch_sub(1, std::memory_order_acq_rel);
+    if (prev == 1) {
+        std::lock_guard<std::mutex> lk(wg->m);
+        wg->cv.notify_all();
+    }
+}
+
+static void waitGroupWaitZero(SearchWaitGroup* wg) {
+    if (!wg) return;
+    std::unique_lock<std::mutex> lk(wg->m);
+    wg->cv.wait(lk, [&] {
+        return wg->pending.load(std::memory_order_acquire) == 0;
+    });
+}
+
 struct PendingNN {
+    MCTSTable* ownerT = nullptr;          // owner table for shared inference server
+    SearchWaitGroup* waitGroup = nullptr; // per-search completion tracking
+
     TTNode* leaf = nullptr;
     Position pos;
     MoveList ml;
@@ -3741,10 +3772,20 @@ static constexpr size_t AI_PENDING_TLS_KEEP   = 128;
 static thread_local std::vector<std::unique_ptr<PendingNN>> g_pendingTLS;
 
 static AI_FORCEINLINE void resetPendingNN(PendingNN& p) {
+    p.ownerT = nullptr;
+    p.waitGroup = nullptr;
     p.leaf = nullptr;
     p.ml.n = 0;
     p.trace.reset();
     p.policyIdx.fill(INVALID_POLICY_IDX);
+}
+
+static AI_FORCEINLINE void completePendingNNJob(PendingNN& p) {
+    if (p.waitGroup) {
+        waitGroupDone(p.waitGroup);
+        p.waitGroup = nullptr;
+    }
+    p.ownerT = nullptr;
 }
 
 static AI_FORCEINLINE void refillPendingTLSIfNeeded() {
@@ -3895,7 +3936,7 @@ static AI_FORCEINLINE void cancelPendingNN(PendingNN& p) {
     // undo virtual loss first
     rollbackVirtualLoss(p.trace);
 
-    // release leaf if we claimed expansion but never sent it to NN thread
+    // release leaf if we claimed expansion but never finished it
     if (p.leaf) {
         uint8_t ex = p.leaf->expanded.load(std::memory_order_acquire);
         if (ex == 2) {
@@ -3903,6 +3944,8 @@ static AI_FORCEINLINE void cancelPendingNN(PendingNN& p) {
         }
     }
 
+    p.ownerT = nullptr;
+    p.waitGroup = nullptr;
     p.leaf = nullptr;
     p.ml.n = 0;
     p.trace.reset();
@@ -5683,8 +5726,22 @@ struct InferInFlightGuard {
     InferInFlightGuard() { g_inferInFlight.fetch_add(1, std::memory_order_relaxed); }
     ~InferInFlightGuard() { g_inferInFlight.fetch_sub(1, std::memory_order_relaxed); }
 };
-struct InferenceServerTrain {
-    static constexpr int NN_QUEUE_CAP = 8 * TRT_MAX_BATCH; // 2048
+struct ITrainInferenceServer {
+    virtual ~ITrainInferenceServer() = default;
+
+    virtual int size() const = 0;
+
+    virtual bool submit(std::unique_ptr<PendingNN>&& job,
+                        const std::atomic<bool>* extCancel = nullptr,
+                        const std::atomic<bool>* extAbort  = nullptr) = 0;
+
+    virtual void waitIdle() = 0;
+    virtual void requestStop() = 0;
+    virtual void join() = 0;
+};
+
+struct InferenceServerTrain : ITrainInferenceServer {
+    static constexpr int NN_QUEUE_CAP = 8 * TRT_MAX_BATCH;
 
     MCTSTable& T;
     BackendBinding backend;
@@ -5700,14 +5757,13 @@ struct InferenceServerTrain {
     std::deque<std::unique_ptr<PendingNN>> q;
     std::thread th;
 
-    bool busyFlag = false; // protected by m
+    bool busyFlag = false;
 
     std::vector<float> neutralPol;
     std::vector<float> neutralLogits;
 
     explicit InferenceServerTrain(MCTSTable& tab, BackendBinding be)
         : T(tab), backend(be) {
-        q.clear();
         neutralPol.assign((size_t)POLICY_SIZE, 0.0f);
         neutralLogits.assign((size_t)AI_MAX_MOVES, 0.0f);
     }
@@ -5723,7 +5779,7 @@ struct InferenceServerTrain {
         th = std::thread([this] { this->run(); });
     }
 
-    void requestStop() {
+    void requestStop() override {
         {
             std::lock_guard<std::mutex> lk(m);
             stop.store(true, std::memory_order_relaxed);
@@ -5733,19 +5789,17 @@ struct InferenceServerTrain {
         cvIdle.notify_all();
     }
 
-    void join() {
+    void join() override {
         if (th.joinable()) th.join();
     }
 
-    int size() const {
+    int size() const override {
         return qSize.load(std::memory_order_relaxed);
     }
 
-    // Blocking bounded submit.
-    // IMPORTANT: by lifecycle, producers must stop before requestStop().
     bool submit(std::unique_ptr<PendingNN>&& job,
                 const std::atomic<bool>* extCancel = nullptr,
-                const std::atomic<bool>* extAbort  = nullptr) {
+                const std::atomic<bool>* extAbort  = nullptr) override {
         auto cancelled = [&]() -> bool {
             return stop.load(std::memory_order_relaxed) ||
                    (extCancel && extCancel->load(std::memory_order_relaxed)) ||
@@ -5768,38 +5822,34 @@ struct InferenceServerTrain {
         return true;
     }
 
-    void waitIdle() {
+    void waitIdle() override {
         std::unique_lock<std::mutex> lk(m);
         cvIdle.wait(lk, [&] {
             return q.empty() && !busyFlag;
         });
     }
 
-void clearQueueUnsafeWhenIdle() {
-    std::deque<std::unique_ptr<PendingNN>> dropped;
+    void clearQueueUnsafeWhenIdle() {
+        std::deque<std::unique_ptr<PendingNN>> dropped;
 
-    {
-        std::unique_lock<std::mutex> lk(m);
+        {
+            std::unique_lock<std::mutex> lk(m);
+            cvIdle.wait(lk, [&] { return !busyFlag; });
 
-        // Безопасно чистим только когда сервер НЕ обрабатывает batch.
-        cvIdle.wait(lk, [&] {
-            return !busyFlag;
-        });
+            dropped.swap(q);
+            qSize.store((int)q.size(), std::memory_order_relaxed);
+        }
 
-        dropped.swap(q);
-        qSize.store((int)q.size(), std::memory_order_relaxed);
+        for (auto& p : dropped) {
+            if (!p) continue;
+            cancelPendingNN(*p);
+            completePendingNNJob(*p);
+            freePendingNN(std::move(p));
+        }
+
+        cvNotFull.notify_all();
+        cvIdle.notify_all();
     }
-
-    // ВНЕ lock-а: корректно откатываем все pending jobs.
-    for (auto& p : dropped) {
-        if (!p) continue;
-        cancelPendingNN(*p);
-        freePendingNN(std::move(p));
-    }
-
-    cvNotFull.notify_all();
-    cvIdle.notify_all();
-}
 
 private:
     bool popBatchUnlocked(std::vector<std::unique_ptr<PendingNN>>& batch, int wantB) {
@@ -5824,15 +5874,14 @@ private:
         batch.reserve((size_t)TRT_MAX_BATCH);
         add.reserve((size_t)TRT_MAX_BATCH);
 
-        std::vector<Position> posBatch;
-        posBatch.reserve((size_t)TRT_MAX_BATCH);
-
         std::vector<float> values((size_t)TRT_MAX_BATCH, 0.5f);
 
 #if AI_HAVE_CUDA_KERNELS
         std::vector<float> logits((size_t)TRT_MAX_BATCH * (size_t)AI_MAX_MOVES, 0.0f);
 #else
         std::vector<float> policy((size_t)TRT_MAX_BATCH * (size_t)POLICY_SIZE, 0.0f);
+        std::vector<Position> posBatch;
+        posBatch.reserve((size_t)TRT_MAX_BATCH);
 #endif
 
         auto processBatch = [&](std::vector<std::unique_ptr<PendingNN>>& jobs) {
@@ -5856,12 +5905,22 @@ private:
             }
 
             for (int i = 0; i < B; ++i) {
+                PendingNN& job = *jobs[(size_t)i];
+                MCTSTable* TOwner = job.ownerT ? job.ownerT : &T;
+
+                if (!TOwner || TOwner->abort.load(std::memory_order_relaxed)) {
+                    cancelPendingNN(job);
+                    completePendingNNJob(job);
+                    continue;
+                }
+
                 float v = ok ? values[(size_t)i] : 0.5f;
                 const float* lg = ok
                     ? (logits.data() + (size_t)i * (size_t)AI_MAX_MOVES)
                     : neutralLogits.data();
 
-                expandLeafWithGatheredLogits(T, *jobs[(size_t)i], v, lg);
+                expandLeafWithGatheredLogits(*TOwner, job, v, lg);
+                completePendingNNJob(job);
             }
 #else
             posBatch.clear();
@@ -5881,12 +5940,22 @@ private:
             }
 
             for (int i = 0; i < B; ++i) {
+                PendingNN& job = *jobs[(size_t)i];
+                MCTSTable* TOwner = job.ownerT ? job.ownerT : &T;
+
+                if (!TOwner || TOwner->abort.load(std::memory_order_relaxed)) {
+                    cancelPendingNN(job);
+                    completePendingNNJob(job);
+                    continue;
+                }
+
                 float v = ok ? values[(size_t)i] : 0.5f;
                 const float* pol = ok
                     ? (policy.data() + (size_t)i * (size_t)POLICY_SIZE)
                     : neutralPol.data();
 
-                expandLeafWithOutputs(T, *jobs[(size_t)i], v, pol);
+                expandLeafWithOutputs(*TOwner, job, v, pol);
+                completePendingNNJob(job);
             }
 #endif
         };
@@ -5908,7 +5977,6 @@ private:
                 (void)popBatchUnlocked(batch, TRT_MAX_BATCH);
             }
 
-            // queue shrank -> wake blocked producers
             cvNotFull.notify_all();
 
             const auto tFillEnd =
@@ -5940,7 +6008,6 @@ private:
             freePendingBatch(batch);
         }
 
-        // drain tail after stop request
         for (;;) {
             std::vector<std::unique_ptr<PendingNN>> tail;
             {
@@ -5966,6 +6033,297 @@ private:
     }
 };
 
+struct SharedInferenceServerTrain : ITrainInferenceServer {
+    static constexpr int NN_QUEUE_CAP = 16 * TRT_MAX_BATCH;
+
+    BackendBinding backend;
+
+    std::atomic<bool> stop{ false };
+    std::atomic<int>  qSize{ 0 };
+
+    std::mutex m;
+    std::condition_variable cvNotEmpty;
+    std::condition_variable cvNotFull;
+    std::condition_variable cvIdle;
+
+    std::deque<std::unique_ptr<PendingNN>> q;
+    std::thread th;
+
+    bool busyFlag = false;
+
+    std::vector<float> neutralPol;
+    std::vector<float> neutralLogits;
+
+    explicit SharedInferenceServerTrain(BackendBinding be)
+        : backend(be) {
+        neutralPol.assign((size_t)POLICY_SIZE, 0.0f);
+        neutralLogits.assign((size_t)AI_MAX_MOVES, 0.0f);
+    }
+
+    void start() {
+        {
+            std::lock_guard<std::mutex> lk(m);
+            stop.store(false, std::memory_order_relaxed);
+            busyFlag = false;
+            q.clear();
+            qSize.store(0, std::memory_order_relaxed);
+        }
+        th = std::thread([this] { this->run(); });
+    }
+
+    void requestStop() override {
+        {
+            std::lock_guard<std::mutex> lk(m);
+            stop.store(true, std::memory_order_relaxed);
+        }
+        cvNotEmpty.notify_all();
+        cvNotFull.notify_all();
+        cvIdle.notify_all();
+    }
+
+    void join() override {
+        if (th.joinable()) th.join();
+    }
+
+    int size() const override {
+        return qSize.load(std::memory_order_relaxed);
+    }
+
+    bool submit(std::unique_ptr<PendingNN>&& job,
+                const std::atomic<bool>* extCancel = nullptr,
+                const std::atomic<bool>* extAbort  = nullptr) override {
+        auto cancelled = [&]() -> bool {
+            return stop.load(std::memory_order_relaxed) ||
+                   (extCancel && extCancel->load(std::memory_order_relaxed)) ||
+                   (extAbort && extAbort->load(std::memory_order_relaxed));
+        };
+
+        std::unique_lock<std::mutex> lk(m);
+
+        while ((int)q.size() >= NN_QUEUE_CAP && !cancelled()) {
+            cvNotFull.wait_for(lk, std::chrono::microseconds(AI_SUBMIT_WAIT_US));
+        }
+
+        if (cancelled()) return false;
+
+        q.emplace_back(std::move(job));
+        qSize.store((int)q.size(), std::memory_order_relaxed);
+
+        lk.unlock();
+        cvNotEmpty.notify_one();
+        return true;
+    }
+
+    void waitIdle() override {
+        std::unique_lock<std::mutex> lk(m);
+        cvIdle.wait(lk, [&] {
+            return q.empty() && !busyFlag;
+        });
+    }
+
+    void clearQueueUnsafeWhenIdle() {
+        std::deque<std::unique_ptr<PendingNN>> dropped;
+
+        {
+            std::unique_lock<std::mutex> lk(m);
+            cvIdle.wait(lk, [&] { return !busyFlag; });
+
+            dropped.swap(q);
+            qSize.store((int)q.size(), std::memory_order_relaxed);
+        }
+
+        for (auto& p : dropped) {
+            if (!p) continue;
+            cancelPendingNN(*p);
+            completePendingNNJob(*p);
+            freePendingNN(std::move(p));
+        }
+
+        cvNotFull.notify_all();
+        cvIdle.notify_all();
+    }
+
+private:
+    bool popBatchUnlocked(std::vector<std::unique_ptr<PendingNN>>& batch, int wantB) {
+        batch.clear();
+        batch.reserve((size_t)wantB);
+
+        int n = 0;
+        while (n < wantB && !q.empty()) {
+            batch.emplace_back(std::move(q.front()));
+            q.pop_front();
+            ++n;
+        }
+
+        qSize.store((int)q.size(), std::memory_order_relaxed);
+        return n != 0;
+    }
+
+    void run() {
+        std::vector<std::unique_ptr<PendingNN>> batch;
+        std::vector<std::unique_ptr<PendingNN>> add;
+        std::vector<const PendingNN*> batchPtrs;
+        batch.reserve((size_t)TRT_MAX_BATCH);
+        add.reserve((size_t)TRT_MAX_BATCH);
+
+        std::vector<float> values((size_t)TRT_MAX_BATCH, 0.5f);
+
+#if AI_HAVE_CUDA_KERNELS
+        std::vector<float> logits((size_t)TRT_MAX_BATCH * (size_t)AI_MAX_MOVES, 0.0f);
+#else
+        std::vector<float> policy((size_t)TRT_MAX_BATCH * (size_t)POLICY_SIZE, 0.0f);
+        std::vector<Position> posBatch;
+        posBatch.reserve((size_t)TRT_MAX_BATCH);
+#endif
+
+        auto processBatch = [&](std::vector<std::unique_ptr<PendingNN>>& jobs) {
+            const int B = (int)jobs.size();
+            if (B <= 0) return;
+
+            batchPtrs.resize((size_t)B);
+            for (int i = 0; i < B; ++i) batchPtrs[(size_t)i] = jobs[(size_t)i].get();
+
+#if AI_HAVE_CUDA_KERNELS
+            bool ok = false;
+            {
+                InferInFlightGuard ig;
+                std::lock_guard<std::mutex> lk(backend.mtx);
+
+                ok = backend.trt.inferBatchGather(batchPtrs.data(), B);
+                if (ok) {
+                    backend.trt.copyValuesTo(values.data(), B);
+                    backend.trt.copyGatherLogitsTo(logits.data(), B);
+                }
+            }
+
+            for (int i = 0; i < B; ++i) {
+                PendingNN& job = *jobs[(size_t)i];
+                MCTSTable* T = job.ownerT;
+
+                if (!T || T->abort.load(std::memory_order_relaxed)) {
+                    cancelPendingNN(job);
+                    completePendingNNJob(job);
+                    continue;
+                }
+
+                float v = ok ? values[(size_t)i] : 0.5f;
+                const float* lg = ok
+                    ? (logits.data() + (size_t)i * (size_t)AI_MAX_MOVES)
+                    : neutralLogits.data();
+
+                expandLeafWithGatheredLogits(*T, job, v, lg);
+                completePendingNNJob(job);
+            }
+#else
+            posBatch.clear();
+            posBatch.resize((size_t)B);
+            for (int i = 0; i < B; ++i) posBatch[(size_t)i] = jobs[(size_t)i]->pos;
+
+            bool ok = false;
+            {
+                InferInFlightGuard ig;
+                std::lock_guard<std::mutex> lk(backend.mtx);
+
+                ok = backend.trt.inferBatch(posBatch.data(), B);
+                if (ok) {
+                    backend.trt.copyValuesTo(values.data(), B);
+                    backend.trt.copyPolicyTo(policy.data(), B);
+                }
+            }
+
+            for (int i = 0; i < B; ++i) {
+                PendingNN& job = *jobs[(size_t)i];
+                MCTSTable* T = job.ownerT;
+
+                if (!T || T->abort.load(std::memory_order_relaxed)) {
+                    cancelPendingNN(job);
+                    completePendingNNJob(job);
+                    continue;
+                }
+
+                float v = ok ? values[(size_t)i] : 0.5f;
+                const float* pol = ok
+                    ? (policy.data() + (size_t)i * (size_t)POLICY_SIZE)
+                    : neutralPol.data();
+
+                expandLeafWithOutputs(*T, job, v, pol);
+                completePendingNNJob(job);
+            }
+#endif
+        };
+
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> lk(m);
+
+                busyFlag = false;
+                if (q.empty()) cvIdle.notify_all();
+
+                cvNotEmpty.wait(lk, [&] {
+                    return stop.load(std::memory_order_relaxed) || !q.empty();
+                });
+
+                if (stop.load(std::memory_order_relaxed) && q.empty()) break;
+
+                busyFlag = true;
+                (void)popBatchUnlocked(batch, TRT_MAX_BATCH);
+            }
+
+            cvNotFull.notify_all();
+
+            const auto tFillEnd =
+                std::chrono::steady_clock::now() + std::chrono::microseconds(200);
+
+            while ((int)batch.size() < TRT_MAX_BATCH &&
+                   std::chrono::steady_clock::now() < tFillEnd) {
+                std::unique_lock<std::mutex> lk(m);
+
+                if (q.empty()) {
+                    cvNotEmpty.wait_until(lk, tFillEnd, [&] {
+                        return stop.load(std::memory_order_relaxed) || !q.empty();
+                    });
+                }
+
+                if (q.empty()) break;
+
+                add.clear();
+                const int need = TRT_MAX_BATCH - (int)batch.size();
+                (void)popBatchUnlocked(add, need);
+                lk.unlock();
+
+                cvNotFull.notify_all();
+
+                for (auto& j : add) batch.emplace_back(std::move(j));
+            }
+
+            processBatch(batch);
+            freePendingBatch(batch);
+        }
+
+        for (;;) {
+            std::vector<std::unique_ptr<PendingNN>> tail;
+            {
+                std::lock_guard<std::mutex> lk(m);
+                if (q.empty()) break;
+                busyFlag = true;
+                (void)popBatchUnlocked(tail, TRT_MAX_BATCH);
+            }
+
+            cvNotFull.notify_all();
+            processBatch(tail);
+            freePendingBatch(tail);
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(m);
+            busyFlag = false;
+            qSize.store((int)q.size(), std::memory_order_relaxed);
+            if (q.empty()) cvIdle.notify_all();
+        }
+
+        cvNotFull.notify_all();
+    }
+};
 // ------------------------------------------------------------
 // SearchPool: постоянные MCTS-воркеры (НЕ пересоздаём потоки на каждый search)
 // ------------------------------------------------------------
@@ -6030,7 +6388,8 @@ AI_FORCEINLINE void noteProgress() {
 }
     // job params (valid only during active job)
     MCTSTable* T = nullptr;
-    InferenceServerTrain* srv = nullptr;
+    ITrainInferenceServer* srv = nullptr;
+    SearchWaitGroup* activeWG = nullptr;
     const Position* rootPos = nullptr;
     const std::array<uint64_t, 4>* path = nullptr;
     const std::array<int, 64>* mask = nullptr;
@@ -6067,6 +6426,7 @@ void start(unsigned nThreads) {
         rootPos = nullptr;
         path = nullptr;
         mask = nullptr;
+        activeWG = nullptr;
         jobId = 0;
     }
 
@@ -6216,7 +6576,7 @@ void start(unsigned nThreads) {
     }
 
 void runSims(MCTSTable& TT,
-    InferenceServerTrain& server,
+    ITrainInferenceServer& server,
     const Position& rp,
     const std::array<uint64_t, 4>& pth,
     const std::array<int, 64>& msk,
@@ -6232,6 +6592,9 @@ void runSims(MCTSTable& TT,
 
     if (TT.abort.load(std::memory_order_relaxed)) return;
 
+    SearchWaitGroup wg;
+    wg.pending.store(0, std::memory_order_relaxed);
+
     simsLeft.store(sims, std::memory_order_relaxed);
     cancelJob.store(false, std::memory_order_relaxed);
     workersBusy.store((int)threads, std::memory_order_relaxed);
@@ -6243,6 +6606,7 @@ void runSims(MCTSTable& TT,
         rootPos = &rp;
         path = &pth;
         mask = &msk;
+        activeWG = &wg;
         ++jobId;
     }
     cv.notify_all();
@@ -6350,6 +6714,13 @@ void runSims(MCTSTable& TT,
         }
     }
 
+    waitGroupWaitZero(&wg);
+
+    {
+        std::lock_guard<std::mutex> lk(m);
+        activeWG = nullptr;
+    }
+
     if (isFatal()) {
         failFast(getFatalReason(), &TT);
     }
@@ -6361,7 +6732,8 @@ void workerMain(unsigned tid) {
 
     for (;;) {
         MCTSTable* TT = nullptr;
-        InferenceServerTrain* server = nullptr;
+        ITrainInferenceServer* server = nullptr;
+        SearchWaitGroup* wg = nullptr;
         const Position* rp = nullptr;
         const std::array<uint64_t, 4>* pth = nullptr;
         const std::array<int, 64>* msk = nullptr;
@@ -6383,6 +6755,7 @@ void workerMain(unsigned tid) {
                 rp = rootPos;
                 pth = path;
                 msk = mask;
+                wg = activeWG;
             }
 
             busyAccounted = true;
@@ -6453,10 +6826,18 @@ if (needNN && server) {
     }
 
     auto p = allocPendingNN();
-    *p = localPending; // allocate only on real NN leaf
+    *p = localPending;
+    p->ownerT = TT;
+    p->waitGroup = wg;
+
+    waitGroupAdd(wg);
 
     if (!server->submit(std::move(p), &cancelJob, &TT->abort)) {
         if (p) {
+            if (p->waitGroup) {
+                waitGroupDone(p->waitGroup);
+                p->waitGroup = nullptr;
+            }
             cancelPendingNN(*p);
             freePendingNN(std::move(p));
         }
@@ -6735,7 +7116,7 @@ static void buildSparsePolicyTargetCHW(const Position& pos,
 // временно (на один search) зашумливаем root priors и потом откатываем назад
 static void runFixedSims(MCTSTable& T,
     SearchPool& pool,
-    InferenceServerTrain& srv,
+    ITrainInferenceServer& srv,
     BackendBinding backend,
     const Position& rootPos,
     const std::array<uint64_t, 4>& path,
@@ -6762,6 +7143,29 @@ static AI_FORCEINLINE void resetMCTSTableForNewGame(MCTSTable& T) {
     T.newGame();
 }
 
+struct GameContext {
+    MCTSTable T;
+    SearchPool pool;
+
+    explicit GameContext(size_t nodePow2, size_t edgeCap)
+        : T(nodePow2, edgeCap) {
+    }
+
+    void start(unsigned forcedThreads = 0) {
+        unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+        unsigned n = forcedThreads ? forcedThreads : std::min(hw, 4u);
+        pool.start(n);
+    }
+
+    void stop() {
+        pool.shutdown();
+    }
+
+    void resetForNewGame() {
+        resetMCTSTableForNewGame(T);
+    }
+};
+
 struct SelfPlayContext {
     MCTSTable T;
     BackendBinding backend;
@@ -6777,8 +7181,6 @@ struct SelfPlayContext {
 
     void start(unsigned forcedThreads = 0) {
         server.start();
-
-        // Heuristic: limit threads to avoid excessive contention (tune if you want).
         unsigned hw = std::max(1u, std::thread::hardware_concurrency());
         unsigned n = forcedThreads ? forcedThreads : std::min(hw, 8u);
         pool.start(n);
@@ -6933,7 +7335,9 @@ static ArenaStats runArenaMatch(int games, int simsPerPos) {
     return st;
 }
 
-static void selfPlayOneGame960(SelfPlayContext& sp,
+static void selfPlayOneGame960(GameContext& sp,
+    ITrainInferenceServer& sharedSrv,
+    BackendBinding backend,
     ReplayBuffer& rb,
     int simsPerPos,
     int maxPlies,
@@ -6981,7 +7385,7 @@ static void selfPlayOneGame960(SelfPlayContext& sp,
 
         bool rootNoiseHere = addRootNoise && (d < 20);
 
-        runFixedSims(sp.T, sp.pool, sp.server, sp.backend,
+        runFixedSims(sp.T, sp.pool, sharedSrv, backend,
             pos, path, mask, simsPerPos, rootNoiseHere);
         if (sp.T.abort.load(std::memory_order_relaxed)) break;
 
@@ -8069,16 +8473,10 @@ static AI_FORCEINLINE void waitForNoInferenceInFlight() {
     }
 }
 
-static void safeRefitBarrier(SelfPlayContext& sp) {
-    // Гарантируем, что на момент refit/save:
-    // - inference server idle
-    // - очередь пуста
-    // - ни один TRT inference больше не "в полёте"
-    sp.server.waitIdle();
+static void safeRefitBarrierShared(SharedInferenceServerTrain& srv) {
+    srv.waitIdle();
     waitForNoInferenceInFlight();
-
-    sp.server.clearQueueUnsafeWhenIdle();
-
+    srv.clearQueueUnsafeWhenIdle();
     waitForNoInferenceInFlight();
 }
 
@@ -8103,9 +8501,9 @@ struct SelfPlayBlockStats {
 };
 
 static SearchPoolStatsSnapshot snapshotAllSearchStats(
-    const std::vector<std::unique_ptr<SelfPlayContext>>& sps) {
+    const std::vector<std::unique_ptr<GameContext>>& gamesCtx) {
     SearchPoolStatsSnapshot out{};
-    for (const auto& sp : sps) {
+    for (const auto& sp : gamesCtx) {
         if (!sp) continue;
         auto s = sp->pool.snapshotStats();
         out.simsOk   += s.simsOk;
@@ -8117,62 +8515,10 @@ static SearchPoolStatsSnapshot snapshotAllSearchStats(
     return out;
 }
 
-static int totalNNQueueSize(
-    const std::vector<std::unique_ptr<SelfPlayContext>>& sps) {
-    int q = 0;
-    for (const auto& sp : sps) {
-        if (!sp) continue;
-        q += sp->server.size();
-    }
-    return q;
-}
-
-static void safeRefitBarrierAll(
-    std::vector<std::unique_ptr<SelfPlayContext>>& sps) {
-    for (auto& sp : sps) {
-        if (!sp) continue;
-        safeRefitBarrier(*sp);
-    }
-}
-
-static void stopAllSelfPlayContexts(
-    std::vector<std::unique_ptr<SelfPlayContext>>& sps) {
-    for (auto& sp : sps) {
-        if (!sp) continue;
-        sp->stop();
-    }
-}
-
-static bool restartAllSelfPlayContexts(
-    std::vector<std::unique_ptr<SelfPlayContext>>& sps,
-    unsigned forcedThreads) {
-    try {
-        for (auto& sp : sps) {
-            if (!sp) continue;
-            sp->start(forcedThreads);
-        }
-        return true;
-    }
-    catch (const std::exception& e) {
-        std::cerr << "[selfplay] failed to restart all contexts: "
-                  << e.what() << "\n";
-    }
-    catch (...) {
-        std::cerr << "[selfplay] failed to restart all contexts: unknown exception\n";
-    }
-
-    // best-effort cleanup
-    for (auto& sp : sps) {
-        try {
-            if (sp) sp->stop();
-        } catch (...) {
-        }
-    }
-    return false;
-}
-
 static void runParallelSelfPlayBlock(
-    std::vector<std::unique_ptr<SelfPlayContext>>& sps,
+    std::vector<std::unique_ptr<GameContext>>& gamesCtx,
+    ITrainInferenceServer& sharedSrv,
+    BackendBinding backend,
     ReplayBuffer& rb,
     int simsPerPos,
     int maxPlies,
@@ -8185,7 +8531,7 @@ static void runParallelSelfPlayBlock(
     outStats = {};
 
     const int budget = std::max(0, std::min(maxGamesThisBlock, gamesRemainingTotal));
-    if (budget <= 0 || sps.empty()) return;
+    if (budget <= 0 || gamesCtx.empty()) return;
 
     std::atomic<int> gamesLeft{ budget };
     std::atomic<uint64_t> gamesDone{ 0 };
@@ -8198,12 +8544,12 @@ static void runParallelSelfPlayBlock(
     std::exception_ptr ex;
 
     std::vector<std::thread> outer;
-    outer.reserve(sps.size());
+    outer.reserve(gamesCtx.size());
 
-    for (size_t i = 0; i < sps.size(); ++i) {
+    for (size_t i = 0; i < gamesCtx.size(); ++i) {
         outer.emplace_back([&, i] {
             try {
-                SelfPlayContext& sp = *sps[i];
+                GameContext& sp = *gamesCtx[i];
 
                 for (;;) {
                     if (abortAll.load(std::memory_order_relaxed)) break;
@@ -8215,7 +8561,10 @@ static void runParallelSelfPlayBlock(
                     int samplesAdded = 0;
 
                     selfPlayOneGame960(
-                        sp, rb,
+                        sp,
+                        sharedSrv,
+                        backend,
+                        rb,
                         simsPerPos,
                         maxPlies,
                         addRootNoise,
@@ -8233,7 +8582,7 @@ static void runParallelSelfPlayBlock(
                     }
 
                     if (sp.T.abort.load(std::memory_order_relaxed)) {
-                        std::cerr << "[selfplay] ctx=" << i
+                        std::cerr << "[selfplay] game_ctx=" << i
                                   << " aborted: oomCode="
                                   << sp.T.oomCode.load(std::memory_order_relaxed)
                                   << " -> reset table\n";
@@ -8333,52 +8682,46 @@ void Training(int targetGames) {
         std::cerr << "[arena] failed to initialize old snapshot in memory.\n";
     }
 
-    // ------------------------------------------------------------
-    // Parallel self-play contexts
-    // ------------------------------------------------------------
+    BackendBinding sharedBackend{ g_trt, g_trtMutex };
+    SharedInferenceServerTrain sharedSrv(sharedBackend);
+    sharedSrv.start();
+
     const unsigned hwSP = std::max(1u, std::thread::hardware_concurrency());
 
-    // Safe v1 defaults:
-    // - 1 game on small CPUs
-    // - 2 games on medium CPUs
-    // - 4 games on larger CPUs
     const unsigned PARALLEL_GAMES =
-        (hwSP >= 24 ? 4u :
-         hwSP >= 12 ? 2u : 1u);
+        (hwSP >= 32 ? 6u :
+         hwSP >= 20 ? 4u :
+         hwSP >= 12 ? 3u : 2u);
 
-    // Total threads per game ~= search threads + 1 inference thread + 1 outer game thread.
-    // Keep this conservative to avoid oversubscription.
     unsigned SEARCH_THREADS_PER_GAME = 1u;
-    if (hwSP / PARALLEL_GAMES > 2u) {
-        SEARCH_THREADS_PER_GAME = std::max(1u, hwSP / PARALLEL_GAMES - 2u);
+    if (hwSP >= PARALLEL_GAMES * 3u) {
+        SEARCH_THREADS_PER_GAME = std::min(3u, std::max(1u, hwSP / PARALLEL_GAMES - 1u));
     }
-    SEARCH_THREADS_PER_GAME = std::min(SEARCH_THREADS_PER_GAME, 3u);
 
-    // IMPORTANT: multiple tables => reduce per-context memory footprint.
     const size_t SP_NODE_POW2 =
-        (PARALLEL_GAMES >= 4 ? (1u << 18) : (1u << 19));
-    const size_t SP_EDGE_CAP =
-        (PARALLEL_GAMES >= 4 ? (1u << 22) : (1u << 23));
+        (PARALLEL_GAMES >= 6 ? (1u << 18) :
+         PARALLEL_GAMES >= 4 ? (1u << 19) : (1u << 20));
 
-    std::vector<std::unique_ptr<SelfPlayContext>> spGames;
-    spGames.reserve(PARALLEL_GAMES);
+    const size_t SP_EDGE_CAP =
+        (PARALLEL_GAMES >= 6 ? (1u << 22) :
+         PARALLEL_GAMES >= 4 ? (1u << 23) : (1u << 24));
+
+    std::vector<std::unique_ptr<GameContext>> gamesCtx;
+    gamesCtx.reserve(PARALLEL_GAMES);
 
     for (unsigned i = 0; i < PARALLEL_GAMES; ++i) {
-        auto sp = std::make_unique<SelfPlayContext>(
-            SP_NODE_POW2, SP_EDGE_CAP, g_trt, g_trtMutex
-        );
-        sp->start(SEARCH_THREADS_PER_GAME);
-        spGames.push_back(std::move(sp));
+        auto g = std::make_unique<GameContext>(SP_NODE_POW2, SP_EDGE_CAP);
+        g->start(SEARCH_THREADS_PER_GAME);
+        gamesCtx.push_back(std::move(g));
     }
 
     bool spRunning = true;
-    SearchPoolStatsSnapshot prevSearchStats = snapshotAllSearchStats(spGames);
+    SearchPoolStatsSnapshot prevSearchStats = snapshotAllSearchStats(gamesCtx);
     bool stopTraining = false;
 
     std::cout << "[selfplay] parallel_games=" << PARALLEL_GAMES
               << " search_threads_per_game=" << SEARCH_THREADS_PER_GAME
-              << " nodePow2=" << SP_NODE_POW2
-              << " edgeCap=" << SP_EDGE_CAP
+              << " shared_nn_server=1"
               << "\n";
 
     // -------------------------------
@@ -8427,7 +8770,9 @@ void Training(int targetGames) {
 
         SelfPlayBlockStats spBlk;
         runParallelSelfPlayBlock(
-            spGames,
+            gamesCtx,
+            sharedSrv,
+            sharedBackend,
             rb,
             simsPerPos,
             maxPlies,
@@ -8466,7 +8811,7 @@ void Training(int targetGames) {
                          (int)(trainSampleCredits / (double)trainer.B));
 
             if (targetSteps > 0) {
-                safeRefitBarrierAll(spGames);
+                safeRefitBarrierShared(sharedSrv);
 
                 // use old function as fixed-step runner by giving it a huge time budget
                 didTrain = trainer.trainBlockBudgetMs(rb, model, emaModel,
@@ -8487,7 +8832,7 @@ void Training(int targetGames) {
         // 3) REFIT TRT
         // ===========================
         if (didTrain > 0 && (trainBlocks % REFIT_EVERY_TRAIN_BLOCKS) == 0) {
-            safeRefitBarrierAll(spGames);
+            safeRefitBarrierShared(sharedSrv);
 
             std::scoped_lock lk(g_modelMutex, g_trtMutex);
             torch::NoGradGuard ng;
@@ -8504,8 +8849,10 @@ void Training(int targetGames) {
             // Полностью ставим основной self-play на паузу на время арены:
             // убираем лишние worker threads / inference server activity.
             if (spRunning) {
-                safeRefitBarrierAll(spGames);
-                stopAllSelfPlayContexts(spGames);
+                safeRefitBarrierShared(sharedSrv);
+                for (auto& g : gamesCtx) {
+                    if (g) g->stop();
+                }
                 spRunning = false;
             }
 
@@ -8552,12 +8899,11 @@ void Training(int targetGames) {
             }
 
             // ВАЖНО: всегда поднимаем основной self-play обратно после арены.
-            if (!restartAllSelfPlayContexts(spGames, SEARCH_THREADS_PER_GAME)) {
-                stopTraining = true;
-                break;
+            for (auto& g : gamesCtx) {
+                if (g) g->start(SEARCH_THREADS_PER_GAME);
             }
             spRunning = true;
-            prevSearchStats = snapshotAllSearchStats(spGames);
+            prevSearchStats = snapshotAllSearchStats(gamesCtx);
             statWindowStart = std::chrono::steady_clock::now();
 
             // Даже если arena setup failed, не зацикливаемся на том же пороге.
@@ -8576,7 +8922,7 @@ void Training(int targetGames) {
         auto now = std::chrono::steady_clock::now();
 
         if (now >= nextSave) {
-            safeRefitBarrierAll(spGames);
+            safeRefitBarrierShared(sharedSrv);
             nextSave += std::chrono::hours(1);
 
             saveAll(ptFile, emaFile, planFile, optFile, trainerStateFile, model, emaModel, trainer);
@@ -8587,7 +8933,7 @@ void Training(int targetGames) {
         if (now >= nextStat) {
             nextStat += std::chrono::seconds(10);
 
-            auto curStats = snapshotAllSearchStats(spGames);
+            auto curStats = snapshotAllSearchStats(gamesCtx);
             auto dtSec = std::chrono::duration<double>(now - statWindowStart).count();
             if (dtSec <= 0.0) dtSec = 1e-9;
 
@@ -8625,7 +8971,7 @@ void Training(int targetGames) {
                 << " | AvgLen: " << fmtFixed(avgLen, 1)
                 << " | Truncated: " << fmtFixed(truncatedPct, 0) << "%"
                 << " | NPS: " << fmtFixed(nps, 0)
-                << " | Q_size: " << totalNNQueueSize(spGames)
+                << " | Q_size: " << sharedSrv.size()
                 << " | TT_hit: " << fmtFixed(ttHitPct, 0) << "%"
                 << " | AvgDepth: " << fmtFixed(avgDepth, 0)
                 << "\n";
@@ -8643,10 +8989,15 @@ void Training(int targetGames) {
     // 5) CLEAN STOP & FINAL SAVE + FINAL REBUILD
     // ==========================================
     if (spRunning) {
-        safeRefitBarrierAll(spGames);
-        stopAllSelfPlayContexts(spGames);
+        safeRefitBarrierShared(sharedSrv);
+        for (auto& g : gamesCtx) {
+            if (g) g->stop();
+        }
         spRunning = false;
     }
+
+    sharedSrv.requestStop();
+    sharedSrv.join();
 
     std::cout << "\n[Завершение] Собрано " << targetGames << " партий. Сохранение финальных весов...\n";
     {
