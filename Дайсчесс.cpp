@@ -19,6 +19,9 @@
 #include <thread>
 #include <chrono>
 #include <condition_variable>
+#include <csignal>
+#include <exception>
+#include <ctime>
 #include <mutex>
 #include <memory>
 #include <deque>
@@ -35,6 +38,10 @@
 #include <immintrin.h>
 #include <cpuid.h>
 #endif
+#endif
+
+#if defined(_WIN32)
+#include <Windows.h>
 #endif
 
 using namespace std;
@@ -2165,13 +2172,121 @@ static AI_FORCEINLINE float dequantizeProbU16(uint16_t q) {
 }
 
 
+static std::mutex g_diagMutex;
+static std::ofstream g_diagFile;
+
+static std::string diagNowStr() {
+    using namespace std::chrono;
+    auto now = system_clock::now();
+    auto tt = system_clock::to_time_t(now);
+
+    std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &tt);
+#else
+    localtime_r(&tt, &tm);
+#endif
+
+    char buf[64];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+
+    auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
+
+    std::ostringstream oss;
+    oss << buf << "." << std::setfill('0') << std::setw(3) << ms.count();
+    return oss.str();
+}
+
+static void diagInit(const std::string& path = "crash.log") {
+    std::lock_guard<std::mutex> lk(g_diagMutex);
+    if (!g_diagFile.is_open()) {
+        g_diagFile.open(path, std::ios::out | std::ios::app);
+        g_diagFile.setf(std::ios::unitbuf);
+    }
+}
+
+static void diagLogLine(const std::string& msg) {
+    std::lock_guard<std::mutex> lk(g_diagMutex);
+
+    std::ostringstream line;
+    line << "[" << diagNowStr() << "][tid " << std::this_thread::get_id() << "] " << msg;
+
+    std::cerr << line.str() << std::endl;
+    if (g_diagFile.is_open()) {
+        g_diagFile << line.str() << std::endl;
+    }
+}
+
+static void onTerminateHandler() noexcept {
+    try {
+        auto ep = std::current_exception();
+        if (ep) std::rethrow_exception(ep);
+        diagLogLine("[terminate] called with no active exception");
+    }
+    catch (const std::exception& e) {
+        diagLogLine(std::string("[terminate] std::exception: ") + e.what());
+    }
+    catch (...) {
+        diagLogLine("[terminate] unknown exception");
+    }
+
+    std::abort();
+}
+
+static void onSignalHandler(int sig) {
+    std::ostringstream oss;
+    oss << "[signal] received signal " << sig;
+    diagLogLine(oss.str());
+
+    std::_Exit(128 + sig);
+}
+
+#if defined(_WIN32)
+static LONG WINAPI topLevelExceptionFilter(EXCEPTION_POINTERS* ep) {
+    if (!ep || !ep->ExceptionRecord) {
+        diagLogLine("[SEH] unhandled Windows exception (no details)");
+        return EXCEPTION_EXECUTE_HANDLER;
+    }
+
+    std::ostringstream oss;
+    oss << "[SEH] unhandled exception code=0x"
+        << std::hex << std::uppercase
+        << (unsigned long)ep->ExceptionRecord->ExceptionCode
+        << " address=" << ep->ExceptionRecord->ExceptionAddress;
+    diagLogLine(oss.str());
+
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
+
+static void installCrashDiagnostics() {
+    diagInit("crash.log");
+    std::set_terminate(onTerminateHandler);
+
+    std::signal(SIGABRT, onSignalHandler);
+    std::signal(SIGSEGV, onSignalHandler);
+    std::signal(SIGILL, onSignalHandler);
+    std::signal(SIGFPE, onSignalHandler);
+
+#if defined(_WIN32)
+    SetUnhandledExceptionFilter(topLevelExceptionFilter);
+#endif
+
+    diagLogLine("[diag] crash diagnostics installed");
+}
 
 static void cudaCheck(cudaError_t e, const char* expr, const char* file, int line) {
     if (e == cudaSuccess) return;
-    std::cerr << "CUDA error: " << cudaGetErrorString(e)
+
+    std::ostringstream oss;
+    oss << "[CUDA FATAL] "
+        << cudaGetErrorName(e) << ": "
+        << cudaGetErrorString(e)
         << " at " << file << ":" << line
-        << " in " << expr << "\n";
-    std::exit(1);
+        << " in " << expr;
+
+    diagLogLine(oss.str());
+    std::abort();
 }
 #define CUDA_CHECK(x) cudaCheck((x), #x, __FILE__, __LINE__)
 
@@ -6026,7 +6141,11 @@ private:
         }
 
         if (!ok) {
-            std::cerr << "[UnifiedInferenceServerTrain] inferBatchGather failed, abort batch B=" << B << "\n";
+            {
+                std::ostringstream oss;
+                oss << "[UnifiedInferenceServerTrain] inferBatchGather failed, abort batch B=" << B;
+                diagLogLine(oss.str());
+            }
             for (int i = 0; i < B; ++i) {
                 PendingNN& job = *jobs[(size_t)i];
                 MCTSTable* owner = resolveOwner(job);
@@ -6068,7 +6187,11 @@ private:
         }
 
         if (!ok) {
-            std::cerr << "[UnifiedInferenceServerTrain] inferBatch failed, abort batch B=" << B << "\n";
+            {
+                std::ostringstream oss;
+                oss << "[UnifiedInferenceServerTrain] inferBatch failed, abort batch B=" << B;
+                diagLogLine(oss.str());
+            }
             for (int i = 0; i < B; ++i) {
                 PendingNN& job = *jobs[(size_t)i];
                 MCTSTable* owner = resolveOwner(job);
@@ -6117,8 +6240,8 @@ private:
         std::vector<std::unique_ptr<PendingNN>>& add,
         const char* what) noexcept {
         try {
-            std::cerr << "[UnifiedInferenceServerTrain] FATAL in run(): "
-                << (what ? what : "unknown exception") << "\n";
+            diagLogLine(std::string("[UnifiedInferenceServerTrain] FATAL in run(): ")
+                + (what ? what : "unknown exception"));
         }
         catch (...) {
         }
@@ -6460,8 +6583,11 @@ struct SearchPool {
     void requestFailFastNoThrow(const std::string& reason, MCTSTable* tt = nullptr) noexcept {
         bool wasFatal = fatal.exchange(true, std::memory_order_acq_rel);
         if (!wasFatal) {
-            std::lock_guard<std::mutex> lk(fatalM);
-            fatalReason = reason;
+            {
+                std::lock_guard<std::mutex> lk(fatalM);
+                fatalReason = reason;
+            }
+            diagLogLine(std::string("[SearchPool FATAL] ") + reason);
         }
 
         if (tt) {
@@ -6939,8 +7065,11 @@ static bool ensureExpandedTrain(MCTSTable& T,
     }
 
     if (!ok) {
-        std::cerr << "[ensureExpandedTrain] inferBatchGather failed for root key="
-            << rootPos.key << "\n";
+        {
+            std::ostringstream oss;
+            oss << "[ensureExpandedTrain] inferBatchGather failed for root key=" << rootPos.key;
+            diagLogLine(oss.str());
+        }
         T.abort.store(true, std::memory_order_release);
         return false; // pGuard will cleanup
     }
@@ -6958,8 +7087,11 @@ static bool ensureExpandedTrain(MCTSTable& T,
     }
 
     if (!ok) {
-        std::cerr << "[ensureExpandedTrain] inferBatch failed for root key="
-            << rootPos.key << "\n";
+        {
+            std::ostringstream oss;
+            oss << "[ensureExpandedTrain] inferBatch failed for root key=" << rootPos.key;
+            diagLogLine(oss.str());
+        }
         T.abort.store(true, std::memory_order_release);
         return false; // pGuard will cleanup
     }
@@ -8714,6 +8846,8 @@ static std::string fmtFixed(double x, int prec) {
 }
 
 void Training(int targetGames) {
+    diagLogLine("[Training] started, targetGames=" + std::to_string(targetGames));
+
     const std::string ptFile = "net.pt";
     const std::string emaFile = "net_ema.pt";
     const std::string planFile = "net.plan";
@@ -9158,88 +9292,102 @@ void Training(int targetGames) {
     }
 
     std::cout << "Тренировка успешно завершена! Файлы net.pt, net_ema.pt, optimizer.pt, trainer_state.bin и net.plan готовы.\n";
+    diagLogLine("[Training] finished normally");
 }
 
 
 
 int main() {
-    const std::string ptFile = "net.pt";
-    const std::string emaFile = "net_ema.pt";
-    const std::string planFile = "net.plan";
+    installCrashDiagnostics();
 
-    std::cout << "Enter fen:\n";
-    std::string fen;
-    std::getline(std::cin, fen);
+    try {
+        const std::string ptFile = "net.pt";
+        const std::string emaFile = "net_ema.pt";
+        const std::string planFile = "net.plan";
 
-    // IMPORTANT:
-    // Training initializes everything by itself.
-    // Do NOT init model/TRT in main before this branch.
-    if (fen == "-") {
-        Training(1000000);
+        std::cout << "Введите FEN (или '960' для случайной Chess960 позиции, '-' для Training):\n";
+        std::string fen;
+        std::getline(std::cin, fen);
+
+        if (fen == "-") {
+            diagLogLine("[main] entering Training()");
+            Training(1000000);
+            diagLogLine("[main] Training() finished normally");
+            return 0;
+        }
+
+        Net model;
+        Net emaModel;
+        initAllOrExit(model, emaModel, ptFile, emaFile, planFile);
+        if (!g_trtReady) {
+            diagLogLine("[main] TensorRT engine not ready");
+            std::cout << "TensorRT движок не загружен.\n";
+            return 1;
+        }
+
+        Position pos;
+        std::array<uint64_t, 4> path;
+        std::array<int, 64> mask;
+
+        if (fen == "960") chess960(pos, path, mask);
+        else              fenToPositionPathMask(fen, pos, path, mask);
+
+        std::cout << "slider_backend " << (g_usePext ? "pext" : "magics") << "\n";
+
+        MoveList ml;
+        int term = 0;
+        Position tmp = pos;
+        genLegal(tmp, path, mask, ml, term);
+
+        std::cout << "moves " << ml.n << "\n";
+        for (int i = 0; i < ml.n; ++i) {
+            int m = ml.m[i];
+            std::cout << sqName(m & 63) << sqName((m >> 6) & 63) << "\n";
+        }
+
+        float mctsEvalWhite = 0.5f;
+        std::vector<int> pvBeforeRoll;
+        std::vector<moveState> rootMoves;
+        mctsBatchedMT(pos, path, mask, 10.0, mctsEvalWhite, rootMoves, pvBeforeRoll);
+
+        float v = 0.5f;
+        std::vector<float> pol((size_t)POLICY_SIZE, 0.0f);
+
+        g_trt.inferBatch(&pos, 1, &v, pol.data());
+
+        std::cout << "eval=" << v << std::endl;
+        std::cout << "mcts_eval_white " << mctsEvalWhite << "\n";
+        for (size_t i = 0; i < pvBeforeRoll.size(); ++i) {
+            if (i) std::cout << ' ';
+            std::cout << moveToStr(pvBeforeRoll[i]);
+        }
+        std::cout << "\n";
+
+        std::cout << "root_moves " << rootMoves.size() << "\n";
+        for (auto& ms : rootMoves) {
+            std::cout << moveToStr(ms.move)
+                << " eval " << ms.eval
+                << " visits " << ms.visits
+                << " prior " << ms.prior << "\n";
+        }
+
+        cin.get();
+
+        {
+            std::lock_guard<std::mutex> lk(g_trtMutex);
+            g_trt.shutdown();
+            g_trtReady = false;
+        }
+
+        diagLogLine("[main] finished normally");
         return 0;
     }
-
-    Net model;
-    Net emaModel;
-    initAllOrExit(model, emaModel, ptFile, emaFile, planFile);
-    if (!g_trtReady) {
-        std::cout << "TensorRT not load.\n";
+    catch (const std::exception& e) {
+        diagLogLine(std::string("[main] fatal std::exception: ") + e.what());
         return 1;
     }
-
-    Position pos;
-    std::array<uint64_t, 4> path;
-    std::array<int, 64> mask;
-
-    if (fen == "960") chess960(pos, path, mask);
-    else              fenToPositionPathMask(fen, pos, path, mask);
-
-    std::cout << "slider_backend " << (g_usePext ? "pext" : "magics") << "\n";
-
-    MoveList ml;
-    int term = 0;
-    Position tmp = pos;
-    genLegal(tmp, path, mask, ml, term);
-
-    std::cout << "moves " << ml.n << "\n";
-    for (int i = 0; i < ml.n; ++i) {
-        int m = ml.m[i];
-        std::cout << sqName(m & 63) << sqName((m >> 6) & 63) << "\n";
+    catch (...) {
+        diagLogLine("[main] fatal unknown exception");
+        return 1;
     }
-
-    float mctsEvalWhite = 0.5f;
-    std::vector<int> pvBeforeRoll;
-    std::vector<moveState> rootMoves;
-    mctsBatchedMT(pos, path, mask, 10.0, mctsEvalWhite, rootMoves, pvBeforeRoll);
-
-    float v = 0.5f;
-    std::vector<float> pol((size_t)POLICY_SIZE, 0.0f);
-
-    g_trt.inferBatch(&pos, 1, &v, pol.data());
-
-    std::cout << "eval=" << v << std::endl;
-    std::cout << "mcts_eval_white " << mctsEvalWhite << "\n";
-    for (size_t i = 0; i < pvBeforeRoll.size(); ++i) {
-        if (i) std::cout << ' ';
-        std::cout << moveToStr(pvBeforeRoll[i]);
-    }
-    std::cout << "\n";
-    std::cout << "root_moves " << rootMoves.size() << "\n";
-    for (auto& ms : rootMoves) {
-        std::cout << moveToStr(ms.move)
-            << " eval " << ms.eval
-            << " visits " << ms.visits
-            << " prior " << ms.prior << "\n";
-    }
-
-    cin.get();
-
-    // optional clean shutdown
-    {
-        std::lock_guard<std::mutex> lk(g_trtMutex);
-        g_trt.shutdown();
-        g_trtReady = false;
-    }
-
-    return 0;
 }
