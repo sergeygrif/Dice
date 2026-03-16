@@ -9183,7 +9183,7 @@ int main() {
     const std::string emaFile = "net_ema.pt";
     const std::string planFile = "net.plan";
 
-    std::cout << "Введите FEN (или '960' для случайной Chess960 позиции, '-' для Training):\n";
+    std::cout << "Enter fen:\n";
     std::string fen;
     std::getline(std::cin, fen);
 
@@ -9199,7 +9199,7 @@ int main() {
     Net emaModel;
     initAllOrExit(model, emaModel, ptFile, emaFile, planFile);
     if (!g_trtReady) {
-        std::cout << "TensorRT движок не загружен.\n";
+        std::cout << "TensorRT not load.\n";
         return 1;
     }
 
