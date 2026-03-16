@@ -7265,8 +7265,8 @@ static ArenaStats runArenaMatch(int games, int simsPerPos) {
 
         if (((g + 1) % 50) == 0) {
             std::cout << "[arena] pair " << (g + 1) << "/" << pairs
-                << "  W/D/L = "
-                << st.curWins << "/" << st.draws << "/" << st.oldWins
+                << "  W/L = "
+                << st.curWins << "/" << st.oldWins
                 << "  score=" << st.currentScore() << "\n";
         }
     }
@@ -7795,12 +7795,9 @@ struct Trainer {
             (warmupStepsAfterRestart > 0 &&
                 steps == resumeStartStep + warmupStepsAfterRestart);
 
-        if (forceLog || changed || restartWarmupJustFinished) {
-            std::cerr << "[Trainer] LR=" << current_lr
-                << " (cosine=" << cosine_lr
-                << ", restart_x=" << restart_mult
-                << ", step=" << steps << ")\n";
-        }
+        (void)forceLog;
+        (void)changed;
+        (void)restartWarmupJustFinished;
     }
     static AI_FORCEINLINE bool endsWithStr(const std::string& s, const char* suf) {
         const size_t n = std::strlen(suf);
@@ -7878,8 +7875,6 @@ struct Trainer {
         scaler.minScale = 1.0f;
         lastAmpScale = scaler.scale;
 
-        std::cerr << "[Trainer] device=" << (useCuda ? "cuda" : "cpu")
-            << " amp=" << (useAmp ? "fp16" : "off") << "\n";
 
         {
             std::lock_guard<std::mutex> lk(g_modelMutex);
@@ -7949,8 +7944,8 @@ struct Trainer {
             opt->add_param_group(std::move(g));
         }
 
-        std::cerr << "[Trainer] AdamW groups: decay=" << decayCount
-            << " no_decay=" << noDecayCount << "\n";
+        (void)decayCount;
+        (void)noDecayCount;
 
         resumeStartStep = steps;
         current_lr = -1.0;
@@ -8224,22 +8219,10 @@ struct Trainer {
                 ++skippedConsecutive;
                 ++skippedTotal;
 
-                if (skippedConsecutive == 1 ||
-                    skippedConsecutive == 8 ||
-                    skippedConsecutive == 32) {
-                    std::cerr << "[Trainer] skipped batch"
-                        << " consec=" << skippedConsecutive
-                        << " total=" << skippedTotal
-                        << " ampScale=" << lastAmpScale
-                        << "\n";
-                }
+                (void)lastAmpScale;
 
                 if (skippedConsecutive >= MAX_SKIPPED_CONSECUTIVE ||
                     skippedTotal >= MAX_SKIPPED_TOTAL) {
-                    std::cerr << "[Trainer] too many skipped batches, stopping train block"
-                        << " consec=" << skippedConsecutive
-                        << " total=" << skippedTotal
-                        << "\n";
                     break;
                 }
             }
@@ -8749,16 +8732,16 @@ void Training(int targetGames) {
     Trainer trainer;
 
     if (loadTrainerState(trainerStateFile, trainer)) {
-        std::cerr << "[Trainer] restored steps=" << trainer.steps << "\n";
+        std::cerr << "restored steps=" << trainer.steps << "\n";
     }
     else {
-        std::cerr << "[Trainer] no trainer_state found, starting from step 0.\n";
+        std::cerr << "no trainer_state found, starting from step 0.\n";
     }
 
     trainer.init(model, emaModel);
 
     if (loadOptimizerState(optFile, trainer)) {
-        std::cerr << "[Trainer] optimizer state restored.\n";
+        std::cerr << "optimizer state restored.\n";
 
         // После restore optimizer ещё раз принудительно выставим LR по scheduler'у
         trainer.current_lr = -1.0;
@@ -8766,11 +8749,11 @@ void Training(int targetGames) {
     }
     else {
         if (trainer.steps != 0) {
-            std::cerr << "[Trainer] warning: steps restored, but optimizer state not found/failed to load. "
+            std::cerr << "warning: steps restored, but optimizer state not found/failed to load. "
                 "Optimizer starts fresh.\n";
         }
         else {
-            std::cerr << "[Trainer] no optimizer state found, starting fresh.\n";
+            std::cerr << "no optimizer state found, starting fresh.\n";
         }
     }
 
@@ -8857,7 +8840,7 @@ void Training(int targetGames) {
     uint64_t statPlyWindow = 0;
     uint64_t statTruncatedWindow = 0;
     auto statWindowStart = std::chrono::steady_clock::now();
-    int nextArenaAt = 10000;
+    int nextArenaAt = 50000;
 
     std::cout << "Начинаем тренировку на " << targetGames << " партий...\n";
 
@@ -8977,8 +8960,8 @@ void Training(int targetGames) {
 
                 ArenaStats ar = runArenaMatch(/*games=*/1000, /*simsPerPos=*/200);
 
-                std::cout << "[arena] done: W/D/L = "
-                    << ar.curWins << "/" << ar.draws << "/" << ar.oldWins
+                std::cout << "[arena] done: W/L = "
+                    << ar.curWins << "/" << ar.oldWins
                     << "  score=" << ar.currentScore() << "\n";
 
                 // promotion rule: если current > old, old := current
@@ -9007,7 +8990,7 @@ void Training(int targetGames) {
             statWindowStart = std::chrono::steady_clock::now();
 
             // Даже если arena setup failed, не зацикливаемся на том же пороге.
-            nextArenaAt += 10000;
+            nextArenaAt += 50000;
 
             if (!arenaOk) {
                 break;
@@ -9061,6 +9044,7 @@ void Training(int targetGames) {
             std::cout
                 << "Games: " << games
                 << " | Replay: " << fmtCompactU64((uint64_t)rb.currentSize())
+                << " | Step: " << trainer.steps
                 << " | LR: " << fmtFixed(trainer.current_lr, 4)
                 << " | Loss: " << fmtFixed(trainer.lastLoss, 2)
                 << " (P: " << fmtFixed(trainer.lastLossP, 2)
