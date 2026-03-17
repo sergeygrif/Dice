@@ -3344,8 +3344,8 @@ static AI_FORCEINLINE void cpuRelax() {
 // -------------------------------
 // Time-based backoff wait helpers
 // -------------------------------
-static constexpr int64_t AI_LOCK_WAIT_US = 2000;   // 2ms (как было)
-static constexpr int64_t AI_EXPAND_WAIT_US = 100000;
+static constexpr int64_t AI_LOCK_WAIT_US = 20000;
+static constexpr int64_t AI_EXPAND_WAIT_US = 1000000;
 static constexpr int64_t AI_SUBMIT_WAIT_US = 200;  // short timed wait for cancelable submit
 
 static AI_FORCEINLINE void backoffWait(int& spins) {
@@ -4931,6 +4931,10 @@ struct SimDiag {
     uint32_t depth = 0;
 };
 
+static std::atomic<uint64_t> g_failGetNode{ 0 };
+static std::atomic<uint64_t> g_failExpandWait{ 0 };
+static std::atomic<uint64_t> g_failDepth{ 0 };
+
 static bool runOneSim(MCTSTable& T,
     const Position& rootPos,
     const std::array<uint64_t, 4>& path,
@@ -4956,12 +4960,14 @@ static bool runOneSim(MCTSTable& T,
 
         // Depth guard
         if (tr.n >= MCTS_MAX_DEPTH - 2) {
+            g_failDepth.fetch_add(1, std::memory_order_relaxed);
             rollbackVirtualLoss(tr);
             return false;
         }
 
         TTNode* node = T.getNode(pos.key);
         if (!node) {
+            g_failGetNode.fetch_add(1, std::memory_order_relaxed);
             rollbackVirtualLoss(tr);
             return false;
         }
@@ -4976,6 +4982,7 @@ static bool runOneSim(MCTSTable& T,
         // Someone else expanding
         if (ex == 2) {
             if (!waitWhileExpanding(node)) {
+                g_failExpandWait.fetch_add(1, std::memory_order_relaxed);
                 rollbackVirtualLoss(tr);
                 return false;
             }
@@ -6033,6 +6040,14 @@ struct UnifiedInferenceServerTrain : ITrainInferenceServer {
         if (th.joinable()) th.join();
     }
 
+    ~UnifiedInferenceServerTrain() override {
+        try {
+            requestStop();
+            join();
+        }
+        catch (...) {}
+    }
+
     int size() const override {
         return qSize.load(std::memory_order_relaxed);
     }
@@ -6443,6 +6458,7 @@ struct SearchPool {
     int jobId = 0;
     std::atomic<int> workersBusy{ 0 };
     std::atomic<int> simsLeft{ 0 };
+    std::atomic<uint64_t> activityTick{ 0 };
     std::atomic<uint64_t> progressTick{ 0 };
     std::atomic<uint64_t> statSimsOk{ 0 };
     std::atomic<uint64_t> statSimsFail{ 0 };
@@ -6450,7 +6466,15 @@ struct SearchPool {
     std::atomic<uint64_t> statTTMiss{ 0 };
     std::atomic<uint64_t> statDepthSum{ 0 };
 
+    AI_FORCEINLINE void noteActivity() {
+        const uint64_t t = activityTick.fetch_add(1, std::memory_order_relaxed) + 1ull;
+        if ((t & 31ull) == 0ull) {
+            cvProgress.notify_one();
+        }
+    }
+
     AI_FORCEINLINE void noteProgress() {
+        noteActivity();
         const uint64_t t = progressTick.fetch_add(1, std::memory_order_relaxed) + 1ull;
 
         if ((t & 31ull) == 0ull) {
@@ -6505,6 +6529,7 @@ struct SearchPool {
         fatal.store(false, std::memory_order_relaxed);
         workersBusy.store(0, std::memory_order_relaxed);
         simsLeft.store(0, std::memory_order_relaxed);
+        activityTick.store(0, std::memory_order_relaxed);
         progressTick.store(0, std::memory_order_relaxed);
         statSimsOk.store(0, std::memory_order_relaxed);
         statSimsFail.store(0, std::memory_order_relaxed);
@@ -6572,6 +6597,14 @@ struct SearchPool {
             if (th.joinable()) th.join();
         }
         pool.clear();
+
+        workersBusy.store(0, std::memory_order_relaxed);
+        simsLeft.store(0, std::memory_order_relaxed);
+    }
+
+    ~SearchPool() {
+        try { shutdown(); }
+        catch (...) {}
     }
 
     bool isFatal() const {
@@ -6696,6 +6729,7 @@ struct SearchPool {
         static constexpr auto WATCHDOG_FATAL_AFTER = std::chrono::seconds(30);
 
         uint64_t lastTick = progressTick.load(std::memory_order_relaxed);
+        uint64_t lastActivity = activityTick.load(std::memory_order_relaxed);
         int lastSimsLeft = simsLeft.load(std::memory_order_relaxed);
         int lastQSize = server.size();
         int lastInFlight = g_inferInFlight.load(std::memory_order_relaxed);
@@ -6717,6 +6751,7 @@ struct SearchPool {
                 cvProgress.wait_for(lk, WATCHDOG_WAIT_SLICE, [&] {
                     return isFatal() ||
                         workersBusy.load(std::memory_order_relaxed) == 0 ||
+                        activityTick.load(std::memory_order_relaxed) != lastActivity ||
                         progressTick.load(std::memory_order_relaxed) != lastTick ||
                         simsLeft.load(std::memory_order_relaxed) != lastSimsLeft ||
                         server.size() != lastQSize ||
@@ -6740,17 +6775,20 @@ struct SearchPool {
             const auto now = Clock::now();
 
             const uint64_t tickNow = progressTick.load(std::memory_order_relaxed);
+            const uint64_t activityNow = activityTick.load(std::memory_order_relaxed);
             const int simsNow = simsLeft.load(std::memory_order_relaxed);
             const int qNow = server.size();
             const int inFlightNow = g_inferInFlight.load(std::memory_order_relaxed);
 
             const bool progressed =
+                (activityNow != lastActivity) ||
                 (tickNow != lastTick) ||
                 (simsNow != lastSimsLeft) ||
                 (qNow != lastQSize) ||
                 (inFlightNow != lastInFlight);
 
             if (progressed) {
+                lastActivity = activityNow;
                 lastTick = tickNow;
                 lastSimsLeft = simsNow;
                 lastQSize = qNow;
@@ -6769,6 +6807,11 @@ struct SearchPool {
                         << " simsLeft=" << simsNow
                         << " nnQueue=" << qNow
                         << " inferInFlight=" << inFlightNow
+                        << " activityTick=" << activityNow
+                        << " progressTick=" << tickNow
+                        << " failGetNode=" << g_failGetNode.load(std::memory_order_relaxed)
+                        << " failExpandWait=" << g_failExpandWait.load(std::memory_order_relaxed)
+                        << " failDepth=" << g_failDepth.load(std::memory_order_relaxed)
                         << " ttAbort=" << TT.abort.load(std::memory_order_relaxed);
                     failFast(oss.str(), &TT);
                 }
@@ -6784,6 +6827,11 @@ struct SearchPool {
                         << " simsLeft=" << simsNow
                         << " nnQueue=" << qNow
                         << " inferInFlight=" << inFlightNow
+                        << " activityTick=" << activityNow
+                        << " progressTick=" << tickNow
+                        << " failGetNode=" << g_failGetNode.load(std::memory_order_relaxed)
+                        << " failExpandWait=" << g_failExpandWait.load(std::memory_order_relaxed)
+                        << " failDepth=" << g_failDepth.load(std::memory_order_relaxed)
                         << " ttAbort=" << TT.abort.load(std::memory_order_relaxed)
                         << "\n";
                 }
@@ -6875,6 +6923,7 @@ private:
 
                     if (!ok) {
                         statSimsFail.fetch_add(1, std::memory_order_relaxed);
+                        noteActivity();
                         refundSimBudget(simsLeft);
 
                         if (fatal.load(std::memory_order_relaxed)) break;
@@ -6913,6 +6962,7 @@ private:
                         waitGroupAdd(wg);
 
                         if (!server->submit(std::move(p), &cancelJob, &TT->abort)) {
+                            noteActivity();
                             if (!fatal.load(std::memory_order_relaxed) &&
                                 !cancelJob.load(std::memory_order_relaxed) &&
                                 !TT->abort.load(std::memory_order_relaxed)) {
@@ -7256,6 +7306,11 @@ struct GameContext {
     void resetForNewGame() {
         resetMCTSTableForNewGame(T);
     }
+
+    ~GameContext() {
+        try { stop(); }
+        catch (...) {}
+    }
 };
 
 struct SelfPlayContext {
@@ -7288,6 +7343,11 @@ struct SelfPlayContext {
         server.waitIdle();
         server.clearQueueUnsafeWhenIdle();
         resetMCTSTableForNewGame(T);
+    }
+
+    ~SelfPlayContext() {
+        try { stop(); }
+        catch (...) {}
     }
 };
 
@@ -8928,6 +8988,30 @@ void Training(int targetGames) {
 
     std::vector<std::unique_ptr<GameContext>> gamesCtx;
     gamesCtx.reserve(PARALLEL_GAMES);
+
+    struct TrainingCleanupGuard {
+        std::vector<std::unique_ptr<GameContext>>* games = nullptr;
+        SharedInferenceServerTrain* sharedSrv = nullptr;
+
+        ~TrainingCleanupGuard() noexcept {
+            try {
+                if (games) {
+                    for (auto& g : *games) {
+                        if (g) g->stop();
+                    }
+                }
+            }
+            catch (...) {}
+
+            try {
+                if (sharedSrv) {
+                    sharedSrv->requestStop();
+                    sharedSrv->join();
+                }
+            }
+            catch (...) {}
+        }
+    } cleanupGuard{ &gamesCtx, &sharedSrv };
 
     for (unsigned i = 0; i < PARALLEL_GAMES; ++i) {
         auto g = std::make_unique<GameContext>(SP_NODE_POW2, SP_EDGE_CAP);
