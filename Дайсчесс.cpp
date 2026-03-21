@@ -648,24 +648,21 @@ static constexpr int NN_PIECE_PLANES = 12;
 static constexpr int NN_EP1_PLANES = 2;
 static constexpr int NN_EP2_PLANES = 1;
 static constexpr int NN_CASTLE_PLANES = 4;
-static constexpr int NN_DICE_PLANES = 6;
+static constexpr int NN_DICE_PLANES = 18;
+static constexpr int LEGACY_NN_DICE_PLANES = 6;
 
-static constexpr int NN_SQ_PLANES = NN_PIECE_PLANES + NN_EP1_PLANES + NN_EP2_PLANES + NN_CASTLE_PLANES + NN_DICE_PLANES; // 25
-static constexpr int NN_INPUT_SIZE = NN_SQ_PLANES * 64; // 1600
+static constexpr int NN_SQ_PLANES = NN_PIECE_PLANES + NN_EP1_PLANES + NN_EP2_PLANES + NN_CASTLE_PLANES + NN_DICE_PLANES; // 37
+static constexpr int LEGACY_NN_SQ_PLANES = NN_PIECE_PLANES + NN_EP1_PLANES + NN_EP2_PLANES + NN_CASTLE_PLANES + LEGACY_NN_DICE_PLANES; // 25
+static constexpr int NN_INPUT_SIZE = NN_SQ_PLANES * 64; // 2368
 
 using NNInput = array<float, NN_INPUT_SIZE>;
 
 alignas(64) static array<float, 64> NN_PLANE0;
 alignas(64) static array<float, 64> NN_PLANE1;
-alignas(64) static array<array<float, 64>, 4> NN_DICEPLANE;
 
 static void initNNConstPlanes() {
     NN_PLANE0.fill(0.0f);
     NN_PLANE1.fill(1.0f);
-    for (int c = 0; c <= 3; ++c) {
-        float v = float(c) * (1.0f / 3.0f);
-        NN_DICEPLANE[c].fill(v);
-    }
 }
 
 static AI_FORCEINLINE void copyPlane(NNInput& out, int plane, const float* src64) {
@@ -784,7 +781,9 @@ static AI_FORCEINLINE void positionToNNInput(const Position& pos, NNInput& out) 
         const int d = pos.dice;
         for (int pt = 0; pt < 6; ++pt) {
             const int cnt = dicePiece[d][pt];
-            copyPlane(out, 19 + pt, NN_DICEPLANE[cnt].data());
+            for (int lvl = 0; lvl < 3; ++lvl) {
+                copyPlane(out, 19 + pt * 3 + lvl, (cnt > lvl) ? NN_PLANE1.data() : NN_PLANE0.data());
+            }
         }
     }
 }
@@ -5413,6 +5412,49 @@ struct ResBlockImpl final : torch::nn::Module {
 };
 TORCH_MODULE(ResBlock);
 
+struct LegacyNetImpl final : torch::nn::Module {
+    torch::nn::Conv2d stem{ nullptr };
+    torch::nn::BatchNorm2d stemBn{ nullptr };
+    torch::nn::ModuleList blocks;
+
+    torch::nn::Conv2d polConv1{ nullptr };
+    torch::nn::BatchNorm2d polBn1{ nullptr };
+    torch::nn::Conv2d polConv2{ nullptr };
+
+    torch::nn::Conv2d valConv1{ nullptr };
+    torch::nn::BatchNorm2d valBn1{ nullptr };
+    torch::nn::Linear valFC1{ nullptr };
+    torch::nn::Linear valFC2{ nullptr };
+
+    LegacyNetImpl() {
+        stem = register_module("stem",
+            torch::nn::Conv2d(torch::nn::Conv2dOptions(LEGACY_NN_SQ_PLANES, NET_CHANNELS, 3).padding(1).bias(false)));
+        stemBn = register_module("stemBn",
+            torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(NET_CHANNELS).eps(AI_BN_EPS)));
+
+        blocks = register_module("blocks", torch::nn::ModuleList());
+        for (int i = 0; i < NET_BLOCKS; ++i) blocks->push_back(ResBlock(NET_CHANNELS));
+
+        polConv1 = register_module("polConv1",
+            torch::nn::Conv2d(torch::nn::Conv2dOptions(NET_CHANNELS, HEAD_POLICY_C, 1).padding(0).bias(false)));
+        polBn1 = register_module("polBn1",
+            torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(HEAD_POLICY_C).eps(AI_BN_EPS)));
+        polConv2 = register_module("polConv2",
+            torch::nn::Conv2d(torch::nn::Conv2dOptions(HEAD_POLICY_C, POLICY_P, 1).padding(0).bias(true)));
+
+        valConv1 = register_module("valConv1",
+            torch::nn::Conv2d(torch::nn::Conv2dOptions(NET_CHANNELS, HEAD_VALUE_C, 1).padding(0).bias(false)));
+        valBn1 = register_module("valBn1",
+            torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(HEAD_VALUE_C).eps(AI_BN_EPS)));
+
+        valFC1 = register_module("valFC1",
+            torch::nn::Linear(torch::nn::LinearOptions(HEAD_VALUE_C * 64, HEAD_VALUE_FC).bias(true)));
+        valFC2 = register_module("valFC2",
+            torch::nn::Linear(torch::nn::LinearOptions(HEAD_VALUE_FC, 1).bias(true)));
+    }
+};
+TORCH_MODULE(LegacyNet);
+
 struct NetImpl final : torch::nn::Module {
     torch::nn::Conv2d stem{ nullptr };
     torch::nn::BatchNorm2d stemBn{ nullptr };
@@ -8535,6 +8577,35 @@ static bool loadTrainerState(const std::string& stateFile, Trainer& trainer) {
     trainer.steps = s.steps;
     return true;
 }
+
+template <typename DstModule, typename SrcModule>
+static void copyCompatibleModuleState(DstModule& dst, SrcModule& src) {
+    torch::NoGradGuard ng;
+
+    auto dstParams = dst->named_parameters(true);
+    auto srcParams = src->named_parameters(true);
+    for (const auto& item : srcParams) {
+        if (auto* dstTensor = dstParams.find(item.key())) {
+            if (dstTensor->sizes() == item.value().sizes()) {
+                dstTensor->copy_(item.value());
+            }
+        }
+    }
+
+    auto dstBuffers = dst->named_buffers(true);
+    auto srcBuffers = src->named_buffers(true);
+    for (const auto& item : srcBuffers) {
+        if (auto* dstTensor = dstBuffers.find(item.key())) {
+            if (dstTensor->sizes() == item.value().sizes()) {
+                dstTensor->copy_(item.value());
+            }
+        }
+    }
+
+    if (src->is_training()) dst->train();
+    else                    dst->eval();
+}
+
 static bool loadOrCreateTorchModel(const std::string& ptFile, Net& model) {
     if (fileExists(ptFile)) {
         try {
@@ -8546,15 +8617,60 @@ static bool loadOrCreateTorchModel(const std::string& ptFile, Net& model) {
             return false;
         }
     }
-    else {
+
+    const std::string oldPtFile = "old.pt";
+    if (fileExists(oldPtFile)) {
         try {
+            LegacyNet oldModel;
+            torch::load(oldModel, oldPtFile);
+            copyCompatibleModuleState(model, oldModel);
+
+            torch::NoGradGuard ng;
+            auto oldStem = oldModel->stem->weight.detach().cpu();
+            auto newStem = model->stem->weight.detach().cpu().clone();
+
+            if (oldStem.dim() != 4 || newStem.dim() != 4) {
+                throw std::runtime_error("stem weight tensor must be 4D");
+            }
+
+            const int64_t oldInPlanes = oldStem.size(1);
+            const int64_t newInPlanes = newStem.size(1);
+            const int64_t oldExpected = LEGACY_NN_SQ_PLANES;
+            const int64_t newExpected = NN_SQ_PLANES;
+            if (oldInPlanes != oldExpected || newInPlanes != newExpected) {
+                throw std::runtime_error(
+                    "unexpected stem input planes in old.pt migration: old=" + std::to_string(oldInPlanes) +
+                    ", new=" + std::to_string(newInPlanes));
+            }
+
+            newStem.zero_();
+            newStem.slice(1, 0, 19).copy_(oldStem.slice(1, 0, 19));
+            for (int pt = 0; pt < 6; ++pt) {
+                auto oldPlane = oldStem.slice(1, 19 + pt, 20 + pt);
+                for (int lvl = 0; lvl < 3; ++lvl) {
+                    newStem.slice(1, 19 + pt * 3 + lvl, 20 + pt * 3 + lvl).copy_(oldPlane / 3.0);
+                }
+            }
+
+            model->stem->weight.set_data(newStem.to(model->stem->weight.device(), model->stem->weight.scalar_type()));
             torch::save(model, ptFile);
+            std::cerr << "Migrated weights from " << oldPtFile << " to " << ptFile
+                << " (6 dice planes -> 18 dice planes).\n";
             return true;
         }
         catch (const std::exception& e) {
-            std::cerr << "torch::save (create) failed: " << e.what() << "\n";
+            std::cerr << "old.pt migration failed: " << e.what() << "\n";
             return false;
         }
+    }
+
+    try {
+        torch::save(model, ptFile);
+        return true;
+    }
+    catch (const std::exception& e) {
+        std::cerr << "torch::save (create) failed: " << e.what() << "\n";
+        return false;
     }
 }
 
