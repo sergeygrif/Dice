@@ -3164,15 +3164,15 @@ struct TrtRunner {
             shutdown();
         }
 
-        std::cout << "Файл TensorRT плана '" << planFile << "' не найден/не грузится — собираю движок...\n";
+        std::cout << "TensorRT plan file '" << planFile << "' was not found or could not be loaded — building engine...\n";
         if (!buildAndSavePlan(planFile)) {
-            std::cerr << "Не удалось собрать и сохранить TensorRT plan '" << planFile << "'.\n";
+            std::cerr << "Failed to build and save TensorRT plan '" << planFile << "'.\n";
             return false;
         }
-        std::cout << "Собран и сохранён '" << planFile << "'. Загружаю...\n";
+        std::cout << "Built and saved '" << planFile << "'. Loading...\n";
 
         if (!initFromPlan(planFile)) {
-            std::cerr << "Не удалось загрузить TensorRT plan после сборки.\n";
+            std::cerr << "Failed to load TensorRT plan after building.\n";
             shutdown();
             return false;
         }
@@ -8781,19 +8781,19 @@ static void initAllOrExit(Net& model,
     else          initSlidersMagics();
 
     if (!loadOrCreateTorchModel(ptFile, model)) {
-        std::cerr << "Не удалось загрузить/создать " << ptFile << "\n";
+        std::cerr << "Failed to load/create " << ptFile << "\n";
         std::exit(1);
     }
 
     if (!loadOrCreateEmaModel(emaFile, emaModel, model)) {
-        std::cerr << "Не удалось загрузить/создать " << emaFile << "\n";
+        std::cerr << "Failed to load/create " << emaFile << "\n";
         std::exit(1);
     }
 
     {
         std::lock_guard<std::mutex> lk(g_trtMutex);
         if (!g_trt.initOrCreate(planFile)) {
-            std::cerr << "TensorRT: не удалось инициализировать движок.\n";
+            std::cerr << "TensorRT: failed to initialize engine.\n";
             std::exit(1);
         }
         g_trtReady = true;
@@ -9179,7 +9179,7 @@ void Training(int targetGames) {
     auto statWindowStart = std::chrono::steady_clock::now();
     int nextArenaAt = 50000;
 
-    std::cout << "Начинаем тренировку на " << targetGames << " партий...\n";
+    std::cout << "Starting training for " << targetGames << " games...\n";
 
     while (games < targetGames) {
         // ===========================
@@ -9347,7 +9347,7 @@ void Training(int targetGames) {
 
             saveAll(ptFile, emaFile, planFile, optFile, trainerStateFile, model, emaModel, trainer);
 
-            std::cout << "[autosave] Прогресс: " << games << " / " << targetGames << " партий.\n";
+            std::cout << "[autosave] Progress: " << games << " / " << targetGames << " games.\n";
         }
 
         if (now >= nextStat) {
@@ -9420,7 +9420,7 @@ void Training(int targetGames) {
     sharedSrv.requestStop();
     sharedSrv.join();
 
-    std::cout << "\n[Завершение] Собрано " << targetGames << " партий. Сохранение финальных весов...\n";
+    std::cout << "\n[Completion] Collected " << targetGames << " games. Saving final weights...\n";
     {
         std::lock_guard<std::mutex> lk(g_modelMutex);
 
@@ -9447,7 +9447,7 @@ void Training(int targetGames) {
         }
     }
 
-    std::cout << "[Завершение] Запуск финальной пересборки TensorRT (Rebuild). Это займет пару минут...\n";
+    std::cout << "[Completion] Starting final TensorRT rebuild. This will take a couple of minutes...\n";
 
     // 1) shutdown + remove old plan
     {
@@ -9467,7 +9467,7 @@ void Training(int targetGames) {
     }
 
     if (!okInit) {
-        std::cerr << "[Завершение] FATAL ERROR: Не удалось пересобрать финальный net.plan!\n";
+        std::cerr << "[Completion] FATAL ERROR: Failed to rebuild the final net.plan!\n";
     }
     else {
         // 3) refit from final torch model and save final plan
@@ -9494,7 +9494,7 @@ void Training(int targetGames) {
         g_trtOldReady = false;
     }
 
-    std::cout << "Тренировка успешно завершена! Файлы net.pt, net_ema.pt, optimizer.pt, trainer_state.bin и net.plan готовы.\n";
+    std::cout << "Training completed successfully! Files net.pt, net_ema.pt, optimizer.pt, trainer_state.bin, and net.plan are ready.\n";
     diagLogLine("[Training] finished normally");
 }
 
@@ -9508,7 +9508,7 @@ int main() {
         const std::string emaFile = "net_ema.pt";
         const std::string planFile = "net.plan";
 
-        std::cout << "Введите FEN (или '960' для случайной Chess960 позиции, '-' для Training):\n";
+        std::cout << "Enter FEN (or '960' for a random Chess960 position, '-' for Training):\n";
         std::string fen;
         std::getline(std::cin, fen);
 
@@ -9524,7 +9524,7 @@ int main() {
         initAllOrExit(model, emaModel, ptFile, emaFile, planFile);
         if (!g_trtReady) {
             diagLogLine("[main] TensorRT engine not ready");
-            std::cout << "TensorRT движок не загружен.\n";
+            std::cout << "TensorRT engine is not loaded.\n";
             return 1;
         }
 
