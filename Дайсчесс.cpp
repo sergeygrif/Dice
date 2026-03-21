@@ -648,22 +648,24 @@ static constexpr int NN_PIECE_PLANES = 12;
 static constexpr int NN_EP1_PLANES = 2;
 static constexpr int NN_EP2_PLANES = 1;
 static constexpr int NN_CASTLE_PLANES = 4;
-static constexpr int NN_DICE_PLANES_PER_PIECE = 3;
-static constexpr int NN_DICE_PLANES = 6 * NN_DICE_PLANES_PER_PIECE;
+static constexpr int NN_DICE_PLANES = 6;
 
-static constexpr int NN_SQ_PLANES = NN_PIECE_PLANES + NN_EP1_PLANES + NN_EP2_PLANES + NN_CASTLE_PLANES + NN_DICE_PLANES; // 37
-static constexpr int NN_INPUT_SIZE = NN_SQ_PLANES * 64; // 2368
+static constexpr int NN_SQ_PLANES = NN_PIECE_PLANES + NN_EP1_PLANES + NN_EP2_PLANES + NN_CASTLE_PLANES + NN_DICE_PLANES; // 25
+static constexpr int NN_INPUT_SIZE = NN_SQ_PLANES * 64; // 1600
 
 using NNInput = array<float, NN_INPUT_SIZE>;
 
 alignas(64) static array<float, 64> NN_PLANE0;
 alignas(64) static array<float, 64> NN_PLANE1;
-alignas(64) static array<array<float, 64>, NN_DICE_PLANES_PER_PIECE> NN_DICEPLANE;
+alignas(64) static array<array<float, 64>, 4> NN_DICEPLANE;
 
 static void initNNConstPlanes() {
     NN_PLANE0.fill(0.0f);
     NN_PLANE1.fill(1.0f);
-    for (auto& plane : NN_DICEPLANE) plane.fill(1.0f);
+    for (int c = 0; c <= 3; ++c) {
+        float v = float(c) * (1.0f / 3.0f);
+        NN_DICEPLANE[c].fill(v);
+    }
 }
 
 static AI_FORCEINLINE void copyPlane(NNInput& out, int plane, const float* src64) {
@@ -782,10 +784,7 @@ static AI_FORCEINLINE void positionToNNInput(const Position& pos, NNInput& out) 
         const int d = pos.dice;
         for (int pt = 0; pt < 6; ++pt) {
             const int cnt = dicePiece[d][pt];
-            for (int plane = 0; plane < NN_DICE_PLANES_PER_PIECE; ++plane) {
-                copyPlane(out, 19 + pt * NN_DICE_PLANES_PER_PIECE + plane,
-                    (cnt == plane + 1) ? NN_DICEPLANE[plane].data() : NN_PLANE0.data());
-            }
+            copyPlane(out, 19 + pt, NN_DICEPLANE[cnt].data());
         }
     }
 }
@@ -2857,7 +2856,7 @@ struct TrtRunner {
 
     cudaStream_t stream = nullptr;
 
-    void* dInput = nullptr;  // [256,37,8,8] float
+    void* dInput = nullptr;  // [256,25,8,8] float
     void* dPolicy = nullptr;  // [256,73,8,8] float
     void* dValue = nullptr;  // [256,1] float
     // Aux streams for TensorRT (needed for stable CUDA Graph capture when engine uses aux streams)
@@ -2872,7 +2871,7 @@ struct TrtRunner {
     int currentShapeB = -1;
 
     // Pinned host buffers
-    float* hInputPinned = nullptr; // 256 * NN_INPUT_SIZE
+    float* hInputPinned = nullptr; // 256 * 1600
 
     // Full-policy pinned (kept for debug / compatibility)
     float* hPolicyPinned = nullptr; // 256 * 4672 (CHW)
@@ -2920,7 +2919,7 @@ struct TrtRunner {
         if (currentShapeB == B) return true;
 
         if (!ctx->setInputShape("input", nvinfer1::Dims4{ B, NN_SQ_PLANES, 8, 8 })) {
-            std::cerr << "TensorRT: setInputShape(" << B << "," << NN_SQ_PLANES << ",8,8) failed.\n";
+            std::cerr << "TensorRT: setInputShape(" << B << ",25,8,8) failed.\n";
             return false;
         }
         currentShapeB = B;
@@ -8548,72 +8547,6 @@ static bool loadOrCreateTorchModel(const std::string& ptFile, Net& model) {
         }
     }
     else {
-        const std::string oldPtFile = "old.pt";
-        if (fileExists(oldPtFile)) {
-            try {
-                torch::serialize::InputArchive ar;
-                ar.load_from(oldPtFile);
-
-                auto params = model->named_parameters(/*recurse=*/true);
-                for (auto& kv : params) {
-                    const std::string name = kv.key();
-                    if (name == "stem.weight") continue;
-                    torch::Tensor t;
-                    ar.read(name, t);
-                    kv.value().copy_(t);
-                }
-
-                auto buffers = model->named_buffers(/*recurse=*/true);
-                for (auto& kv : buffers) {
-                    torch::Tensor t;
-                    ar.read(kv.key(), t);
-                    kv.value().copy_(t);
-                }
-
-                torch::Tensor oldStemWeight;
-                ar.read("stem.weight", oldStemWeight);
-
-                auto newStemWeight = model->stem->weight.detach();
-                auto oldStemWeightCPU = oldStemWeight.detach().to(torch::kCPU).to(torch::kFloat32).contiguous();
-                auto newStemWeightCPU = newStemWeight.detach().to(torch::kCPU).to(torch::kFloat32).contiguous();
-
-                if (oldStemWeightCPU.dim() != 4 ||
-                    newStemWeightCPU.dim() != 4 ||
-                    oldStemWeightCPU.size(0) != newStemWeightCPU.size(0) ||
-                    oldStemWeightCPU.size(2) != newStemWeightCPU.size(2) ||
-                    oldStemWeightCPU.size(3) != newStemWeightCPU.size(3) ||
-                    oldStemWeightCPU.size(1) != 25 ||
-                    newStemWeightCPU.size(1) != NN_SQ_PLANES) {
-                    throw std::runtime_error("old.pt stem.weight has unexpected shape");
-                }
-
-                newStemWeightCPU.zero_();
-                newStemWeightCPU.slice(/*dim=*/1, /*start=*/0, /*end=*/19)
-                    .copy_(oldStemWeightCPU.slice(/*dim=*/1, /*start=*/0, /*end=*/19));
-
-                for (int pt = 0; pt < 6; ++pt) {
-                    const int oldPlane = 19 + pt;
-                    const int newPlaneBase = 19 + pt * NN_DICE_PLANES_PER_PIECE;
-                    for (int cnt = 1; cnt <= NN_DICE_PLANES_PER_PIECE; ++cnt) {
-                        newStemWeightCPU.select(/*dim=*/1, newPlaneBase + (cnt - 1))
-                            .copy_(oldStemWeightCPU.select(/*dim=*/1, oldPlane) * (float(cnt) / 3.0f));
-                    }
-                }
-
-                model->stem->weight.copy_(newStemWeightCPU.to(model->stem->weight.device(), model->stem->weight.scalar_type()));
-                model->eval();
-
-                torch::save(model, ptFile);
-                std::cerr << "Loaded fallback weights from " << oldPtFile
-                          << " and saved converted model to " << ptFile << "\n";
-                return true;
-            }
-            catch (const std::exception& e) {
-                std::cerr << "legacy fallback load from " << oldPtFile
-                          << " failed: " << e.what() << "\n";
-            }
-        }
-
         try {
             torch::save(model, ptFile);
             return true;
