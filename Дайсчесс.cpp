@@ -648,24 +648,22 @@ static constexpr int NN_PIECE_PLANES = 12;
 static constexpr int NN_EP1_PLANES = 2;
 static constexpr int NN_EP2_PLANES = 1;
 static constexpr int NN_CASTLE_PLANES = 4;
-static constexpr int NN_DICE_PLANES = 6;
+static constexpr int NN_DICE_PLANES_PER_PIECE = 3;
+static constexpr int NN_DICE_PLANES = 6 * NN_DICE_PLANES_PER_PIECE;
 
-static constexpr int NN_SQ_PLANES = NN_PIECE_PLANES + NN_EP1_PLANES + NN_EP2_PLANES + NN_CASTLE_PLANES + NN_DICE_PLANES; // 25
-static constexpr int NN_INPUT_SIZE = NN_SQ_PLANES * 64; // 1600
+static constexpr int NN_SQ_PLANES = NN_PIECE_PLANES + NN_EP1_PLANES + NN_EP2_PLANES + NN_CASTLE_PLANES + NN_DICE_PLANES; // 37
+static constexpr int NN_INPUT_SIZE = NN_SQ_PLANES * 64; // 2368
 
 using NNInput = array<float, NN_INPUT_SIZE>;
 
 alignas(64) static array<float, 64> NN_PLANE0;
 alignas(64) static array<float, 64> NN_PLANE1;
-alignas(64) static array<array<float, 64>, 4> NN_DICEPLANE;
+alignas(64) static array<array<float, 64>, NN_DICE_PLANES_PER_PIECE> NN_DICEPLANE;
 
 static void initNNConstPlanes() {
     NN_PLANE0.fill(0.0f);
     NN_PLANE1.fill(1.0f);
-    for (int c = 0; c <= 3; ++c) {
-        float v = float(c) * (1.0f / 3.0f);
-        NN_DICEPLANE[c].fill(v);
-    }
+    for (auto& plane : NN_DICEPLANE) plane.fill(1.0f);
 }
 
 static AI_FORCEINLINE void copyPlane(NNInput& out, int plane, const float* src64) {
@@ -784,7 +782,10 @@ static AI_FORCEINLINE void positionToNNInput(const Position& pos, NNInput& out) 
         const int d = pos.dice;
         for (int pt = 0; pt < 6; ++pt) {
             const int cnt = dicePiece[d][pt];
-            copyPlane(out, 19 + pt, NN_DICEPLANE[cnt].data());
+            for (int plane = 0; plane < NN_DICE_PLANES_PER_PIECE; ++plane) {
+                copyPlane(out, 19 + pt * NN_DICE_PLANES_PER_PIECE + plane,
+                    (cnt == plane + 1) ? NN_DICEPLANE[plane].data() : NN_PLANE0.data());
+            }
         }
     }
 }
@@ -2856,7 +2857,7 @@ struct TrtRunner {
 
     cudaStream_t stream = nullptr;
 
-    void* dInput = nullptr;  // [256,25,8,8] float
+    void* dInput = nullptr;  // [256,37,8,8] float
     void* dPolicy = nullptr;  // [256,73,8,8] float
     void* dValue = nullptr;  // [256,1] float
     // Aux streams for TensorRT (needed for stable CUDA Graph capture when engine uses aux streams)
@@ -2871,7 +2872,7 @@ struct TrtRunner {
     int currentShapeB = -1;
 
     // Pinned host buffers
-    float* hInputPinned = nullptr; // 256 * 1600
+    float* hInputPinned = nullptr; // 256 * NN_INPUT_SIZE
 
     // Full-policy pinned (kept for debug / compatibility)
     float* hPolicyPinned = nullptr; // 256 * 4672 (CHW)
@@ -2919,7 +2920,7 @@ struct TrtRunner {
         if (currentShapeB == B) return true;
 
         if (!ctx->setInputShape("input", nvinfer1::Dims4{ B, NN_SQ_PLANES, 8, 8 })) {
-            std::cerr << "TensorRT: setInputShape(" << B << ",25,8,8) failed.\n";
+            std::cerr << "TensorRT: setInputShape(" << B << "," << NN_SQ_PLANES << ",8,8) failed.\n";
             return false;
         }
         currentShapeB = B;
