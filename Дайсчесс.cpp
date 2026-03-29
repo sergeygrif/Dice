@@ -7529,7 +7529,7 @@ static ArenaStats runArenaMatch(int games, int simsPerPos) {
     return st;
 }
 
-static constexpr float VALUE_LAMBDA = 0.70f;
+static constexpr float VALUE_LAMBDA = 0.95f;
 
 static AI_FORCEINLINE float valueToSidePerspective(float v, int fromSide, int toSide) {
     v = clamp01(v);
