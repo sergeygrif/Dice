@@ -7529,6 +7529,48 @@ static ArenaStats runArenaMatch(int games, int simsPerPos) {
     return st;
 }
 
+static constexpr float VALUE_LAMBDA = 0.70f;
+
+static AI_FORCEINLINE float valueToSidePerspective(float v, int fromSide, int toSide) {
+    v = clamp01(v);
+    return (fromSide == toSide) ? v : (1.0f - v);
+}
+
+static void buildLambdaTargets(
+    std::vector<TrainSample>& game,
+    const std::vector<int>& sideAtSample,
+    float zWhite,
+    float lambda = VALUE_LAMBDA)
+{
+    const int n = (int)game.size();
+    if (n <= 0) return;
+
+    lambda = clamp01(lambda);
+
+    // Для последнего состояния target = истинный финальный исход.
+    float G = (sideAtSample[(size_t)(n - 1)] == 0) ? zWhite : (1.0f - zWhite);
+    game[(size_t)(n - 1)].z = clamp01(G);
+
+    // Назад по траектории:
+    // G_t^λ = (1-λ) * V_boot(next) + λ * G_{t+1}^λ
+    for (int i = n - 2; i >= 0; --i) {
+        const int sideCur = sideAtSample[(size_t)i];
+        const int sideNext = sideAtSample[(size_t)i + 1];
+
+        // bootstrap от следующего search-value
+        const float bootNext =
+            valueToSidePerspective(game[(size_t)i + 1].q, sideNext, sideCur);
+
+        // уже посчитанный λ-return следующего состояния,
+        // приведённый к перспективе текущей стороны
+        const float contNext =
+            valueToSidePerspective(G, sideNext, sideCur);
+
+        G = clamp01((1.0f - lambda) * bootNext + lambda * contNext);
+        game[(size_t)i].z = G;
+    }
+}
+
 static void selfPlayOneGame960(GameContext& sp,
     ITrainInferenceServer& sharedSrv,
     BackendBinding backend,
@@ -7605,17 +7647,13 @@ static void selfPlayOneGame960(GameContext& sp,
 
     float zWhite = 0.5f;
     if (outTerminated) {
-        // term означает "у side-to-move есть немедленная победа (взятие короля)".
         // winner = side-to-move => whiteWin = 1 - pos.side
         zWhite = 1.0f - pos.side;
     }
     else return;
 
-    for (size_t i = 0; i < game.size(); ++i) {
-        int stm = sideAtSample[i];
-        float zi = (stm == 0) ? zWhite : (1.0f - zWhite);
-        game[i].z = 0.5f * zi + 0.5f * game[i].q;
-    }
+    // λ-return вместо фиксированного 50/50 mix
+    buildLambdaTargets(game, sideAtSample, zWhite, VALUE_LAMBDA);
 
     rb.pushMany(game);
     outSamplesAdded += (int)game.size();
@@ -9177,7 +9215,7 @@ void Training(int targetGames) {
     uint64_t statPlyWindow = 0;
     uint64_t statTruncatedWindow = 0;
     auto statWindowStart = std::chrono::steady_clock::now();
-    int nextArenaAt = 50000;
+    int nextArenaAt = 100000;
 
     std::cout << "Starting training for " << targetGames << " games...\n";
 
@@ -9327,7 +9365,7 @@ void Training(int targetGames) {
             statWindowStart = std::chrono::steady_clock::now();
 
             // Даже если arena setup failed, не зацикливаемся на том же пороге.
-            nextArenaAt += 50000;
+            nextArenaAt += 100000;
 
             if (!arenaOk) {
                 break;
