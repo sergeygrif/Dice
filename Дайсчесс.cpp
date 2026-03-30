@@ -7758,6 +7758,8 @@ static int playOneArenaGameOnLane(
         findChanceNode, searchMoves);
 }
 
+static double computeLOSPercent(int wins, int losses);
+
 static ArenaStats runArenaMatch(int games, int simsPerPos) {
     ArenaStats st;
     if (games <= 0) return st;
@@ -7784,9 +7786,11 @@ static ArenaStats runArenaMatch(int games, int simsPerPos) {
 
     auto onProgress = [&](int playedGames, const MatchStatsGeneric& s) {
         if ((playedGames % 100) == 0) {
+            const double los = computeLOSPercent(s.p1Wins, s.p2Wins);
             std::cout << "[arena] games " << playedGames << "/" << games
                 << "  W/L = " << s.p1Wins << "/" << s.p2Wins
-                << "  score=" << s.p1Score() << "\n";
+                << "  score=" << s.p1Score()
+                << "  LOS=" << std::fixed << std::setprecision(2) << los << "%\n";
         }
     };
 
