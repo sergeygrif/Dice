@@ -7502,14 +7502,49 @@ struct ArenaStats {
     }
 };
 
-static int playOneArenaGame(SelfPlayContext& curCtx,
-    SelfPlayContext& oldCtx,
+struct MatchStatsGeneric {
+    int p1Wins = 0;
+    int p2Wins = 0;
+    int draws = 0;
+
+    double p1Score() const {
+        const int n = p1Wins + p2Wins + draws;
+        if (n <= 0) return 0.5;
+        return ((double)p1Wins + 0.5 * (double)draws) / (double)n;
+    }
+};
+
+template<class Lane>
+struct LanesStopGuard {
+    std::vector<std::unique_ptr<Lane>>* lanes = nullptr;
+
+    explicit LanesStopGuard(std::vector<std::unique_ptr<Lane>>& v) : lanes(&v) {}
+
+    ~LanesStopGuard() noexcept {
+        if (!lanes) return;
+        for (auto& x : *lanes) {
+            if (!x) continue;
+            try { x->stop(); }
+            catch (...) {}
+        }
+    }
+
+    void release() noexcept { lanes = nullptr; }
+
+    LanesStopGuard(const LanesStopGuard&) = delete;
+    LanesStopGuard& operator=(const LanesStopGuard&) = delete;
+};
+
+template<class FindChanceNodeFn, class SearchMovesFn>
+static int playOneUniversalMatchGame(
     const Position& startPos,
     const std::array<uint64_t, 4>& path,
     const std::array<int, 64>& mask,
-    bool currentIsWhite,
-    int simsPerPos,
-    int maxPlies = 256) {
+    bool p1IsWhite,
+    int maxPlies,
+    FindChanceNodeFn&& findChanceNodeForSide,
+    SearchMovesFn&& searchMovesForSide)
+{
     Position pos = startPos;
 
     for (int ply = 0; ply < maxPlies; ++ply) {
@@ -7519,38 +7554,26 @@ static int playOneArenaGame(SelfPlayContext& curCtx,
         genLegal(tmp, path, mask, ml, term);
 
         if (term) {
-            // winner = side-to-move
-            bool currentWon = ((pos.side == 0) == currentIsWhite);
-            return currentWon ? +1 : -1;
+            const bool p1Won = ((pos.side == 0) == p1IsWhite);
+            return p1Won ? +1 : -1;
         }
 
+        const bool p1Turn = ((pos.side == 0) == p1IsWhite);
+
         if (ml.n == 0) {
-            bool currentTurn = ((pos.side == 0) == currentIsWhite);
-            TTNode* n = currentTurn
-                ? curCtx.T.findNodeNoInsert(pos.key)
-                : oldCtx.T.findNodeNoInsert(pos.key);
+            TTNode* n = findChanceNodeForSide(p1Turn, pos);
             makeRandom(pos, n);
             continue;
         }
 
-        bool currentTurn = ((pos.side == 0) == currentIsWhite);
-        SelfPlayContext& ctx = currentTurn ? curCtx : oldCtx;
-
         std::vector<moveState> moves;
-        float q = 0.5f;
-
-        runFixedSims(ctx.T, ctx.pool, ctx.server, ctx.backend,
-            pos, path, mask, simsPerPos, /*rootNoise=*/false);
-
-        if (ctx.T.abort.load(std::memory_order_relaxed)) {
+        if (!searchMovesForSide(p1Turn, pos, path, mask, moves)) {
             return 0;
         }
 
-        collectRootMoves(ctx.T, pos, q, moves);
-
         if (moves.empty()) return 0;
 
-        int mv = moves[0].move; // temperature=0, best by visits
+        const int mv = moves[0].move; // temperature=0 for match play
         if (!mv) return 0;
 
         makeMove(pos, mask, mv);
@@ -7559,70 +7582,231 @@ static int playOneArenaGame(SelfPlayContext& curCtx,
     return 0; // draw by maxPlies
 }
 
-static ArenaStats runArenaMatch(int games, int simsPerPos) {
-    ArenaStats st;
-
-    SelfPlayContext curCtx((1u << 19), (1u << 23), g_trt, g_trtMutex);
-    SelfPlayContext oldCtx((1u << 19), (1u << 23), g_trt_old, g_trtOldMutex);
-
-    // Arena should be light: main self-play is paused, so 2 threads per side is enough.
-    curCtx.start(2);
-    oldCtx.start(2);
+template<class Lane, class PlayOneFn, class ProgressFn>
+static MatchStatsGeneric runUniversalMatchEngine(
+    std::vector<std::unique_ptr<Lane>>& lanes,
+    int games,
+    PlayOneFn&& playOneOnLane,
+    ProgressFn&& onProgress,
+    int progressEveryPairs = 0)
+{
+    MatchStatsGeneric out{};
+    if (games <= 0 || lanes.empty()) return out;
 
     const int pairs = games / 2;
 
-    for (int g = 0; g < pairs; ++g) {
+    std::atomic<int> nextPair{ 0 };
+    std::atomic<int> donePairs{ 0 };
+
+    std::atomic<int> p1Wins{ 0 };
+    std::atomic<int> p2Wins{ 0 };
+    std::atomic<int> draws{ 0 };
+
+    std::atomic<bool> abortAll{ false };
+
+    std::mutex exM;
+    std::exception_ptr ex;
+
+    std::mutex printM;
+    std::vector<std::thread> outer;
+    outer.reserve(lanes.size());
+
+    auto addResult = [&](int r) {
+        if (r > 0) p1Wins.fetch_add(1, std::memory_order_relaxed);
+        else if (r < 0) p2Wins.fetch_add(1, std::memory_order_relaxed);
+        else draws.fetch_add(1, std::memory_order_relaxed);
+    };
+
+    for (size_t li = 0; li < lanes.size(); ++li) {
+        outer.emplace_back([&, li] {
+            try {
+                Lane& lane = *lanes[li];
+
+                for (;;) {
+                    if (abortAll.load(std::memory_order_relaxed)) break;
+
+                    const int pairIdx = nextPair.fetch_add(1, std::memory_order_relaxed);
+                    if (pairIdx >= pairs) break;
+
+                    Position startPos;
+                    std::array<uint64_t, 4> path;
+                    std::array<int, 64> mask;
+                    chess960(startPos, path, mask);
+
+                    lane.resetForNewGame();
+                    addResult(playOneOnLane(lane, startPos, path, mask, /*p1IsWhite=*/true));
+
+                    if (abortAll.load(std::memory_order_relaxed)) break;
+
+                    lane.resetForNewGame();
+                    addResult(playOneOnLane(lane, startPos, path, mask, /*p1IsWhite=*/false));
+
+                    const int dp = donePairs.fetch_add(1, std::memory_order_relaxed) + 1;
+
+                    if (progressEveryPairs > 0 && (dp % progressEveryPairs) == 0) {
+                        MatchStatsGeneric snap;
+                        snap.p1Wins = p1Wins.load(std::memory_order_relaxed);
+                        snap.p2Wins = p2Wins.load(std::memory_order_relaxed);
+                        snap.draws = draws.load(std::memory_order_relaxed);
+
+                        std::lock_guard<std::mutex> lk(printM);
+                        onProgress(dp * 2, snap);
+                    }
+                }
+            }
+            catch (...) {
+                abortAll.store(true, std::memory_order_relaxed);
+                std::lock_guard<std::mutex> lk(exM);
+                if (!ex) ex = std::current_exception();
+            }
+        });
+    }
+
+    for (auto& th : outer) {
+        if (th.joinable()) th.join();
+    }
+
+    if (ex) std::rethrow_exception(ex);
+
+    if ((games & 1) != 0 && !lanes.empty()) {
         Position startPos;
         std::array<uint64_t, 4> path;
         std::array<int, 64> mask;
         chess960(startPos, path, mask);
 
-        // game 1: current = white
-        curCtx.resetForNewGame();
-        oldCtx.resetForNewGame();
-        {
-            int r = playOneArenaGame(curCtx, oldCtx, startPos, path, mask, true, simsPerPos);
-            if (r > 0) ++st.curWins;
-            else if (r < 0) ++st.oldWins;
-            else ++st.draws;
-        }
+        Lane& lane = *lanes[0];
+        lane.resetForNewGame();
+        addResult(playOneOnLane(lane, startPos, path, mask, /*p1IsWhite=*/true));
 
-        // game 2: current = black
-        curCtx.resetForNewGame();
-        oldCtx.resetForNewGame();
-        {
-            int r = playOneArenaGame(curCtx, oldCtx, startPos, path, mask, false, simsPerPos);
-            if (r > 0) ++st.curWins;
-            else if (r < 0) ++st.oldWins;
-            else ++st.draws;
-        }
+        if (progressEveryPairs > 0) {
+            MatchStatsGeneric snap;
+            snap.p1Wins = p1Wins.load(std::memory_order_relaxed);
+            snap.p2Wins = p2Wins.load(std::memory_order_relaxed);
+            snap.draws = draws.load(std::memory_order_relaxed);
 
-        if (((g + 1) % 50) == 0) {
-            std::cout << "[arena] pair " << (g + 1) << "/" << pairs
-                << "  W/L = "
-                << st.curWins << "/" << st.oldWins
-                << "  score=" << st.currentScore() << "\n";
+            onProgress(games, snap);
         }
     }
 
-    if (games & 1) {
-        Position startPos;
-        std::array<uint64_t, 4> path;
-        std::array<int, 64> mask;
-        chess960(startPos, path, mask);
+    out.p1Wins = p1Wins.load(std::memory_order_relaxed);
+    out.p2Wins = p2Wins.load(std::memory_order_relaxed);
+    out.draws = draws.load(std::memory_order_relaxed);
+    return out;
+}
 
-        curCtx.resetForNewGame();
-        oldCtx.resetForNewGame();
+struct ArenaLane {
+    SelfPlayContext curCtx;
+    SelfPlayContext oldCtx;
 
-        int r = playOneArenaGame(curCtx, oldCtx, startPos, path, mask, true, simsPerPos);
-        if (r > 0) ++st.curWins;
-        else if (r < 0) ++st.oldWins;
-        else ++st.draws;
+    ArenaLane()
+        : curCtx((1u << 19), (1u << 23), g_trt, g_trtMutex)
+        , oldCtx((1u << 19), (1u << 23), g_trt_old, g_trtOldMutex) {
     }
 
-    curCtx.stop();
-    oldCtx.stop();
+    void start(unsigned threadsPerSide) {
+        curCtx.start(threadsPerSide);
+        oldCtx.start(threadsPerSide);
+    }
 
+    void stop() {
+        curCtx.stop();
+        oldCtx.stop();
+    }
+
+    void resetForNewGame() {
+        curCtx.resetForNewGame();
+        oldCtx.resetForNewGame();
+    }
+};
+
+static int playOneArenaGameOnLane(
+    ArenaLane& lane,
+    const Position& startPos,
+    const std::array<uint64_t, 4>& path,
+    const std::array<int, 64>& mask,
+    bool currentIsWhite,
+    int simsPerPos,
+    int maxPlies = 256)
+{
+    auto findChanceNode = [&](bool currentTurn, const Position& pos) -> TTNode* {
+        return currentTurn
+            ? lane.curCtx.T.findNodeNoInsert(pos.key)
+            : lane.oldCtx.T.findNodeNoInsert(pos.key);
+    };
+
+    auto searchMoves = [&](bool currentTurn,
+                           const Position& pos,
+                           const std::array<uint64_t, 4>& pathRef,
+                           const std::array<int, 64>& maskRef,
+                           std::vector<moveState>& moves) -> bool {
+        SelfPlayContext& ctx = currentTurn ? lane.curCtx : lane.oldCtx;
+
+        float q = 0.5f;
+        runFixedSims(ctx.T, ctx.pool, ctx.server, ctx.backend,
+            pos, pathRef, maskRef, simsPerPos, /*rootNoise=*/false);
+
+        if (ctx.T.abort.load(std::memory_order_relaxed)) {
+            return false;
+        }
+
+        collectRootMoves(ctx.T, pos, q, moves);
+        return !moves.empty();
+    };
+
+    return playOneUniversalMatchGame(
+        startPos, path, mask, currentIsWhite, maxPlies,
+        findChanceNode, searchMoves);
+}
+
+static ArenaStats runArenaMatch(int games, int simsPerPos) {
+    ArenaStats st;
+    if (games <= 0) return st;
+
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+
+    // В arena каждая lane = 2 SelfPlayContext, у каждого свой server + pool.
+    // Поэтому держим threadsPerSide небольшим.
+    const unsigned threadsPerSide = (hw >= 24 ? 2u : 1u);
+    const unsigned laneCost = 2u * (threadsPerSide + 1u);
+    const unsigned maxLanesByCpu = std::max(1u, hw / std::max(1u, laneCost));
+    const unsigned wantedLanes = (unsigned)std::max(1, (games + 1) / 2);
+    const unsigned parallelLanes = std::max(1u, std::min(wantedLanes, std::min(maxLanesByCpu, 4u)));
+
+    std::vector<std::unique_ptr<ArenaLane>> lanes;
+    lanes.reserve(parallelLanes);
+    LanesStopGuard<ArenaLane> guard(lanes);
+
+    for (unsigned i = 0; i < parallelLanes; ++i) {
+        auto lane = std::make_unique<ArenaLane>();
+        lane->start(threadsPerSide);
+        lanes.push_back(std::move(lane));
+    }
+
+    auto onProgress = [&](int playedGames, const MatchStatsGeneric& s) {
+        if ((playedGames % 100) == 0) {
+            std::cout << "[arena] games " << playedGames << "/" << games
+                << "  W/L = " << s.p1Wins << "/" << s.p2Wins
+                << "  score=" << s.p1Score() << "\n";
+        }
+    };
+
+    MatchStatsGeneric g = runUniversalMatchEngine(
+        lanes,
+        games,
+        [&](ArenaLane& lane,
+            const Position& startPos,
+            const std::array<uint64_t, 4>& path,
+            const std::array<int, 64>& mask,
+            bool p1IsWhite) -> int {
+            return playOneArenaGameOnLane(
+                lane, startPos, path, mask, p1IsWhite, simsPerPos, 256);
+        },
+        onProgress,
+        /*progressEveryPairs=*/50);
+
+    st.curWins = g.p1Wins;
+    st.oldWins = g.p2Wins;
+    st.draws = g.draws;
     return st;
 }
 
@@ -7634,7 +7818,6 @@ static double computeLOSPercent(int wins, int losses, int draws) {
     const int n = wins + losses + draws;
     if (n <= 0) return 50.0;
 
-    // x in {1, 0.5, 0}
     const double mean = ((double)wins + 0.5 * (double)draws) / (double)n;
     const double ex2 = ((double)wins + 0.25 * (double)draws) / (double)n;
     double var = ex2 - mean * mean;
@@ -7666,9 +7849,33 @@ static void printTuneProgress(int played, int wins1, int losses1, int draws) {
         << " LOS=" << std::setprecision(2) << los << "%\n";
 }
 
-static int playOneTuneGame(
-    GameContext& p1Ctx,
-    GameContext& p2Ctx,
+struct TuneLane {
+    GameContext p1Ctx;
+    GameContext p2Ctx;
+
+    TuneLane()
+        : p1Ctx((1u << 19), (1u << 23))
+        , p2Ctx((1u << 19), (1u << 23)) {
+    }
+
+    void start(unsigned threadsPerSide) {
+        p1Ctx.start(threadsPerSide);
+        p2Ctx.start(threadsPerSide);
+    }
+
+    void stop() {
+        p1Ctx.stop();
+        p2Ctx.stop();
+    }
+
+    void resetForNewGame() {
+        p1Ctx.resetForNewGame();
+        p2Ctx.resetForNewGame();
+    }
+};
+
+static int playOneTuneGameOnLane(
+    TuneLane& lane,
     ITrainInferenceServer& sharedSrv,
     BackendBinding backend,
     const SearchParams& p1,
@@ -7678,60 +7885,41 @@ static int playOneTuneGame(
     const std::array<int, 64>& mask,
     bool p1IsWhite,
     int simsPerPos,
-    int maxPlies = 256) {
+    int maxPlies = 256)
+{
+    auto findChanceNode = [&](bool p1Turn, const Position& pos) -> TTNode* {
+        return p1Turn
+            ? lane.p1Ctx.T.findNodeNoInsert(pos.key)
+            : lane.p2Ctx.T.findNodeNoInsert(pos.key);
+    };
 
-    Position pos = startPos;
-
-    for (int ply = 0; ply < maxPlies; ++ply) {
-        MoveList ml;
-        int term = 0;
-        Position tmp = pos;
-        genLegal(tmp, path, mask, ml, term);
-
-        if (term) {
-            // По текущей логике term => победитель = side-to-move
-            const bool p1Won = ((pos.side == 0) == p1IsWhite);
-            return p1Won ? +1 : -1;
-        }
-
-        if (ml.n == 0) {
-            const bool p1Turn = ((pos.side == 0) == p1IsWhite);
-            TTNode* n = p1Turn
-                ? p1Ctx.T.findNodeNoInsert(pos.key)
-                : p2Ctx.T.findNodeNoInsert(pos.key);
-
-            makeRandom(pos, n);
-            continue;
-        }
-
-        const bool p1Turn = ((pos.side == 0) == p1IsWhite);
-        GameContext& ctx = p1Turn ? p1Ctx : p2Ctx;
+    auto searchMoves = [&](bool p1Turn,
+                           const Position& pos,
+                           const std::array<uint64_t, 4>& pathRef,
+                           const std::array<int, 64>& maskRef,
+                           std::vector<moveState>& moves) -> bool {
+        GameContext& ctx = p1Turn ? lane.p1Ctx : lane.p2Ctx;
         const SearchParams& sp = p1Turn ? p1 : p2;
 
-        std::vector<moveState> moves;
         float q = 0.5f;
-
         runFixedSims(ctx.T, ctx.pool, sharedSrv, backend,
-            pos, path, mask, simsPerPos, /*rootNoise=*/false, sp);
+            pos, pathRef, maskRef, simsPerPos, /*rootNoise=*/false, sp);
 
         if (ctx.T.abort.load(std::memory_order_relaxed)) {
-            return 0;
+            return false;
         }
 
         collectRootMoves(ctx.T, pos, q, moves);
-        if (moves.empty()) return 0;
+        return !moves.empty();
+    };
 
-        int mv = moves[0].move; // temperature=0
-        if (!mv) return 0;
-
-        makeMove(pos, mask, mv);
-    }
-
-    return 0; // draw by maxPlies
+    return playOneUniversalMatchGame(
+        startPos, path, mask, p1IsWhite, maxPlies,
+        findChanceNode, searchMoves);
 }
 
 void tune(float c_init1, float fpu_reduction1,
-    float c_init2, float fpu_reduction2) {
+          float c_init2, float fpu_reduction2) {
     if (!g_trtReady) {
         std::cerr << "[tune] TensorRT backend is not ready.\n";
         return;
@@ -7743,30 +7931,28 @@ void tune(float c_init1, float fpu_reduction1,
     static constexpr int TOTAL_GAMES = 10000;
     static constexpr int SIMS_PER_POS = 800;
     static constexpr int MAX_PLIES = 256;
-    static constexpr int PRINT_EVERY = 100;
 
     BackendBinding backend{ g_trt, g_trtMutex };
     SharedInferenceServerTrain sharedSrv(backend);
 
-    GameContext p1Ctx((1u << 19), (1u << 23));
-    GameContext p2Ctx((1u << 19), (1u << 23));
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
 
-    // Для tune этого достаточно, чтобы не убить CPU
-    const unsigned threadsPerSide = 2;
+    // Tune lane легче arena: только 2 GameContext, shared NN server один на всех.
+    const unsigned threadsPerSide = (hw >= 16 ? 2u : 1u);
+    const unsigned laneCost = std::max(1u, 2u * threadsPerSide);
+    const unsigned maxLanesByCpu = std::max(1u, hw / laneCost);
+    const unsigned wantedLanes = (unsigned)std::max(1, (TOTAL_GAMES + 1) / 2);
+    const unsigned parallelLanes = std::max(1u, std::min(wantedLanes, std::min(maxLanesByCpu, 8u)));
 
     sharedSrv.start();
-    p1Ctx.start(threadsPerSide);
-    p2Ctx.start(threadsPerSide);
+
+    std::vector<std::unique_ptr<TuneLane>> lanes;
+    lanes.reserve(parallelLanes);
+    LanesStopGuard<TuneLane> lanesGuard(lanes);
 
     struct TuneCleanupGuard {
-        GameContext* a = nullptr;
-        GameContext* b = nullptr;
         SharedInferenceServerTrain* srv = nullptr;
         ~TuneCleanupGuard() noexcept {
-            try { if (a) a->stop(); }
-            catch (...) {}
-            try { if (b) b->stop(); }
-            catch (...) {}
             try {
                 if (srv) {
                     srv->requestStop();
@@ -7775,101 +7961,54 @@ void tune(float c_init1, float fpu_reduction1,
             }
             catch (...) {}
         }
-    } cleanup{ &p1Ctx, &p2Ctx, &sharedSrv };
+    } srvGuard{ &sharedSrv };
 
-    int wins1 = 0;
-    int losses1 = 0;
-    int draws = 0;
+    for (unsigned i = 0; i < parallelLanes; ++i) {
+        auto lane = std::make_unique<TuneLane>();
+        lane->start(threadsPerSide);
+        lanes.push_back(std::move(lane));
+    }
 
     std::cout
         << "[tune] start\n"
         << "  P1: c_init=" << c_init1 << " fpu_reduction=" << fpu_reduction1 << "\n"
         << "  P2: c_init=" << c_init2 << " fpu_reduction=" << fpu_reduction2 << "\n"
-        << "  games=" << TOTAL_GAMES << " sims=" << SIMS_PER_POS << "\n";
+        << "  games=" << TOTAL_GAMES << " sims=" << SIMS_PER_POS << "\n"
+        << "  parallel_lanes=" << parallelLanes
+        << " threads_per_side=" << threadsPerSide << "\n";
 
-    const int pairs = TOTAL_GAMES / 2;
-    int played = 0;
+    auto onProgress = [&](int playedGames, const MatchStatsGeneric& s) {
+        if ((playedGames % 100) == 0) {
+            printTuneProgress(playedGames, s.p1Wins, s.p2Wins, s.draws);
+        }
+    };
 
-    for (int g = 0; g < pairs; ++g) {
-        Position startPos;
-        std::array<uint64_t, 4> path;
-        std::array<int, 64> mask;
-        chess960(startPos, path, mask);
-
-        // game 1: P1 = white
-        p1Ctx.resetForNewGame();
-        p2Ctx.resetForNewGame();
-        {
-            const int r = playOneTuneGame(
-                p1Ctx, p2Ctx, sharedSrv, backend,
-                p1, p2,
-                startPos, path, mask,
-                /*p1IsWhite=*/true,
+    MatchStatsGeneric g = runUniversalMatchEngine(
+        lanes,
+        TOTAL_GAMES,
+        [&](TuneLane& lane,
+            const Position& startPos,
+            const std::array<uint64_t, 4>& path,
+            const std::array<int, 64>& mask,
+            bool p1IsWhite) -> int {
+            return playOneTuneGameOnLane(
+                lane,
+                sharedSrv,
+                backend,
+                p1,
+                p2,
+                startPos,
+                path,
+                mask,
+                p1IsWhite,
                 SIMS_PER_POS,
                 MAX_PLIES
             );
+        },
+        onProgress,
+        /*progressEveryPairs=*/50);
 
-            if (r > 0) ++wins1;
-            else if (r < 0) ++losses1;
-            else ++draws;
-
-            ++played;
-            if ((played % PRINT_EVERY) == 0) {
-                printTuneProgress(played, wins1, losses1, draws);
-            }
-        }
-
-        // game 2: P1 = black
-        p1Ctx.resetForNewGame();
-        p2Ctx.resetForNewGame();
-        {
-            const int r = playOneTuneGame(
-                p1Ctx, p2Ctx, sharedSrv, backend,
-                p1, p2,
-                startPos, path, mask,
-                /*p1IsWhite=*/false,
-                SIMS_PER_POS,
-                MAX_PLIES
-            );
-
-            if (r > 0) ++wins1;
-            else if (r < 0) ++losses1;
-            else ++draws;
-
-            ++played;
-            if ((played % PRINT_EVERY) == 0) {
-                printTuneProgress(played, wins1, losses1, draws);
-            }
-        }
-    }
-
-    if (TOTAL_GAMES & 1) {
-        Position startPos;
-        std::array<uint64_t, 4> path;
-        std::array<int, 64> mask;
-        chess960(startPos, path, mask);
-
-        p1Ctx.resetForNewGame();
-        p2Ctx.resetForNewGame();
-
-        const int r = playOneTuneGame(
-            p1Ctx, p2Ctx, sharedSrv, backend,
-            p1, p2,
-            startPos, path, mask,
-            /*p1IsWhite=*/true,
-            SIMS_PER_POS,
-            MAX_PLIES
-        );
-
-        if (r > 0) ++wins1;
-        else if (r < 0) ++losses1;
-        else ++draws;
-
-        ++played;
-    }
-
-    printTuneProgress(played, wins1, losses1, draws);
-
+    printTuneProgress(TOTAL_GAMES, g.p1Wins, g.p2Wins, g.draws);
     std::cout << "[tune] finished\n";
 }
 
