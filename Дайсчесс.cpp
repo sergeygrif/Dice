@@ -332,6 +332,7 @@ struct TTNode {
 
     std::atomic<double> valueSum{ 0.0f };
     std::atomic<uint32_t> visits{ 0 };
+    std::atomic<uint32_t> chanceCursor{ 0 };
 
     AI_FORCEINLINE bool isExpanded() const {
         return expanded.load(std::memory_order_acquire) != 0;
@@ -1915,6 +1916,87 @@ void makeRandom(Position& pos, TTNode* node) {
     for (int i = 0; i < 5; i++)
         while (dicePiece[pos.dice][i] && (pos.color[pos.side] & pos.piece[i]) == 0 && dist > dicePiece[pos.dice][0])
             pos.dice = newDice[pos.dice][i];
+    pos.key ^= ZDice[pos.dice];
+}
+
+
+static AI_FORCEINLINE uint32_t mix32From64(uint64_t x) {
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    return (uint32_t)x ^ (uint32_t)(x >> 32);
+}
+
+// 216 = 2^3 * 3^3
+// Чтобы (base + step * k) обходил все residue-классы, step должен быть взаимно прост с 216,
+// т.е. НЕ делиться ни на 2, ни на 3.
+static AI_FORCEINLINE uint32_t normalizeStepMod216(uint32_t s) {
+    s %= 216u;
+    if (s == 0u) s = 1u;
+
+    while ((s & 1u) == 0u || (s % 3u) == 0u) {
+        ++s;
+        if (s >= 216u) s -= 216u;
+        if (s == 0u) s = 1u;
+    }
+    return s;
+}
+
+static AI_FORCEINLINE uint32_t deterministicDiceBase216(uint64_t key) {
+    return mix32From64(key ^ 0x9E3779B97F4A7C15ULL) % 216u;
+}
+
+static AI_FORCEINLINE uint32_t deterministicDiceStep216(uint64_t key) {
+    uint32_t s = mix32From64(key ^ 0xD1B54A32D192ED03ULL);
+    return normalizeStepMod216(s);
+}
+
+void makeRandomDeterministic(Position& pos, TTNode* node) {
+    // fallback: если node нет, используем старое случайное поведение
+    if (!node) {
+        makeRandom(pos, node);
+        return;
+    }
+
+    while (pos.ep1[pos.side]) {
+        int sq = pop_lsb(pos.ep1[pos.side]);
+        pos.key ^= ZEp1[pos.side][sq];
+    }
+    while (pos.ep2) {
+        int sq = pop_lsb(pos.ep2);
+        pos.key ^= ZEp2[sq];
+    }
+
+    pos.side = !pos.side;
+    pos.key ^= ZSide;
+
+    const uint32_t cursor = node->chanceCursor.fetch_add(1, std::memory_order_relaxed);
+    const uint32_t base = deterministicDiceBase216(node->key);
+    const uint32_t step = deterministicDiceStep216(node->key);
+
+    const uint32_t idx = (uint32_t)((base + (uint64_t)step * (uint64_t)cursor) % 216u);
+
+    uint64_t pawns = pos.color[pos.side] & pos.piece[0];
+    int dist = 6;
+
+    pos.key ^= ZDice[pos.dice];
+    pos.dice = Dice[(size_t)idx];
+
+    if (pawns) {
+        if (pos.side == 0) dist = clz64(pawns) >> 3;
+        else               dist = ctz64(pawns) >> 3;
+    }
+
+    for (int i = 0; i < 5; i++) {
+        while (dicePiece[pos.dice][i] &&
+            (pos.color[pos.side] & pos.piece[i]) == 0 &&
+            dist > dicePiece[pos.dice][0]) {
+            pos.dice = newDice[pos.dice][i];
+        }
+    }
+
     pos.key ^= ZDice[pos.dice];
 }
 
@@ -3535,6 +3617,7 @@ struct MCTSTable {
                     n.expanded.store(0, std::memory_order_relaxed);
                     n.valueSum.store(0.0, std::memory_order_relaxed);
                     n.visits.store(0, std::memory_order_relaxed);
+                    n.chanceCursor.store(0, std::memory_order_relaxed);
 
                     s.meta.store(packMeta(g, wantTag), std::memory_order_release);
                     return &n;
@@ -3584,6 +3667,7 @@ struct MCTSTable {
                     n.expanded.store(0, std::memory_order_relaxed);
                     n.valueSum.store(0.0, std::memory_order_relaxed);
                     n.visits.store(0, std::memory_order_relaxed);
+                    n.chanceCursor.store(0, std::memory_order_relaxed);
 
                     s.meta.store(packMeta(g, wantTag), std::memory_order_release);
                     return &n;
@@ -5027,7 +5111,7 @@ static bool runOneSim(MCTSTable& T,
                 claim.release();
 
                 tr.push(node, nullptr, /*flip=*/true, /*vloss=*/false);
-                makeRandom(pos, node);
+                makeRandomDeterministic(pos, node);
                 isRoot = false;
                 continue;
             }
@@ -5055,7 +5139,7 @@ static bool runOneSim(MCTSTable& T,
         if (node->edgeCount == 0) {
             if (node->chance) {
                 tr.push(node, nullptr, /*flip=*/true, /*vloss=*/false);
-                makeRandom(pos, node);
+                makeRandomDeterministic(pos, node);
                 isRoot = false;
                 continue;
             }
