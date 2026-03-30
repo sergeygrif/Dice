@@ -9573,18 +9573,12 @@ int main() {
         if (fen == "960") chess960(pos, path, mask);
         else              fenToPositionPathMask(fen, pos, path, mask);
 
-        std::cout << "slider_backend " << (g_usePext ? "pext" : "magics") << "\n";
+
 
         MoveList ml;
         int term = 0;
         Position tmp = pos;
-        genLegal(tmp, path, mask, ml, term);
 
-        std::cout << "moves " << ml.n << "\n";
-        for (int i = 0; i < ml.n; ++i) {
-            int m = ml.m[i];
-            std::cout << sqName(m & 63) << sqName((m >> 6) & 63) << "\n";
-        }
 
         float mctsEvalWhite = 0.5f;
         std::vector<int> pvBeforeRoll;
@@ -9597,14 +9591,14 @@ int main() {
         g_trt.inferBatch(&pos, 1, &v, pol.data());
 
         std::cout << "eval=" << v << std::endl;
-        std::cout << "mcts_eval_white " << mctsEvalWhite << "\n";
+
         for (size_t i = 0; i < pvBeforeRoll.size(); ++i) {
             if (i) std::cout << ' ';
             std::cout << moveToStr(pvBeforeRoll[i]);
         }
         std::cout << "\n";
 
-        std::cout << "root_moves " << rootMoves.size() << "\n";
+
         std::cout << std::fixed << std::setprecision(6);
 
         for (const auto& ms : rootMoves) {
