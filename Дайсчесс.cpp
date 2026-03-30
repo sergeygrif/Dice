@@ -9605,11 +9605,19 @@ int main() {
         std::cout << "\n";
 
         std::cout << "root_moves " << rootMoves.size() << "\n";
-        for (auto& ms : rootMoves) {
-            std::cout << moveToStr(ms.move)
+        std::cout << std::fixed << std::setprecision(6);
+
+        for (const auto& ms : rootMoves) {
+            int d = (int)std::to_string(ms.visits).size();
+            int spacesBeforePrior = 1 + (to_string(rootMoves[0].visits).size() - d);
+
+            std::cout
+                << moveToStr(ms.move)
                 << " eval " << ms.eval
                 << " visits " << ms.visits
-                << " prior " << ms.prior << "\n";
+                << std::string(spacesBeforePrior, ' ')
+                << "prior " << ms.prior
+                << '\n';
         }
 
         cin.get();
