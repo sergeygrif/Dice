@@ -9816,7 +9816,7 @@ void Training(int targetGames) {
                 std::cout << "\n[arena] start: current vs old, games=1000, sims=200, triggerGames="
                     << nextArenaAt << "\n";
 
-                ArenaStats ar = runArenaMatch(/*games=*/1000, /*simsPerPos=*/200);
+                ArenaStats ar = runArenaMatch(/*games=*/1000, /*simsPerPos=*/800);
 
                 std::cout << "[arena] done: W/L = "
                     << ar.curWins << "/" << ar.oldWins
