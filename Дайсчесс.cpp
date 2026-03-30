@@ -2213,7 +2213,7 @@ static void diagLogLine(const std::string& msg) {
     std::ostringstream line;
     line << "[" << diagNowStr() << "][tid " << std::this_thread::get_id() << "] " << msg;
 
-    std::cerr << line.str() << std::endl;
+
     if (g_diagFile.is_open()) {
         g_diagFile << line.str() << std::endl;
     }
