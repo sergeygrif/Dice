@@ -3779,14 +3779,19 @@ static AI_FORCEINLINE int selectBestPVEdge(const TTNode& n, const TTEdge* e0) {
     return bestI;
 }
 
+struct SearchParams {
+    float c_init = 1.25f;
+    float fpu_reduction = 0.08f;
+    float c_base = 19652.0f;
+};
 
+static const SearchParams kDefaultSearchParams{};
 
-
-
-static AI_FORCEINLINE float cpuctFromVisits(uint32_t parentVisits, bool isRoot) {
-    constexpr float C_INIT = 1.25f;
-    constexpr float C_BASE = 19652.0f;
-    float c = C_INIT + std::log(((float)parentVisits + C_BASE + 1.0f) / C_BASE);
+static AI_FORCEINLINE float cpuctFromVisits(
+    uint32_t parentVisits,
+    bool isRoot,
+    const SearchParams& sp) {
+    float c = sp.c_init + std::log(((float)parentVisits + sp.c_base + 1.0f) / sp.c_base);
     if (isRoot) c *= 1.10f;
     return c;
 }
@@ -3796,11 +3801,10 @@ static AI_FORCEINLINE int selectPUCT(const TTNode& n,
     float cpuct,
     uint32_t parentVisits,
     float parentQ,
+    const SearchParams& sp,
     uint32_t rngJitter) {
-    constexpr float FPU_C = 0.01f;
 
     const float sqrtN = std::sqrt((float)(parentVisits + 1u));
-    const float sqrtParent = std::sqrt((float)parentVisits);
 
     float best = -1e30f;
     int bestI = 0;
@@ -3811,7 +3815,7 @@ static AI_FORCEINLINE int selectPUCT(const TTNode& n,
         uint32_t ev = e.visits.load(std::memory_order_relaxed);
         const float p = e.prior();
 
-        const float fpu = clamp01(parentQ - 0.08f);
+        const float fpu = clamp01(parentQ - sp.fpu_reduction);
         const float q = ev ? clamp01((float)(e.sum() / (double)ev)) : fpu;
 
         const float u = cpuct * p * (sqrtN / (1.0f + (float)ev));
@@ -5025,6 +5029,7 @@ static bool runOneSim(MCTSTable& T,
     PendingNN& outPending,
     bool& outNeedNN,
     uint32_t rngJitter,
+    const SearchParams& searchParams,
     SimDiag* diag = nullptr) {
 
     outNeedNN = false;
@@ -5154,10 +5159,10 @@ static bool runOneSim(MCTSTable& T,
         // Decision node: PUCT
         const uint32_t pv = node->visits.load(std::memory_order_relaxed);
         const float parentQ = nodeQ(*node);
-        const float cpuct = cpuctFromVisits(pv, isRoot);
+        const float cpuct = cpuctFromVisits(pv, isRoot, searchParams);
 
         TTEdge* e0 = T.edgePtr(node->edgeBegin);
-        int bestI = selectPUCT(*node, e0, cpuct, pv, parentQ, rngJitter);
+        int bestI = selectPUCT(*node, e0, cpuct, pv, parentQ, searchParams, rngJitter);
         TTEdge* e = &e0[bestI];
 
         // Classic virtual loss (mark the selected edge as "in flight")
@@ -5313,7 +5318,8 @@ void mctsBatchedMT(Position& rootPos,
 
                 bool ok = runOneSim(T, rootPos, path, mask,
                     localPending, needNN,
-                    jitterBase + (uint32_t)k * 1337u);
+                    jitterBase + (uint32_t)k * 1337u,
+                    kDefaultSearchParams);
 
                 if (!ok) {
                     simFail.fetch_add(1, std::memory_order_relaxed);
@@ -6614,6 +6620,7 @@ struct SearchPool {
     const Position* rootPos = nullptr;
     const std::array<uint64_t, 4>* path = nullptr;
     const std::array<int, 64>* mask = nullptr;
+    SearchParams activeParams = kDefaultSearchParams;
 
     unsigned threads = 1;
 
@@ -6814,7 +6821,8 @@ struct SearchPool {
         const Position& rp,
         const std::array<uint64_t, 4>& pth,
         const std::array<int, 64>& msk,
-        int sims) {
+        int sims,
+        const SearchParams& params = kDefaultSearchParams) {
 
         if (isFatal()) {
             throw std::runtime_error("[SearchPool] already failed: " + getFatalReason());
@@ -6841,6 +6849,7 @@ struct SearchPool {
             path = &pth;
             mask = &msk;
             activeWG = &wg;
+            activeParams = params;
             ++jobId;
         }
         cv.notify_all();
@@ -6987,6 +6996,7 @@ private:
             const Position* rp = nullptr;
             const std::array<uint64_t, 4>* pth = nullptr;
             const std::array<int, 64>* msk = nullptr;
+            SearchParams paramsLocal = kDefaultSearchParams;
 
             bool busyAccounted = false;
 
@@ -7006,6 +7016,7 @@ private:
                     pth = path;
                     msk = mask;
                     wg = activeWG;
+                    paramsLocal = activeParams;
                 }
 
                 busyAccounted = true;
@@ -7045,6 +7056,7 @@ private:
                     bool ok = runOneSim(*TT, *rp, *pth, *msk,
                         localPending, needNN,
                         jitterBase + (uint32_t)(k++) * 1337u,
+                        paramsLocal,
                         &sd);
 
                     if (!ok) {
@@ -7392,7 +7404,8 @@ static void runFixedSims(MCTSTable& T,
     const std::array<uint64_t, 4>& path,
     const std::array<int, 64>& mask,
     int sims,
-    bool rootNoise) {
+    bool rootNoise,
+    const SearchParams& params = kDefaultSearchParams) {
     if (T.abort.load(std::memory_order_relaxed)) return;
 
     if (!ensureExpandedTrain(T, backend, rootPos, path, mask)) return;
@@ -7400,7 +7413,7 @@ static void runFixedSims(MCTSTable& T,
 
     RootNoiseGuard rootNoiseGuard(T, rootPos, rootNoise);
 
-    pool.runSims(T, srv, rootPos, path, mask, sims);
+    pool.runSims(T, srv, rootPos, path, mask, sims, params);
 }
 // ------------------------------------------------------------
 // Self-play: переиспользуем один MCTSTable + один InferenceServerTrain + SearchPool
@@ -7611,6 +7624,253 @@ static ArenaStats runArenaMatch(int games, int simsPerPos) {
     oldCtx.stop();
 
     return st;
+}
+
+static AI_FORCEINLINE double normalCdf(double z) {
+    return 0.5 * std::erfc(-z / std::sqrt(2.0));
+}
+
+static double computeLOSPercent(int wins, int losses, int draws) {
+    const int n = wins + losses + draws;
+    if (n <= 0) return 50.0;
+
+    // x in {1, 0.5, 0}
+    const double mean = ((double)wins + 0.5 * (double)draws) / (double)n;
+    const double ex2 = ((double)wins + 0.25 * (double)draws) / (double)n;
+    double var = ex2 - mean * mean;
+    if (var < 0.0) var = 0.0;
+
+    if (var <= 1e-15) {
+        if (mean > 0.5) return 100.0;
+        if (mean < 0.5) return 0.0;
+        return 50.0;
+    }
+
+    const double se = std::sqrt(var / (double)n);
+    const double z = (mean - 0.5) / se;
+    return 100.0 * normalCdf(z);
+}
+
+static void printTuneProgress(int played, int wins1, int losses1, int draws) {
+    const int n = wins1 + losses1 + draws;
+    const double score1 = (n > 0)
+        ? (((double)wins1 + 0.5 * (double)draws) / (double)n)
+        : 0.5;
+
+    const double los = computeLOSPercent(wins1, losses1, draws);
+
+    std::cout
+        << "[tune] games=" << played
+        << " W/L/D=" << wins1 << "/" << losses1 << "/" << draws
+        << " score1=" << std::fixed << std::setprecision(4) << score1
+        << " LOS=" << std::setprecision(2) << los << "%\n";
+}
+
+static int playOneTuneGame(
+    GameContext& p1Ctx,
+    GameContext& p2Ctx,
+    ITrainInferenceServer& sharedSrv,
+    BackendBinding backend,
+    const SearchParams& p1,
+    const SearchParams& p2,
+    const Position& startPos,
+    const std::array<uint64_t, 4>& path,
+    const std::array<int, 64>& mask,
+    bool p1IsWhite,
+    int simsPerPos,
+    int maxPlies = 256) {
+
+    Position pos = startPos;
+
+    for (int ply = 0; ply < maxPlies; ++ply) {
+        MoveList ml;
+        int term = 0;
+        Position tmp = pos;
+        genLegal(tmp, path, mask, ml, term);
+
+        if (term) {
+            // По текущей логике term => победитель = side-to-move
+            const bool p1Won = ((pos.side == 0) == p1IsWhite);
+            return p1Won ? +1 : -1;
+        }
+
+        if (ml.n == 0) {
+            const bool p1Turn = ((pos.side == 0) == p1IsWhite);
+            TTNode* n = p1Turn
+                ? p1Ctx.T.findNodeNoInsert(pos.key)
+                : p2Ctx.T.findNodeNoInsert(pos.key);
+
+            makeRandom(pos, n);
+            continue;
+        }
+
+        const bool p1Turn = ((pos.side == 0) == p1IsWhite);
+        GameContext& ctx = p1Turn ? p1Ctx : p2Ctx;
+        const SearchParams& sp = p1Turn ? p1 : p2;
+
+        std::vector<moveState> moves;
+        float q = 0.5f;
+
+        runFixedSims(ctx.T, ctx.pool, sharedSrv, backend,
+            pos, path, mask, simsPerPos, /*rootNoise=*/false, sp);
+
+        if (ctx.T.abort.load(std::memory_order_relaxed)) {
+            return 0;
+        }
+
+        collectRootMoves(ctx.T, pos, q, moves);
+        if (moves.empty()) return 0;
+
+        int mv = moves[0].move; // temperature=0
+        if (!mv) return 0;
+
+        makeMove(pos, mask, mv);
+    }
+
+    return 0; // draw by maxPlies
+}
+
+void tune(float c_init1, float fpu_reduction1,
+    float c_init2, float fpu_reduction2) {
+    if (!g_trtReady) {
+        std::cerr << "[tune] TensorRT backend is not ready.\n";
+        return;
+    }
+
+    const SearchParams p1{ c_init1, fpu_reduction1, 19652.0f };
+    const SearchParams p2{ c_init2, fpu_reduction2, 19652.0f };
+
+    static constexpr int TOTAL_GAMES = 10000;
+    static constexpr int SIMS_PER_POS = 800;
+    static constexpr int MAX_PLIES = 256;
+    static constexpr int PRINT_EVERY = 100;
+
+    BackendBinding backend{ g_trt, g_trtMutex };
+    SharedInferenceServerTrain sharedSrv(backend);
+
+    GameContext p1Ctx((1u << 19), (1u << 23));
+    GameContext p2Ctx((1u << 19), (1u << 23));
+
+    // Для tune этого достаточно, чтобы не убить CPU
+    const unsigned threadsPerSide = 2;
+
+    sharedSrv.start();
+    p1Ctx.start(threadsPerSide);
+    p2Ctx.start(threadsPerSide);
+
+    struct TuneCleanupGuard {
+        GameContext* a = nullptr;
+        GameContext* b = nullptr;
+        SharedInferenceServerTrain* srv = nullptr;
+        ~TuneCleanupGuard() noexcept {
+            try { if (a) a->stop(); }
+            catch (...) {}
+            try { if (b) b->stop(); }
+            catch (...) {}
+            try {
+                if (srv) {
+                    srv->requestStop();
+                    srv->join();
+                }
+            }
+            catch (...) {}
+        }
+    } cleanup{ &p1Ctx, &p2Ctx, &sharedSrv };
+
+    int wins1 = 0;
+    int losses1 = 0;
+    int draws = 0;
+
+    std::cout
+        << "[tune] start\n"
+        << "  P1: c_init=" << c_init1 << " fpu_reduction=" << fpu_reduction1 << "\n"
+        << "  P2: c_init=" << c_init2 << " fpu_reduction=" << fpu_reduction2 << "\n"
+        << "  games=" << TOTAL_GAMES << " sims=" << SIMS_PER_POS << "\n";
+
+    const int pairs = TOTAL_GAMES / 2;
+    int played = 0;
+
+    for (int g = 0; g < pairs; ++g) {
+        Position startPos;
+        std::array<uint64_t, 4> path;
+        std::array<int, 64> mask;
+        chess960(startPos, path, mask);
+
+        // game 1: P1 = white
+        p1Ctx.resetForNewGame();
+        p2Ctx.resetForNewGame();
+        {
+            const int r = playOneTuneGame(
+                p1Ctx, p2Ctx, sharedSrv, backend,
+                p1, p2,
+                startPos, path, mask,
+                /*p1IsWhite=*/true,
+                SIMS_PER_POS,
+                MAX_PLIES
+            );
+
+            if (r > 0) ++wins1;
+            else if (r < 0) ++losses1;
+            else ++draws;
+
+            ++played;
+            if ((played % PRINT_EVERY) == 0) {
+                printTuneProgress(played, wins1, losses1, draws);
+            }
+        }
+
+        // game 2: P1 = black
+        p1Ctx.resetForNewGame();
+        p2Ctx.resetForNewGame();
+        {
+            const int r = playOneTuneGame(
+                p1Ctx, p2Ctx, sharedSrv, backend,
+                p1, p2,
+                startPos, path, mask,
+                /*p1IsWhite=*/false,
+                SIMS_PER_POS,
+                MAX_PLIES
+            );
+
+            if (r > 0) ++wins1;
+            else if (r < 0) ++losses1;
+            else ++draws;
+
+            ++played;
+            if ((played % PRINT_EVERY) == 0) {
+                printTuneProgress(played, wins1, losses1, draws);
+            }
+        }
+    }
+
+    if (TOTAL_GAMES & 1) {
+        Position startPos;
+        std::array<uint64_t, 4> path;
+        std::array<int, 64> mask;
+        chess960(startPos, path, mask);
+
+        p1Ctx.resetForNewGame();
+        p2Ctx.resetForNewGame();
+
+        const int r = playOneTuneGame(
+            p1Ctx, p2Ctx, sharedSrv, backend,
+            p1, p2,
+            startPos, path, mask,
+            /*p1IsWhite=*/true,
+            SIMS_PER_POS,
+            MAX_PLIES
+        );
+
+        if (r > 0) ++wins1;
+        else if (r < 0) ++losses1;
+        else ++draws;
+
+        ++played;
+    }
+
+    printTuneProgress(played, wins1, losses1, draws);
+
+    std::cout << "[tune] finished\n";
 }
 
 static constexpr float VALUE_LAMBDA = 0.95f;
