@@ -7496,9 +7496,9 @@ struct ArenaStats {
     int draws = 0;
 
     double currentScore() const {
-        int n = curWins + oldWins + draws;
+        int n = curWins + oldWins;
         if (n <= 0) return 0.5;
-        return ((double)curWins + 0.5 * (double)draws) / (double)n;
+        return (double)curWins / (double)n;
     }
 };
 
@@ -7508,9 +7508,9 @@ struct MatchStatsGeneric {
     int draws = 0;
 
     double p1Score() const {
-        const int n = p1Wins + p2Wins + draws;
+        const int n = p1Wins + p2Wins;
         if (n <= 0) return 0.5;
-        return ((double)p1Wins + 0.5 * (double)draws) / (double)n;
+        return (double)p1Wins / (double)n;
     }
 };
 
@@ -7814,12 +7814,12 @@ static AI_FORCEINLINE double normalCdf(double z) {
     return 0.5 * std::erfc(-z / std::sqrt(2.0));
 }
 
-static double computeLOSPercent(int wins, int losses, int draws) {
-    const int n = wins + losses + draws;
+static double computeLOSPercent(int wins, int losses) {
+    const int n = wins + losses;
     if (n <= 0) return 50.0;
 
-    const double mean = ((double)wins + 0.5 * (double)draws) / (double)n;
-    const double ex2 = ((double)wins + 0.25 * (double)draws) / (double)n;
+    const double mean = (double)wins / (double)n;
+    const double ex2 = (double)wins / (double)n;
     double var = ex2 - mean * mean;
     if (var < 0.0) var = 0.0;
 
@@ -7834,17 +7834,17 @@ static double computeLOSPercent(int wins, int losses, int draws) {
     return 100.0 * normalCdf(z);
 }
 
-static void printTuneProgress(int played, int wins1, int losses1, int draws) {
-    const int n = wins1 + losses1 + draws;
+static void printTuneProgress(int played, int wins1, int losses1) {
+    const int n = wins1 + losses1;
     const double score1 = (n > 0)
-        ? (((double)wins1 + 0.5 * (double)draws) / (double)n)
+        ? ((double)wins1 / (double)n)
         : 0.5;
 
-    const double los = computeLOSPercent(wins1, losses1, draws);
+    const double los = computeLOSPercent(wins1, losses1);
 
     std::cout
         << "[tune] games=" << played
-        << " W/L/D=" << wins1 << "/" << losses1 << "/" << draws
+        << " W/L=" << wins1 << "/" << losses1
         << " score1=" << std::fixed << std::setprecision(4) << score1
         << " LOS=" << std::setprecision(2) << los << "%\n";
 }
@@ -7979,7 +7979,7 @@ void tune(float c_init1, float fpu_reduction1,
 
     auto onProgress = [&](int playedGames, const MatchStatsGeneric& s) {
         if ((playedGames % 100) == 0) {
-            printTuneProgress(playedGames, s.p1Wins, s.p2Wins, s.draws);
+            printTuneProgress(playedGames, s.p1Wins, s.p2Wins);
         }
     };
 
@@ -8008,7 +8008,7 @@ void tune(float c_init1, float fpu_reduction1,
         onProgress,
         /*progressEveryPairs=*/50);
 
-    printTuneProgress(TOTAL_GAMES, g.p1Wins, g.p2Wins, g.draws);
+    printTuneProgress(TOTAL_GAMES, g.p1Wins, g.p2Wins);
     std::cout << "[tune] finished\n";
 }
 
