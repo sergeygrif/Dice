@@ -9974,7 +9974,7 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
                     }
                 }
             }
-
+float b=fmtFixed(getAverageInferBatchSize(), 2);
             std::cout << "Time: ";
             if (haveEta) std::cout << fmtFixed(remainDays, 2);
             else         std::cout << "--";
@@ -9989,11 +9989,9 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
                 << " | Grad: " << fmtFixed(trainer.lastGradNorm, 1)
                 << " | Len: " << fmtFixed(avgLen, 1)       
                 << " | NPS: " << fmtFixed(nps, 0)
-<< " | NNq: " << sharedSrv.size()
-<< " | NNi: " << g_inferInFlight.load(std::memory_order_relaxed)
-<< " | B: " << fmtFixed(getAverageInferBatchSize(), 2)
-<< " | NN duty: " << fmtFixed(nnDutyPct, 1) << "%"
-<< " | calls/sec: " << fmtFixed(nnCallsPerSec, 1)
+<< " | Batch: " << b
+<< " | Duty: " << fmtFixed(nnDutyPct, 1) << "%"
+<< " | Speed: " << fmtFixed(nnCallsPerSec, 1)*b
                 << " | Depth: " << fmtFixed(avgDepth, 0)
                 << "\n";
 
