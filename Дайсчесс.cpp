@@ -9941,16 +9941,14 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
                 << " | Replay: " << fmtCompactU64((uint64_t)rb.currentSize())
                 << " | Step: " << trainer.steps
                 << " | LR: " << fmtFixed(trainer.current_lr, 4)
-                << " | Loss: " << fmtFixed(trainer.lastLoss, 2)
                 << " (P: " << fmtFixed(trainer.lastLossP, 2)
                 << " V: " << fmtFixed(trainer.lastLossV, 2) << ")"
-                << " | p: " << fmtFixed(trainer.lastEntropy, 2)
                 << " | v: " << fmtFixed(trainer.lastVMAE, 2)
                 << " | Grad: " << fmtFixed(trainer.lastGradNorm, 1)
                 << " | Len: " << fmtFixed(avgLen, 1)       
                 << " | NPS: " << fmtFixed(nps, 0)
-                << " | NN: " << sharedSrv.size()
-                << " | TT: " << fmtFixed(ttHitPct, 0) << "%"
+<< " | NNq: " << sharedSrv.size()
+<< " | NNi: " << g_inferInFlight.load(std::memory_order_relaxed)
                 << " | Depth: " << fmtFixed(avgDepth, 0)
                 << "\n";
 
