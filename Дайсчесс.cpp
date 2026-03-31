@@ -9974,7 +9974,7 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
                     }
                 }
             }
-float b=fmtFixed(getAverageInferBatchSize(), 2);
+float b=stof(fmtFixed(getAverageInferBatchSize(), 2));
             std::cout << "Time: ";
             if (haveEta) std::cout << fmtFixed(remainDays, 2);
             else         std::cout << "--";
@@ -9991,7 +9991,7 @@ float b=fmtFixed(getAverageInferBatchSize(), 2);
                 << " | NPS: " << fmtFixed(nps, 0)
 << " | Batch: " << b
 << " | Duty: " << fmtFixed(nnDutyPct, 1) << "%"
-<< " | Speed: " << fmtFixed(nnCallsPerSec, 1)*b
+<< " | Speed: " << stof(fmtFixed(nnCallsPerSec, 1))*b
                 << " | Depth: " << fmtFixed(avgDepth, 0)
                 << "\n";
 
