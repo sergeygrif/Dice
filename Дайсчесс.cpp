@@ -9899,8 +9899,7 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
                 << " | p: " << fmtFixed(trainer.lastEntropy, 2)
                 << " | v: " << fmtFixed(trainer.lastVMAE, 2)
                 << " | Grad: " << fmtFixed(trainer.lastGradNorm, 1)
-                << " | Len: " << fmtFixed(avgLen, 1)
-                << " | 256: " << fmtFixed(truncatedPct, 0) << "%"
+                << " | Len: " << fmtFixed(avgLen, 1)       
                 << " | NPS: " << fmtFixed(nps, 0)
                 << " | NN: " << sharedSrv.size()
                 << " | TT: " << fmtFixed(ttHitPct, 0) << "%"
