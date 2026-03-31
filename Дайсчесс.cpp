@@ -9427,7 +9427,7 @@ static AI_FORCEINLINE std::chrono::milliseconds
 currentSelfPlayBlockDuration(std::chrono::milliseconds startGuard) {
     using namespace std::chrono;
 
-    constexpr int kBlockToGuard = 50;
+    constexpr int kBlockToGuard = 10;
 
     long long ms = startGuard.count() * (long long)kBlockToGuard;
     if (ms <= 0) ms = 1;
