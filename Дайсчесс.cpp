@@ -9302,6 +9302,18 @@ static AI_FORCEINLINE bool tryClaimGameBudget(std::atomic<int>& gamesLeft) {
     return false;
 }
 
+static AI_FORCEINLINE void refundGameBudget(std::atomic<int>& gamesLeft) {
+    gamesLeft.fetch_add(1, std::memory_order_relaxed);
+}
+
+template<class Clock = std::chrono::steady_clock>
+static AI_FORCEINLINE bool enoughTimeToStartNewGame(
+    typename Clock::time_point deadline,
+    std::chrono::milliseconds guard)
+{
+    return Clock::now() + guard < deadline;
+}
+
 struct SelfPlayBlockStats {
     uint64_t games = 0;
     uint64_t plies = 0;
@@ -9361,9 +9373,21 @@ static void runParallelSelfPlayBlock(
                 GameContext& sp = *gamesCtx[i];
 
                 for (;;) {
+                    using Clock = std::chrono::steady_clock;
+                    static constexpr auto START_GUARD = std::chrono::milliseconds(3000);
+
                     if (abortAll.load(std::memory_order_relaxed)) break;
-                    if (std::chrono::steady_clock::now() >= deadline) break;
+
+                    // Не стартуем новую игру слишком близко к дедлайну.
+                    if (!enoughTimeToStartNewGame<Clock>(deadline, START_GUARD)) break;
+
                     if (!tryClaimGameBudget(gamesLeft)) break;
+
+                    // Повторная проверка уже после claim, чтобы не начать игру на границе.
+                    if (!enoughTimeToStartNewGame<Clock>(deadline, START_GUARD)) {
+                        refundGameBudget(gamesLeft);
+                        break;
+                    }
 
                     int plyCount = 0;
                     bool terminated = false;
@@ -9545,8 +9569,8 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
     // -------------------------------
     // SCHEDULER
     // -------------------------------
-    static constexpr int SELFPLAY_BLOCK_MS = 8000;
-    static constexpr int MAX_GAMES_PER_BLOCK = 16;
+    static constexpr int SELFPLAY_BLOCK_MS = 30000;
+    static constexpr int MAX_GAMES_PER_BLOCK = 64;
 
     static constexpr double REPLAY_RATIO = 6.0;          // consumed / added
     static constexpr int TRAIN_MAX_STEPS_PER_BLOCK = 9999;
