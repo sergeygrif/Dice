@@ -9493,13 +9493,7 @@ void Training(int targetGames) {
     // но без безумного раздувания числа GameContext.
     const unsigned SEARCH_THREADS_PER_GAME = 1u;
 
-    const unsigned PARALLEL_GAMES =
-        (hwSP >= 48 ? 10u :
-            hwSP >= 32 ? 8u :
-            hwSP >= 24 ? 6u :
-            hwSP >= 16 ? 5u :
-            hwSP >= 12 ? 4u :
-            hwSP >= 8 ? 3u : 2u);
+PARALLEL_GAMES = std::max(2u, hwSP - 4u);
 
     const size_t SP_NODE_POW2 =
         (PARALLEL_GAMES >= 6 ? (1u << 18) :
@@ -9546,9 +9540,7 @@ void Training(int targetGames) {
     SearchPoolStatsSnapshot prevSearchStats = snapshotAllSearchStats(gamesCtx);
     bool stopTraining = false;
 
-    std::cout << "[selfplay] parallel_games=" << PARALLEL_GAMES
-        << " shared_nn_server=1"
-        << "\n";
+    std::cout << "[selfplay] parallel_games=" << PARALLEL_GAMES<< "\n";
 
     // -------------------------------
     // SCHEDULER
