@@ -9041,7 +9041,7 @@ struct Trainer {
 // init / load / save
 // ------------------------------------------------------------
 // ------------------------------------------------------------
-// Trainer checkpoint: optimizer state + trainer.steps
+// Trainer checkpoint: optimizer state
 // ------------------------------------------------------------
 
 static bool saveOptimizerState(const std::string& optFile, const Trainer& trainer) {
@@ -9075,62 +9075,6 @@ static bool loadOptimizerState(const std::string& optFile, Trainer& trainer) {
     }
 }
 
-struct TrainerStateDisk {
-    uint64_t magic = 0x545241494E535445ULL; // arbitrary magic
-    uint32_t version = 1;
-    uint32_t reserved = 0;
-    uint64_t steps = 0;
-};
-
-static bool saveTrainerState(const std::string& stateFile, const Trainer& trainer) {
-    TrainerStateDisk s;
-    s.steps = trainer.steps;
-    return writeFileAll(stateFile, &s, sizeof(s));
-}
-
-static bool loadTrainerState(const std::string& stateFile, Trainer& trainer) {
-    std::vector<char> blob;
-    readFileAll(stateFile, blob);
-    if (blob.size() != sizeof(TrainerStateDisk)) return false;
-
-    TrainerStateDisk s{};
-    std::memcpy(&s, blob.data(), sizeof(s));
-
-    if (s.magic != 0x545241494E535445ULL) return false;
-    if (s.version != 1) return false;
-
-    trainer.steps = s.steps;
-    return true;
-}
-
-template <typename DstModule, typename SrcModule>
-static void copyCompatibleModuleState(DstModule& dst, SrcModule& src) {
-    torch::NoGradGuard ng;
-
-    auto dstParams = dst->named_parameters(true);
-    auto srcParams = src->named_parameters(true);
-    for (const auto& item : srcParams) {
-        if (auto* dstTensor = dstParams.find(item.key())) {
-            if (dstTensor->sizes() == item.value().sizes()) {
-                dstTensor->copy_(item.value());
-            }
-        }
-    }
-
-    auto dstBuffers = dst->named_buffers(true);
-    auto srcBuffers = src->named_buffers(true);
-    for (const auto& item : srcBuffers) {
-        if (auto* dstTensor = dstBuffers.find(item.key())) {
-            if (dstTensor->sizes() == item.value().sizes()) {
-                dstTensor->copy_(item.value());
-            }
-        }
-    }
-
-    if (src->is_training()) dst->train();
-    else                    dst->eval();
-}
-
 static bool loadOrCreateTorchModel(const std::string& ptFile, Net& model) {
     if (fileExists(ptFile)) {
         try {
@@ -9139,52 +9083,6 @@ static bool loadOrCreateTorchModel(const std::string& ptFile, Net& model) {
         }
         catch (const std::exception& e) {
             std::cerr << "torch::load failed: " << e.what() << "\n";
-            return false;
-        }
-    }
-
-    const std::string oldPtFile = "old.pt";
-    if (fileExists(oldPtFile)) {
-        try {
-            LegacyNet oldModel;
-            torch::load(oldModel, oldPtFile);
-            copyCompatibleModuleState(model, oldModel);
-
-            torch::NoGradGuard ng;
-            auto oldStem = oldModel->stem->weight.detach().cpu();
-            auto newStem = model->stem->weight.detach().cpu().clone();
-
-            if (oldStem.dim() != 4 || newStem.dim() != 4) {
-                throw std::runtime_error("stem weight tensor must be 4D");
-            }
-
-            const int64_t oldInPlanes = oldStem.size(1);
-            const int64_t newInPlanes = newStem.size(1);
-            const int64_t oldExpected = LEGACY_NN_SQ_PLANES;
-            const int64_t newExpected = NN_SQ_PLANES;
-            if (oldInPlanes != oldExpected || newInPlanes != newExpected) {
-                throw std::runtime_error(
-                    "unexpected stem input planes in old.pt migration: old=" + std::to_string(oldInPlanes) +
-                    ", new=" + std::to_string(newInPlanes));
-            }
-
-            newStem.zero_();
-            newStem.slice(1, 0, 19).copy_(oldStem.slice(1, 0, 19));
-            for (int pt = 0; pt < 6; ++pt) {
-                auto oldPlane = oldStem.slice(1, 19 + pt, 20 + pt);
-                for (int lvl = 0; lvl < 3; ++lvl) {
-                    newStem.slice(1, 19 + pt * 3 + lvl, 20 + pt * 3 + lvl).copy_(oldPlane / 3.0);
-                }
-            }
-
-            model->stem->weight.set_data(newStem.to(model->stem->weight.device(), model->stem->weight.scalar_type()));
-            torch::save(model, ptFile);
-            std::cerr << "Migrated weights from " << oldPtFile << " to " << ptFile
-                << " (6 dice planes -> 18 dice planes).\n";
-            return true;
-        }
-        catch (const std::exception& e) {
-            std::cerr << "old.pt migration failed: " << e.what() << "\n";
             return false;
         }
     }
@@ -9341,7 +9239,6 @@ static void saveAll(const std::string& ptFile,
     const std::string& emaFile,
     const std::string& planFile,
     const std::string& optFile,
-    const std::string& trainerStateFile,
     Net& model,
     Net& emaModel,
     Trainer& trainer) {
@@ -9364,10 +9261,6 @@ static void saveAll(const std::string& ptFile,
 
             if (!saveOptimizerState(optFile, trainer)) {
                 std::cerr << "save optimizer state failed.\n";
-            }
-
-            if (!saveTrainerState(trainerStateFile, trainer)) {
-                std::cerr << "save trainer state failed.\n";
             }
         }
 
@@ -9556,7 +9449,6 @@ void Training(int targetGames) {
     const std::string emaFile = "net_ema.pt";
     const std::string planFile = "net.plan";
     const std::string optFile = "optimizer.pt";
-    const std::string trainerStateFile = "trainer_state.bin";
 
     Net model;
     Net emaModel;
@@ -9566,15 +9458,8 @@ void Training(int targetGames) {
     static constexpr size_t REPLAY_CAP = 1000000;
     ReplayBuffer rb(REPLAY_CAP);
 
-    // Trainer: сначала восстановим steps, потом init(), потом optimizer
+    // Trainer: инициализируем с нулевого шага, затем пытаемся восстановить optimizer
     Trainer trainer;
-
-    if (loadTrainerState(trainerStateFile, trainer)) {
-        std::cerr << "restored steps=" << trainer.steps << "\n";
-    }
-    else {
-        std::cerr << "no trainer_state found, starting from step 0.\n";
-    }
 
     trainer.init(model, emaModel);
 
@@ -9586,13 +9471,7 @@ void Training(int targetGames) {
         trainer.updateLR(true);
     }
     else {
-        if (trainer.steps != 0) {
-            std::cerr << "warning: steps restored, but optimizer state not found/failed to load. "
-                "Optimizer starts fresh.\n";
-        }
-        else {
-            std::cerr << "no optimizer state found, starting fresh.\n";
-        }
+        std::cerr << "no optimizer state found, starting fresh.\n";
     }
 
     Net oldModel;
@@ -9870,7 +9749,7 @@ void Training(int targetGames) {
             safeRefitBarrierShared(sharedSrv);
             nextSave += std::chrono::hours(1);
 
-            saveAll(ptFile, emaFile, planFile, optFile, trainerStateFile, model, emaModel, trainer);
+            saveAll(ptFile, emaFile, planFile, optFile, model, emaModel, trainer);
 
             std::cout << "[autosave] Progress: " << games << " / " << targetGames << " games.\n";
         }
@@ -9967,9 +9846,6 @@ void Training(int targetGames) {
             std::cerr << "final save optimizer state failed.\n";
         }
 
-        if (!saveTrainerState(trainerStateFile, trainer)) {
-            std::cerr << "final save trainer state failed.\n";
-        }
     }
 
     std::cout << "[Completion] Starting final TensorRT rebuild. This will take a couple of minutes...\n";
@@ -10019,7 +9895,7 @@ void Training(int targetGames) {
         g_trtOldReady = false;
     }
 
-    std::cout << "Training completed successfully! Files net.pt, net_ema.pt, optimizer.pt, trainer_state.bin, and net.plan are ready.\n";
+    std::cout << "Training completed successfully! Files net.pt, net_ema.pt, optimizer.pt, and net.plan are ready.\n";
     diagLogLine("[Training] finished normally");
 }
 
