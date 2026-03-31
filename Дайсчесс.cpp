@@ -6104,6 +6104,21 @@ static bool trtSavePlanToDisk(TrtRunner& trt, const std::string& planFile) {
 // Inference server для обучения (CV вместо busy-wait), + g_trtMutex
 // ------------------------------------------------------------
 static std::atomic<int> g_inferInFlight{ 0 };
+static std::atomic<uint64_t> g_inferBatchCount{ 0 };
+static std::atomic<uint64_t> g_inferBatchSizeTotal{ 0 };
+
+static AI_FORCEINLINE void recordInferBatchSize(int batchSize) {
+    if (batchSize <= 0) return;
+    g_inferBatchCount.fetch_add(1, std::memory_order_relaxed);
+    g_inferBatchSizeTotal.fetch_add((uint64_t)batchSize, std::memory_order_relaxed);
+}
+
+static AI_FORCEINLINE double getAverageInferBatchSize() {
+    const uint64_t cnt = g_inferBatchCount.load(std::memory_order_relaxed);
+    if (cnt == 0) return 0.0;
+    const uint64_t total = g_inferBatchSizeTotal.load(std::memory_order_relaxed);
+    return (double)total / (double)cnt;
+}
 
 struct InferInFlightGuard {
     InferInFlightGuard() { g_inferInFlight.fetch_add(1, std::memory_order_relaxed); }
@@ -6273,6 +6288,7 @@ private:
     ) {
         const int B = (int)jobs.size();
         if (B <= 0) return;
+        recordInferBatchSize(B);
 
         batchPtrs.resize((size_t)B);
         for (int i = 0; i < B; ++i) batchPtrs[(size_t)i] = jobs[(size_t)i].get();
@@ -9948,6 +9964,7 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
                 << " | NPS: " << fmtFixed(nps, 0)
 << " | NNq: " << sharedSrv.size()
 << " | NNi: " << g_inferInFlight.load(std::memory_order_relaxed)
+<< " | B: " << fmtFixed(getAverageInferBatchSize(), 2)
                 << " | Depth: " << fmtFixed(avgDepth, 0)
                 << "\n";
 
