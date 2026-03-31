@@ -7769,10 +7769,9 @@ static ArenaStats runArenaMatch(int games, int simsPerPos) {
     // В arena каждая lane = 2 SelfPlayContext, у каждого свой server + pool.
     // Поэтому держим threadsPerSide небольшим.
     const unsigned threadsPerSide = (hw >= 24 ? 2u : 1u);
-    const unsigned laneCost = 2u * (threadsPerSide + 1u);
-    const unsigned maxLanesByCpu = std::max(1u, hw / std::max(1u, laneCost));
     const unsigned wantedLanes = (unsigned)std::max(1, (games + 1) / 2);
-    const unsigned parallelLanes = std::max(1u, std::min(wantedLanes, std::min(maxLanesByCpu, 4u)));
+    const unsigned lanesByFormula = (hw > 4u) ? ((hw - 4u) / 2u) : 1u;
+    const unsigned parallelLanes = std::max(1u, std::min(wantedLanes, lanesByFormula));
 
     std::vector<std::unique_ptr<ArenaLane>> lanes;
     lanes.reserve(parallelLanes);
@@ -7943,10 +7942,9 @@ void tune(float c_init1, float fpu_reduction1,
 
     // Tune lane легче arena: только 2 GameContext, shared NN server один на всех.
     const unsigned threadsPerSide = (hw >= 16 ? 2u : 1u);
-    const unsigned laneCost = std::max(1u, 2u * threadsPerSide);
-    const unsigned maxLanesByCpu = std::max(1u, hw / laneCost);
     const unsigned wantedLanes = (unsigned)std::max(1, (TOTAL_GAMES + 1) / 2);
-    const unsigned parallelLanes = std::max(1u, std::min(wantedLanes, std::min(maxLanesByCpu, 8u)));
+    const unsigned lanesByFormula = (hw > 4u) ? ((hw - 4u) / 2u) : 1u;
+    const unsigned parallelLanes = std::max(1u, std::min(wantedLanes, lanesByFormula));
 
     sharedSrv.start();
 
