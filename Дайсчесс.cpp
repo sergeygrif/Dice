@@ -9493,7 +9493,7 @@ void Training(int targetGames) {
     // но без безумного раздувания числа GameContext.
     const unsigned SEARCH_THREADS_PER_GAME = 1u;
 
-PARALLEL_GAMES = std::max(2u, hwSP - 4u);
+const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
 
     const size_t SP_NODE_POW2 =
         (PARALLEL_GAMES >= 6 ? (1u << 18) :
