@@ -9402,7 +9402,7 @@ static AI_FORCEINLINE std::chrono::milliseconds currentSelfPlayStartGuard() {
     constexpr auto kMin = milliseconds(500);
     constexpr auto kMax = milliseconds(30000);
     constexpr uint64_t kMinSamples = 8;
-    constexpr double kSigmaMul = 2.5;
+    constexpr double kSigmaMul = 0.5;
 
     const auto s = g_selfPlayGameDurationStats.snapshot();
     double guardMs = (double)kFallback.count();
