@@ -9321,6 +9321,64 @@ struct SelfPlayBlockStats {
     uint64_t samples = 0;
 };
 
+struct GameDurationStats {
+    std::atomic<uint64_t> games{ 0 };
+    std::atomic<uint64_t> totalNs{ 0 };
+
+    void reset() {
+        games.store(0, std::memory_order_relaxed);
+        totalNs.store(0, std::memory_order_relaxed);
+    }
+
+    template<class Duration>
+    void add(Duration d) {
+        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(d).count();
+        if (ns <= 0) return;
+
+        totalNs.fetch_add((uint64_t)ns, std::memory_order_relaxed);
+        games.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    std::chrono::milliseconds averageMsOr(
+        std::chrono::milliseconds fallback,
+        uint64_t minSamples = 8) const
+    {
+        const uint64_t g = games.load(std::memory_order_relaxed);
+        if (g < minSamples) return fallback;
+
+        const uint64_t ns = totalNs.load(std::memory_order_relaxed);
+        if (ns == 0) return fallback;
+
+        const uint64_t avgNs = ns / g;
+        auto avgMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::nanoseconds(avgNs));
+
+        if (avgMs.count() <= 0) return fallback;
+        return avgMs;
+    }
+};
+
+static GameDurationStats g_selfPlayGameDurationStats;
+
+static AI_FORCEINLINE std::chrono::milliseconds currentSelfPlayStartGuard() {
+    using namespace std::chrono;
+
+    constexpr auto kFallback = milliseconds(3000);
+    constexpr auto kMin = milliseconds(500);
+    constexpr auto kMax = milliseconds(30000);
+    constexpr double kFactor = 1.15;
+    constexpr uint64_t kMinSamples = 8;
+
+    auto avgMs = g_selfPlayGameDurationStats.averageMsOr(kFallback, kMinSamples);
+
+    long long guardMs = (long long)std::llround((double)avgMs.count() * kFactor);
+    auto guard = milliseconds(guardMs);
+
+    if (guard < kMin) guard = kMin;
+    if (guard > kMax) guard = kMax;
+    return guard;
+}
+
 static SearchPoolStatsSnapshot snapshotAllSearchStats(
     const std::vector<std::unique_ptr<GameContext>>& gamesCtx) {
     SearchPoolStatsSnapshot out{};
@@ -9374,17 +9432,16 @@ static void runParallelSelfPlayBlock(
 
                 for (;;) {
                     using Clock = std::chrono::steady_clock;
-                    static constexpr auto START_GUARD = std::chrono::milliseconds(3000);
 
                     if (abortAll.load(std::memory_order_relaxed)) break;
 
-                    // Не стартуем новую игру слишком близко к дедлайну.
-                    if (!enoughTimeToStartNewGame<Clock>(deadline, START_GUARD)) break;
+                    const auto startGuardBeforeClaim = currentSelfPlayStartGuard();
+                    if (!enoughTimeToStartNewGame<Clock>(deadline, startGuardBeforeClaim)) break;
 
                     if (!tryClaimGameBudget(gamesLeft)) break;
 
-                    // Повторная проверка уже после claim, чтобы не начать игру на границе.
-                    if (!enoughTimeToStartNewGame<Clock>(deadline, START_GUARD)) {
+                    const auto startGuardAfterClaim = currentSelfPlayStartGuard();
+                    if (!enoughTimeToStartNewGame<Clock>(deadline, startGuardAfterClaim)) {
                         refundGameBudget(gamesLeft);
                         break;
                     }
@@ -9392,6 +9449,8 @@ static void runParallelSelfPlayBlock(
                     int plyCount = 0;
                     bool terminated = false;
                     int samplesAdded = 0;
+
+                    const auto gameT0 = Clock::now();
 
                     selfPlayOneGame960(
                         sp,
@@ -9405,6 +9464,13 @@ static void runParallelSelfPlayBlock(
                         terminated,
                         samplesAdded
                     );
+
+                    const auto gameT1 = Clock::now();
+
+                    if (!sp.T.abort.load(std::memory_order_relaxed) &&
+                        (terminated || plyCount > 0 || samplesAdded > 0)) {
+                        g_selfPlayGameDurationStats.add(gameT1 - gameT0);
+                    }
 
                     gamesDone.fetch_add(1, std::memory_order_relaxed);
                     pliesDone.fetch_add((uint64_t)std::max(0, plyCount), std::memory_order_relaxed);
@@ -9468,6 +9534,7 @@ static std::string fmtFixed(double x, int prec) {
 
 void Training(int targetGames) {
     diagLogLine("[Training] started, targetGames=" + std::to_string(targetGames));
+    g_selfPlayGameDurationStats.reset();
 
     const std::string ptFile = "net.pt";
     const std::string emaFile = "net_ema.pt";
