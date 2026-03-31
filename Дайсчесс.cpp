@@ -9691,8 +9691,6 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
     // -------------------------------
     // SCHEDULER
     // -------------------------------
-    static constexpr int MAX_GAMES_PER_BLOCK = 64;
-
     static constexpr double REPLAY_RATIO = 6.0;          // consumed / added
     static constexpr int TRAIN_MAX_STEPS_PER_BLOCK = 9999;
     static constexpr int TRAIN_WARMUP_BATCHES = 1000;
@@ -9738,7 +9736,7 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
             simsPerPos,
             maxPlies,
             addRootNoise,
-            MAX_GAMES_PER_BLOCK,
+            targetGames - games,
             targetGames - games,
             spEnd,
             startGuard,
