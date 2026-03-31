@@ -9488,15 +9488,18 @@ void Training(int targetGames) {
 
     const unsigned hwSP = std::max(1u, std::thread::hardware_concurrency());
 
-    const unsigned PARALLEL_GAMES =
-        (hwSP >= 32 ? 6u :
-            hwSP >= 20 ? 4u :
-            hwSP >= 12 ? 3u : 2u);
+    // Для training держим ровно 1 search-thread на игру.
+    // Тогда лучший throughput обычно даёт больше параллельных игр,
+    // но без безумного раздувания числа GameContext.
+    const unsigned SEARCH_THREADS_PER_GAME = 1u;
 
-    unsigned SEARCH_THREADS_PER_GAME = 1u;
-    if (hwSP >= PARALLEL_GAMES * 3u) {
-        SEARCH_THREADS_PER_GAME = std::min(3u, std::max(1u, hwSP / PARALLEL_GAMES - 1u));
-    }
+    const unsigned PARALLEL_GAMES =
+        (hwSP >= 48 ? 10u :
+            hwSP >= 32 ? 8u :
+            hwSP >= 24 ? 6u :
+            hwSP >= 16 ? 5u :
+            hwSP >= 12 ? 4u :
+            hwSP >= 8 ? 3u : 2u);
 
     const size_t SP_NODE_POW2 =
         (PARALLEL_GAMES >= 6 ? (1u << 18) :
@@ -9544,7 +9547,6 @@ void Training(int targetGames) {
     bool stopTraining = false;
 
     std::cout << "[selfplay] parallel_games=" << PARALLEL_GAMES
-        << " search_threads_per_game=" << SEARCH_THREADS_PER_GAME
         << " shared_nn_server=1"
         << "\n";
 
@@ -9782,8 +9784,29 @@ void Training(int targetGames) {
                 ? (100.0 * (double)statTruncatedWindow / (double)statGamesWindow)
                 : 0.0;
 
+            const double elapsedSecTotal =
+                std::chrono::duration<double>(now - t0).count();
+
+            double remainDays = 0.0;
+            bool haveEta = false;
+
+            if (games > 0 && elapsedSecTotal > 1.0) {
+                const double gamesPerSecTotal = (double)games / elapsedSecTotal;
+                if (gamesPerSecTotal > 1e-9) {
+                    const double gamesLeft = (double)std::max(0, targetGames - games);
+                    remainDays = (gamesLeft / gamesPerSecTotal) / 86400.0;
+                    if (std::isfinite(remainDays)) {
+                        haveEta = true;
+                    }
+                }
+            }
+
+            std::cout << "Time: ";
+            if (haveEta) std::cout << fmtFixed(remainDays, 2);
+            else         std::cout << "--";
+
             std::cout
-                << "Games: " << games
+                << " | Games: " << games
                 << " | Replay: " << fmtCompactU64((uint64_t)rb.currentSize())
                 << " | Step: " << trainer.steps
                 << " | LR: " << fmtFixed(trainer.current_lr, 4)
