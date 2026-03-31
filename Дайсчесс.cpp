@@ -9321,40 +9321,77 @@ struct SelfPlayBlockStats {
     uint64_t samples = 0;
 };
 
+struct GameDurationStatsSnapshot {
+    uint64_t games = 0;
+    double meanMs = 0.0;
+    double stddevMs = 0.0;
+    double minMs = 0.0;
+    double maxMs = 0.0;
+};
+
 struct GameDurationStats {
-    std::atomic<uint64_t> games{ 0 };
-    std::atomic<uint64_t> totalNs{ 0 };
+    mutable std::mutex m;
+    uint64_t games = 0;
+
+    // Welford online stats
+    double meanMs = 0.0;
+    double m2Ms = 0.0;
+
+    double minMs = 0.0;
+    double maxMs = 0.0;
 
     void reset() {
-        games.store(0, std::memory_order_relaxed);
-        totalNs.store(0, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lk(m);
+        games = 0;
+        meanMs = 0.0;
+        m2Ms = 0.0;
+        minMs = 0.0;
+        maxMs = 0.0;
     }
 
     template<class Duration>
     void add(Duration d) {
-        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(d).count();
-        if (ns <= 0) return;
+        const double ms = std::chrono::duration<double, std::milli>(d).count();
+        if (!(ms > 0.0) || !std::isfinite(ms)) return;
 
-        totalNs.fetch_add((uint64_t)ns, std::memory_order_relaxed);
-        games.fetch_add(1, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lk(m);
+
+        ++games;
+        if (games == 1) {
+            meanMs = ms;
+            m2Ms = 0.0;
+            minMs = ms;
+            maxMs = ms;
+            return;
+        }
+
+        const double delta = ms - meanMs;
+        meanMs += delta / (double)games;
+        const double delta2 = ms - meanMs;
+        m2Ms += delta * delta2;
+
+        if (ms < minMs) minMs = ms;
+        if (ms > maxMs) maxMs = ms;
     }
 
-    std::chrono::milliseconds averageMsOr(
-        std::chrono::milliseconds fallback,
-        uint64_t minSamples = 8) const
-    {
-        const uint64_t g = games.load(std::memory_order_relaxed);
-        if (g < minSamples) return fallback;
+    GameDurationStatsSnapshot snapshot() const {
+        std::lock_guard<std::mutex> lk(m);
 
-        const uint64_t ns = totalNs.load(std::memory_order_relaxed);
-        if (ns == 0) return fallback;
+        GameDurationStatsSnapshot s;
+        s.games = games;
+        s.meanMs = meanMs;
+        s.minMs = minMs;
+        s.maxMs = maxMs;
 
-        const uint64_t avgNs = ns / g;
-        auto avgMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::nanoseconds(avgNs));
+        if (games >= 2) {
+            const double var = std::max(0.0, m2Ms / (double)(games - 1));
+            s.stddevMs = std::sqrt(var);
+        }
+        else {
+            s.stddevMs = 0.0;
+        }
 
-        if (avgMs.count() <= 0) return fallback;
-        return avgMs;
+        return s;
     }
 };
 
@@ -9366,17 +9403,38 @@ static AI_FORCEINLINE std::chrono::milliseconds currentSelfPlayStartGuard() {
     constexpr auto kFallback = milliseconds(3000);
     constexpr auto kMin = milliseconds(500);
     constexpr auto kMax = milliseconds(30000);
-    constexpr double kFactor = 1.15;
     constexpr uint64_t kMinSamples = 8;
+    constexpr double kSigmaMul = 2.5;
 
-    auto avgMs = g_selfPlayGameDurationStats.averageMsOr(kFallback, kMinSamples);
+    const auto s = g_selfPlayGameDurationStats.snapshot();
+    double guardMs = (double)kFallback.count();
 
-    long long guardMs = (long long)std::llround((double)avgMs.count() * kFactor);
-    auto guard = milliseconds(guardMs);
+    if (s.games >= kMinSamples && std::isfinite(s.meanMs) && std::isfinite(s.stddevMs)) {
+        guardMs = s.meanMs + kSigmaMul * s.stddevMs;
+        if (guardMs < s.meanMs) guardMs = s.meanMs;
+    }
+
+    if (!(guardMs > 0.0) || !std::isfinite(guardMs)) {
+        guardMs = (double)kFallback.count();
+    }
+
+    auto guard = milliseconds((long long)std::llround(guardMs));
 
     if (guard < kMin) guard = kMin;
     if (guard > kMax) guard = kMax;
     return guard;
+}
+
+static AI_FORCEINLINE std::chrono::milliseconds
+currentSelfPlayBlockDuration(std::chrono::milliseconds startGuard) {
+    using namespace std::chrono;
+
+    constexpr int kBlockToGuard = 50;
+
+    long long ms = startGuard.count() * (long long)kBlockToGuard;
+    if (ms <= 0) ms = 1;
+
+    return milliseconds(ms);
 }
 
 static SearchPoolStatsSnapshot snapshotAllSearchStats(
@@ -9405,6 +9463,7 @@ static void runParallelSelfPlayBlock(
     int maxGamesThisBlock,
     int gamesRemainingTotal,
     std::chrono::steady_clock::time_point deadline,
+    std::chrono::milliseconds startGuard,
     SelfPlayBlockStats& outStats) {
 
     outStats = {};
@@ -9435,13 +9494,11 @@ static void runParallelSelfPlayBlock(
 
                     if (abortAll.load(std::memory_order_relaxed)) break;
 
-                    const auto startGuardBeforeClaim = currentSelfPlayStartGuard();
-                    if (!enoughTimeToStartNewGame<Clock>(deadline, startGuardBeforeClaim)) break;
+                    if (!enoughTimeToStartNewGame<Clock>(deadline, startGuard)) break;
 
                     if (!tryClaimGameBudget(gamesLeft)) break;
 
-                    const auto startGuardAfterClaim = currentSelfPlayStartGuard();
-                    if (!enoughTimeToStartNewGame<Clock>(deadline, startGuardAfterClaim)) {
+                    if (!enoughTimeToStartNewGame<Clock>(deadline, startGuard)) {
                         refundGameBudget(gamesLeft);
                         break;
                     }
@@ -9636,14 +9693,11 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
     // -------------------------------
     // SCHEDULER
     // -------------------------------
-    static constexpr int SELFPLAY_BLOCK_MS = 30000;
     static constexpr int MAX_GAMES_PER_BLOCK = 64;
 
     static constexpr double REPLAY_RATIO = 6.0;          // consumed / added
     static constexpr int TRAIN_MAX_STEPS_PER_BLOCK = 9999;
     static constexpr int TRAIN_WARMUP_BATCHES = 1000;
-
-    static constexpr int REFIT_EVERY_TRAIN_BLOCKS = 1;
 
     const int simsPerPos = 800;
     const int maxPlies = 256;
@@ -9660,7 +9714,6 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
     auto nextStat = t0 + std::chrono::seconds(10);
 
     int games = 0;
-    int trainBlocks = 0;
     int refits = 0;
     uint64_t statGamesWindow = 0;
     uint64_t statPlyWindow = 0;
@@ -9674,8 +9727,9 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
         // ===========================
         // 1) SELF-PLAY BLOCK
         // ===========================
-        const auto spEnd =
-            std::chrono::steady_clock::now() + std::chrono::milliseconds(SELFPLAY_BLOCK_MS);
+        const auto startGuard = currentSelfPlayStartGuard();
+        const auto selfPlayBlockDur = currentSelfPlayBlockDuration(startGuard);
+        const auto spEnd = std::chrono::steady_clock::now() + selfPlayBlockDur;
 
         SelfPlayBlockStats spBlk;
         runParallelSelfPlayBlock(
@@ -9689,6 +9743,7 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
             MAX_GAMES_PER_BLOCK,
             targetGames - games,
             spEnd,
+            startGuard,
             spBlk
         );
 
@@ -9731,16 +9786,13 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
                 trainSampleCredits -= (double)didTrain * (double)trainer.B;
                 if (trainSampleCredits < 0.0) trainSampleCredits = 0.0;
 
-                if (didTrain > 0) {
-                    ++trainBlocks;
-                }
             }
         }
 
         // ===========================
         // 3) REFIT TRT
         // ===========================
-        if (didTrain > 0 && (trainBlocks % REFIT_EVERY_TRAIN_BLOCKS) == 0) {
+        if (didTrain > 0) {
             safeRefitBarrierShared(sharedSrv);
 
             std::scoped_lock lk(g_modelMutex, g_trtMutex);
