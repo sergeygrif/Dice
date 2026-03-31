@@ -6106,6 +6106,7 @@ static bool trtSavePlanToDisk(TrtRunner& trt, const std::string& planFile) {
 static std::atomic<int> g_inferInFlight{ 0 };
 static std::atomic<uint64_t> g_inferBatchCount{ 0 };
 static std::atomic<uint64_t> g_inferBatchSizeTotal{ 0 };
+static std::atomic<uint64_t> g_inferBusyMicros{ 0 };
 
 static AI_FORCEINLINE void recordInferBatchSize(int batchSize) {
     if (batchSize <= 0) return;
@@ -6118,6 +6119,11 @@ static AI_FORCEINLINE double getAverageInferBatchSize() {
     if (cnt == 0) return 0.0;
     const uint64_t total = g_inferBatchSizeTotal.load(std::memory_order_relaxed);
     return (double)total / (double)cnt;
+}
+
+static AI_FORCEINLINE void recordInferBusyMicros(uint64_t us) {
+    if (us == 0) return;
+    g_inferBusyMicros.fetch_add(us, std::memory_order_relaxed);
 }
 
 struct InferInFlightGuard {
@@ -6502,9 +6508,15 @@ private:
                 }
 
 #if AI_HAVE_CUDA_KERNELS
+                const auto tBatchStart = std::chrono::steady_clock::now();
                 processBatch(batch, batchPtrs, values, logits);
+                recordInferBusyMicros((uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - tBatchStart).count());
 #else
+                const auto tBatchStart = std::chrono::steady_clock::now();
                 processBatch(batch, batchPtrs, values, policy, posBatch);
+                recordInferBusyMicros((uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - tBatchStart).count());
 #endif
                 freePendingBatch(batch);
             }
@@ -6521,9 +6533,15 @@ private:
                 cvNotFull.notify_all();
 
 #if AI_HAVE_CUDA_KERNELS
+                const auto tBatchStart = std::chrono::steady_clock::now();
                 processBatch(tail, batchPtrs, values, logits);
+                recordInferBusyMicros((uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - tBatchStart).count());
 #else
+                const auto tBatchStart = std::chrono::steady_clock::now();
                 processBatch(tail, batchPtrs, values, policy, posBatch);
+                recordInferBusyMicros((uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - tBatchStart).count());
 #endif
                 freePendingBatch(tail);
             }
@@ -9933,6 +9951,15 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
 
             const double elapsedSecTotal =
                 std::chrono::duration<double>(now - t0).count();
+            const double nnCallsPerSec = (elapsedSecTotal > 1e-9)
+                ? ((double)g_inferBatchCount.load(std::memory_order_relaxed) / elapsedSecTotal)
+                : 0.0;
+            const double nnDutyPct = (elapsedSecTotal > 1e-9)
+                ? std::clamp(
+                    (100.0 * (double)g_inferBusyMicros.load(std::memory_order_relaxed))
+                    / (elapsedSecTotal * 1.0e6),
+                    0.0, 100.0)
+                : 0.0;
 
             double remainDays = 0.0;
             bool haveEta = false;
@@ -9965,6 +9992,8 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
 << " | NNq: " << sharedSrv.size()
 << " | NNi: " << g_inferInFlight.load(std::memory_order_relaxed)
 << " | B: " << fmtFixed(getAverageInferBatchSize(), 2)
+<< " | NN duty: " << fmtFixed(nnDutyPct, 1) << "%"
+<< " | calls/sec: " << fmtFixed(nnCallsPerSec, 1)
                 << " | Depth: " << fmtFixed(avgDepth, 0)
                 << "\n";
 
