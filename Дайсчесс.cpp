@@ -9643,7 +9643,7 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
     static constexpr int TRAIN_MAX_STEPS_PER_BLOCK = 9999;
     static constexpr int TRAIN_WARMUP_BATCHES = 1000;
 
-    static constexpr int REFIT_EVERY_TRAIN_BLOCKS = 8;
+    static constexpr int REFIT_EVERY_TRAIN_BLOCKS = 1;
 
     const int simsPerPos = 800;
     const int maxPlies = 256;
