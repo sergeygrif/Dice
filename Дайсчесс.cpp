@@ -9863,7 +9863,7 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
             }
 
             if (arenaOk) {
-                std::cout << "\n[arena] start: current vs old, games=1000, sims=200, triggerGames="
+                std::cout << "\n[arena] start: current vs old, games=2000, sims=800, triggerGames="
                     << nextArenaAt << "\n";
 
                 ArenaStats ar = runArenaMatch(/*games=*/2000, /*simsPerPos=*/800);
