@@ -8048,45 +8048,51 @@ void tune(float c_init1, float fpu_reduction1,
     std::cout << "[tune] finished\n";
 }
 
-static constexpr float VALUE_LAMBDA = 0.95f;
-
 static AI_FORCEINLINE float valueToSidePerspective(float v, int fromSide, int toSide) {
     v = clamp01(v);
     return (fromSide == toSide) ? v : (1.0f - v);
 }
 
-static void buildLambdaTargets(
+static AI_FORCEINLINE float chanceStepDecay(uint8_t chanceCount) {
+    const bool odd = (chanceCount & 1u) != 0u;
+    const int decayPow = odd ? 1 : ((chanceCount >= 2u) ? 2 : 0);
+    if (decayPow <= 0) return 1.0f;
+    return std::pow(0.9f, (float)decayPow);
+}
+
+static void buildChanceWeightedTargets(
     std::vector<TrainSample>& game,
     const std::vector<int>& sideAtSample,
-    float zWhite,
-    float lambda = VALUE_LAMBDA)
+    const std::vector<uint8_t>& chanceToNext,
+    float zWhite)
 {
     const int n = (int)game.size();
     if (n <= 0) return;
+    if ((int)sideAtSample.size() != n || (int)chanceToNext.size() != n) return;
 
-    lambda = clamp01(lambda);
-
-    // Для последнего состояния target = истинный финальный исход.
-    float G = (sideAtSample[(size_t)(n - 1)] == 0) ? zWhite : (1.0f - zWhite);
-    game[(size_t)(n - 1)].z = clamp01(G);
-
-    // Назад по траектории:
-    // G_t^λ = (1-λ) * V_boot(next) + λ * G_{t+1}^λ
-    for (int i = n - 2; i >= 0; --i) {
+    for (int i = 0; i < n; ++i) {
         const int sideCur = sideAtSample[(size_t)i];
-        const int sideNext = sideAtSample[(size_t)i + 1];
+        float sumV = 1.0f;
+        float weighted = clamp01(game[(size_t)i].q);
+        float v = 1.0f;
 
-        // bootstrap от следующего search-value
-        const float bootNext =
-            valueToSidePerspective(game[(size_t)i + 1].q, sideNext, sideCur);
+        for (int j = i + 1; j < n; ++j) {
+            v *= chanceStepDecay(chanceToNext[(size_t)j - 1]);
+            sumV += v;
 
-        // уже посчитанный λ-return следующего состояния,
-        // приведённый к перспективе текущей стороны
-        const float contNext =
-            valueToSidePerspective(G, sideNext, sideCur);
+            const int sideJ = sideAtSample[(size_t)j];
+            const float qInCurPerspective =
+                valueToSidePerspective(game[(size_t)j].q, sideJ, sideCur);
+            weighted += v * qInCurPerspective;
+        }
 
-        G = clamp01((1.0f - lambda) * bootNext + lambda * contNext);
-        game[(size_t)i].z = G;
+        v *= chanceStepDecay(chanceToNext[(size_t)n - 1]);
+        sumV += v;
+
+        const float zCur = (sideCur == 0) ? zWhite : (1.0f - zWhite);
+        weighted += v * clamp01(zCur);
+
+        game[(size_t)i].z = clamp01(weighted / std::max(sumV, 1e-12f));
     }
 }
 
@@ -8108,6 +8114,7 @@ static void selfPlayOneGame960(GameContext& sp,
 
     std::vector<TrainSample> game;
     std::vector<int> sideAtSample;
+    std::vector<uint8_t> chanceToNext;
 
     MoveList ml;
     int term = 0;
@@ -8121,6 +8128,7 @@ static void selfPlayOneGame960(GameContext& sp,
 
     game.reserve((size_t)maxPlies);
     sideAtSample.reserve((size_t)maxPlies);
+    chanceToNext.reserve((size_t)maxPlies);
 
     outTerminated = false;
     outSamplesAdded = 0;
@@ -8134,6 +8142,9 @@ static void selfPlayOneGame960(GameContext& sp,
         if (term) { outTerminated = true; break; }
 
         if (ml.n == 0) {
+            if (!chanceToNext.empty() && chanceToNext.back() < 255u) {
+                ++chanceToNext.back();
+            }
             makeRandom(pos, sp.T.findNodeNoInsert(pos.key));
             continue;
         }
@@ -8153,6 +8164,7 @@ static void selfPlayOneGame960(GameContext& sp,
 
         game.push_back(sample);
         sideAtSample.push_back(pos.side);
+        chanceToNext.push_back(0);
 
         float temp = (d < 20) ? 1.0f : 0.0f;
         int mv = pickMoveFromVisits(moves, temp);
@@ -8171,8 +8183,8 @@ static void selfPlayOneGame960(GameContext& sp,
     }
     else return;
 
-    // λ-return вместо фиксированного 50/50 mix
-    buildLambdaTargets(game, sideAtSample, zWhite, VALUE_LAMBDA);
+    // Взвешенная цель по q с учетом количества chance-переходов между samples.
+    buildChanceWeightedTargets(game, sideAtSample, chanceToNext, zWhite);
 
     rb.pushMany(game);
     outSamplesAdded += (int)game.size();
