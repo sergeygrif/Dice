@@ -8054,10 +8054,8 @@ static AI_FORCEINLINE float valueToSidePerspective(float v, int fromSide, int to
 }
 
 static AI_FORCEINLINE float chanceStepDecay(uint8_t chanceCount) {
-    const bool odd = (chanceCount & 1u) != 0u;
-    const int decayPow = odd ? 1 : ((chanceCount >= 2u) ? 2 : 0);
-    if (decayPow <= 0) return 1.0f;
-    return std::pow(0.9f, (float)decayPow);
+if(chanceCount)return 0.9;
+return 1;
 }
 
 static void buildChanceWeightedTargets(
