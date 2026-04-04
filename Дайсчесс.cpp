@@ -8047,10 +8047,12 @@ void tune(float c_init1, float fpu_reduction1,
     printTuneProgress(TOTAL_GAMES, g.p1Wins, g.p2Wins);
     std::cout << "[tune] finished\n";
 }
+static float lambdaQ=1;
 static float lambdaD=1;
 static float lambdaC=0.9;
-static float lambdaZ=1;
+static float lambdaT=1;
 static float lambdaS=0;
+static float lambdaZ=0;
 static AI_FORCEINLINE float valueToSidePerspective(float v, int fromSide, int toSide) {
     v = clamp01(v);
     return (fromSide == toSide) ? v : (1.0f - v);
