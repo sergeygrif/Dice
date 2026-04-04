@@ -8089,7 +8089,7 @@ static void buildChanceWeightedTargets(
             weighted += v * qInCurPerspective;
         }
 
-        v=v*chanceStepDecay(chanceToNext[(size_t)n - 1])*lambdaZ+sumV*lambdaS;
+        v=v*chanceStepDecay(chanceToNext[(size_t)n - 1])*lambdaT+sumV*lambdaS+lambdaZ;
         sumV += v;
 
         const float zCur = (sideCur == 0) ? zWhite : (1.0f - zWhite);
