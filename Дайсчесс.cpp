@@ -8047,7 +8047,8 @@ void tune(float c_init1, float fpu_reduction1,
     printTuneProgress(TOTAL_GAMES, g.p1Wins, g.p2Wins);
     std::cout << "[tune] finished\n";
 }
-static float lambda=0.9;
+static float lambdaD=1;
+static float lambdaC=0.9;
 static float lambdaZ=1;
 static AI_FORCEINLINE float valueToSidePerspective(float v, int fromSide, int toSide) {
     v = clamp01(v);
@@ -8055,8 +8056,8 @@ static AI_FORCEINLINE float valueToSidePerspective(float v, int fromSide, int to
 }
 
 static AI_FORCEINLINE float chanceStepDecay(uint8_t chanceCount) {
-if(chanceCount)return lambda;
-return 1;
+if(chanceCount)return lambdaC;
+return lambdaD;
 }
 
 static void buildChanceWeightedTargets(
