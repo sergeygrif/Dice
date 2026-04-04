@@ -8075,9 +8075,9 @@ static void buildChanceWeightedTargets(
 
     for (int i = 0; i < n; ++i) {
         const int sideCur = sideAtSample[(size_t)i];
-        float sumV = 1.0f;
-        float weighted = clamp01(game[(size_t)i].q);
-        float v = 1.0f;
+        float v=lambdaQ;
+        float sumV = v;
+        float weighted = v*clamp01(game[(size_t)i].q);
 
         for (int j = i + 1; j < n; ++j) {
             v *= chanceStepDecay(chanceToNext[(size_t)j - 1]);
