@@ -8048,6 +8048,7 @@ void tune(float c_init1, float fpu_reduction1,
     std::cout << "[tune] finished\n";
 }
 static float lambda=0.9;
+static float lambdaZ=1;
 static AI_FORCEINLINE float valueToSidePerspective(float v, int fromSide, int toSide) {
     v = clamp01(v);
     return (fromSide == toSide) ? v : (1.0f - v);
@@ -8084,7 +8085,7 @@ static void buildChanceWeightedTargets(
             weighted += v * qInCurPerspective;
         }
 
-        v *= chanceStepDecay(chanceToNext[(size_t)n - 1]);
+        v *= chanceStepDecay(chanceToNext[(size_t)n - 1])*lambdaZ;
         sumV += v;
 
         const float zCur = (sideCur == 0) ? zWhite : (1.0f - zWhite);
