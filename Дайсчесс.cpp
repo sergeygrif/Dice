@@ -8047,14 +8047,14 @@ void tune(float c_init1, float fpu_reduction1,
     printTuneProgress(TOTAL_GAMES, g.p1Wins, g.p2Wins);
     std::cout << "[tune] finished\n";
 }
-
+static float lambda=0.9;
 static AI_FORCEINLINE float valueToSidePerspective(float v, int fromSide, int toSide) {
     v = clamp01(v);
     return (fromSide == toSide) ? v : (1.0f - v);
 }
 
 static AI_FORCEINLINE float chanceStepDecay(uint8_t chanceCount) {
-if(chanceCount)return 0.9;
+if(chanceCount)return lambda;
 return 1;
 }
 
