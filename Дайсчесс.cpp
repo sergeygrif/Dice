@@ -8047,7 +8047,7 @@ void tune(float c_init1, float fpu_reduction1,
     printTuneProgress(TOTAL_GAMES, g.p1Wins, g.p2Wins);
     std::cout << "[tune] finished\n";
 }
-static float lambdaQ=1;
+static float lambdaQ=1;//ok
 static float lambdaD=0.95;
 static float lambdaC=0.8;
 static float lambdaT=0;
