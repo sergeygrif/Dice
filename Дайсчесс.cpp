@@ -8048,7 +8048,7 @@ void tune(float c_init1, float fpu_reduction1,
     std::cout << "[tune] finished\n";
 }
 static float lambdaQ=1;//ok
-static float lambdaD=0.95;
+static float lambdaD=1;//ok
 static float lambdaC=0.8;
 static float lambdaT=0;
 static float lambdaS=0;
