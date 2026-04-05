@@ -8052,7 +8052,7 @@ static float lambdaD=1;//ok
 static float lambdaC=0.9;//ok
 static float lambdaT=1;//ok
 static float lambdaS=0;//ok
-static float lambdaZ=5;
+static float lambdaZ=0;//ok
 static AI_FORCEINLINE float valueToSidePerspective(float v, int fromSide, int toSide) {
     v = clamp01(v);
     return (fromSide == toSide) ? v : (1.0f - v);
