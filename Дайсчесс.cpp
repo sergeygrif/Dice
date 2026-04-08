@@ -7955,6 +7955,198 @@ static int playOneTuneGameOnLane(
         findChanceNode, searchMoves);
 }
 
+struct NetArenaLane {
+    GameContext n1Ctx;
+    GameContext n2Ctx;
+
+    NetArenaLane()
+        : n1Ctx((1u << 19), (1u << 23))
+        , n2Ctx((1u << 19), (1u << 23)) {
+    }
+
+    void start(unsigned threadsPerSide) {
+        n1Ctx.start(threadsPerSide);
+        n2Ctx.start(threadsPerSide);
+    }
+
+    void stop() {
+        n1Ctx.stop();
+        n2Ctx.stop();
+    }
+
+    void resetForNewGame() {
+        n1Ctx.resetForNewGame();
+        n2Ctx.resetForNewGame();
+    }
+};
+
+static int playOneNetArenaGameOnLane(
+    NetArenaLane& lane,
+    ITrainInferenceServer& n1Srv,
+    ITrainInferenceServer& n2Srv,
+    BackendBinding n1Backend,
+    BackendBinding n2Backend,
+    const SearchParams& n1Params,
+    const SearchParams& n2Params,
+    const Position& startPos,
+    const std::array<uint64_t, 4>& path,
+    const std::array<int, 64>& mask,
+    bool n1IsWhite,
+    int simsPerPos,
+    int maxPlies = 256)
+{
+    auto findChanceNode = [&](bool n1Turn, const Position& pos) -> TTNode* {
+        return n1Turn
+            ? lane.n1Ctx.T.findNodeNoInsert(pos.key)
+            : lane.n2Ctx.T.findNodeNoInsert(pos.key);
+    };
+
+    auto searchMoves = [&](bool n1Turn,
+                           const Position& pos,
+                           const std::array<uint64_t, 4>& pathRef,
+                           const std::array<int, 64>& maskRef,
+                           std::vector<moveState>& moves) -> bool {
+        GameContext& ctx = n1Turn ? lane.n1Ctx : lane.n2Ctx;
+        ITrainInferenceServer& srv = n1Turn ? n1Srv : n2Srv;
+        BackendBinding backend = n1Turn ? n1Backend : n2Backend;
+        const SearchParams& sp = n1Turn ? n1Params : n2Params;
+
+        float q = 0.5f;
+        runFixedSims(ctx.T, ctx.pool, srv, backend,
+            pos, pathRef, maskRef, simsPerPos, /*rootNoise=*/false, sp);
+
+        if (ctx.T.abort.load(std::memory_order_relaxed)) {
+            return false;
+        }
+
+        collectRootMoves(ctx.T, pos, q, moves);
+        return !moves.empty();
+    };
+
+    return playOneUniversalMatchGame(
+        startPos, path, mask, n1IsWhite, maxPlies,
+        findChanceNode, searchMoves);
+}
+
+void arena(string net1, string net2) {
+    TrtRunner trt1;
+    TrtRunner trt2;
+    std::mutex trt1Mutex;
+    std::mutex trt2Mutex;
+
+    if (!trt1.initOrCreate(net1)) {
+        std::cerr << "[arena-net] failed to initialize net1: " << net1 << "\n";
+        return;
+    }
+    if (!trt2.initOrCreate(net2)) {
+        std::cerr << "[arena-net] failed to initialize net2: " << net2 << "\n";
+        trt1.shutdown();
+        return;
+    }
+
+    BackendBinding n1Backend{ trt1, trt1Mutex };
+    BackendBinding n2Backend{ trt2, trt2Mutex };
+    SharedInferenceServerTrain n1Srv(n1Backend);
+    SharedInferenceServerTrain n2Srv(n2Backend);
+    n1Srv.start();
+    n2Srv.start();
+
+    struct NetArenaCleanupGuard {
+        SharedInferenceServerTrain* n1Srv = nullptr;
+        SharedInferenceServerTrain* n2Srv = nullptr;
+        TrtRunner* trt1 = nullptr;
+        TrtRunner* trt2 = nullptr;
+        ~NetArenaCleanupGuard() noexcept {
+            try {
+                if (n1Srv) {
+                    n1Srv->requestStop();
+                    n1Srv->join();
+                }
+            }
+            catch (...) {}
+            try {
+                if (n2Srv) {
+                    n2Srv->requestStop();
+                    n2Srv->join();
+                }
+            }
+            catch (...) {}
+            try {
+                if (trt1) trt1->shutdown();
+                if (trt2) trt2->shutdown();
+            }
+            catch (...) {}
+        }
+    } guard{ &n1Srv, &n2Srv, &trt1, &trt2 };
+
+    const SearchParams n1Params{ 0.70f, 0.16f, 19652.0f };
+    const SearchParams n2Params{ 0.70f, 0.16f, 19652.0f };
+
+    static constexpr int TOTAL_GAMES = 10000;
+    static constexpr int SIMS_PER_POS = 800;
+    static constexpr int MAX_PLIES = 256;
+
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    const unsigned threadsPerSide = (hw >= 16 ? 2u : 1u);
+    const unsigned wantedLanes = (unsigned)std::max(1, (TOTAL_GAMES + 1) / 2);
+    const unsigned lanesByFormula = (hw > 4u) ? ((hw - 4u) / 2u) : 1u;
+    const unsigned parallelLanes = std::max(1u, std::min(wantedLanes, lanesByFormula));
+
+    std::vector<std::unique_ptr<NetArenaLane>> lanes;
+    lanes.reserve(parallelLanes);
+    LanesStopGuard<NetArenaLane> lanesGuard(lanes);
+
+    for (unsigned i = 0; i < parallelLanes; ++i) {
+        auto lane = std::make_unique<NetArenaLane>();
+        lane->start(threadsPerSide);
+        lanes.push_back(std::move(lane));
+    }
+
+    std::cout
+        << "[arena-net] start\n"
+        << "  net1: " << net1 << "\n"
+        << "  net2: " << net2 << "\n"
+        << "  games=" << TOTAL_GAMES << " sims=" << SIMS_PER_POS << "\n"
+        << "  parallel_lanes=" << parallelLanes
+        << " threads_per_side=" << threadsPerSide << "\n";
+
+    auto onProgress = [&](int playedGames, const MatchStatsGeneric& s) {
+        if ((playedGames % 100) == 0) {
+            printTuneProgress(playedGames, s.p1Wins, s.p2Wins);
+        }
+    };
+
+    MatchStatsGeneric g = runUniversalMatchEngine(
+        lanes,
+        TOTAL_GAMES,
+        [&](NetArenaLane& lane,
+            const Position& startPos,
+            const std::array<uint64_t, 4>& path,
+            const std::array<int, 64>& mask,
+            bool n1IsWhite) -> int {
+            return playOneNetArenaGameOnLane(
+                lane,
+                n1Srv,
+                n2Srv,
+                n1Backend,
+                n2Backend,
+                n1Params,
+                n2Params,
+                startPos,
+                path,
+                mask,
+                n1IsWhite,
+                SIMS_PER_POS,
+                MAX_PLIES
+            );
+        },
+        onProgress,
+        /*progressEveryPairs=*/50);
+
+    printTuneProgress(TOTAL_GAMES, g.p1Wins, g.p2Wins);
+    std::cout << "[arena-net] finished\n";
+}
+
 void tune(float c_init1, float fpu_reduction1,
           float c_init2, float fpu_reduction2) {
     if (!g_trtReady) {
