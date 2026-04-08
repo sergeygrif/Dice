@@ -8029,18 +8029,69 @@ static int playOneNetArenaGameOnLane(
 }
 
 void arena(string net1, string net2) {
+    auto hasPtExtension = [](const std::string& path) -> bool {
+        if (path.size() < 3) return false;
+        const size_t dotPos = path.find_last_of('.');
+        if (dotPos == std::string::npos) return false;
+        std::string ext = path.substr(dotPos);
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return ext == ".pt";
+    };
+
+    auto planPathFromPt = [](const std::string& ptPath) -> std::string {
+        const size_t dotPos = ptPath.find_last_of('.');
+        if (dotPos == std::string::npos) return ptPath + ".plan";
+        return ptPath.substr(0, dotPos) + ".plan";
+    };
+
+    if (!hasPtExtension(net1) || !hasPtExtension(net2)) {
+        std::cerr << "[arena-net] expected only .pt files.\n"
+            << "  net1: " << net1 << "\n"
+            << "  net2: " << net2 << "\n";
+        return;
+    }
+
+    Net model1;
+    Net model2;
+    try {
+        torch::load(model1, net1);
+        torch::load(model2, net2);
+        model1->eval();
+        model2->eval();
+    }
+    catch (const std::exception& e) {
+        std::cerr << "[arena-net] failed to load .pt weights: " << e.what() << "\n";
+        return;
+    }
+
+    const std::string plan1 = planPathFromPt(net1);
+    const std::string plan2 = planPathFromPt(net2);
+
     TrtRunner trt1;
     TrtRunner trt2;
     std::mutex trt1Mutex;
     std::mutex trt2Mutex;
 
-    if (!trt1.initOrCreate(net1)) {
-        std::cerr << "[arena-net] failed to initialize net1: " << net1 << "\n";
+    if (!trt1.initOrCreate(plan1)) {
+        std::cerr << "[arena-net] failed to initialize net1 engine: " << plan1 << "\n";
         return;
     }
-    if (!trt2.initOrCreate(net2)) {
-        std::cerr << "[arena-net] failed to initialize net2: " << net2 << "\n";
+    if (!trtRefitFromTorchModel(trt1, model1)) {
+        std::cerr << "[arena-net] failed to refit net1 engine from: " << net1 << "\n";
         trt1.shutdown();
+        return;
+    }
+
+    if (!trt2.initOrCreate(plan2)) {
+        std::cerr << "[arena-net] failed to initialize net2 engine: " << plan2 << "\n";
+        trt1.shutdown();
+        return;
+    }
+    if (!trtRefitFromTorchModel(trt2, model2)) {
+        std::cerr << "[arena-net] failed to refit net2 engine from: " << net2 << "\n";
+        trt1.shutdown();
+        trt2.shutdown();
         return;
     }
 
