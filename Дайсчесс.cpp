@@ -8596,8 +8596,8 @@ struct Trainer {
     float lastAmpScale = 1.0f;
 
     // Hyperparams
-    double initial_lr = 2e-4;
-    double min_lr = 2e-5;
+    double initial_lr = 1e-4;
+    double min_lr = 1e-4;
     double current_lr = initial_lr;
     double wd = 1e-4;
     double ema_decay = 0.999;
