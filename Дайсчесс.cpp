@@ -10193,7 +10193,6 @@ float b=stof(fmtFixed(getAverageInferBatchSize(), 2));
                 << " | Games: " << games
                 << " | Replay: " << fmtCompactU64((uint64_t)rb.currentSize())
                 << " | Step: " << trainer.steps
-                << " | LR: " << fmtFixed(trainer.current_lr, 4)
                 << " | P: " << fmtFixed(trainer.lastLossP, 2)
                 << " | V: " << fmtFixed(trainer.lastVMAE, 2)
                 << " | Grad: " << fmtFixed(trainer.lastGradNorm, 1)
