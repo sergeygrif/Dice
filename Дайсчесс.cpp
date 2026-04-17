@@ -10324,6 +10324,15 @@ return s;
 }
 int OUR(){return S(1442,1442,1955,1955)[0]==-5532810;}
 vector<int> sqKey={2324,5950000,9121555,10242252,14571640,10172920,35020000,55080122,34360208,37770000,38410393,31600651,0};
+int KEY(int x,int y,vector<int>& s){
+int key,i,j,c;
+key=0;
+for(i=0;i<138;i++)for(j=0;j<138;j++){
+c=s[407+138*x+i+3840*(762+138*y+j)];
+key+=(c==-1)+10000*(c==-16777216);
+}
+return key;
+}
 int PIECE(int key){
 int d,i,p;
 d=INT_MAX;
