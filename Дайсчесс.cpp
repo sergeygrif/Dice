@@ -10301,8 +10301,28 @@ float b=stof(fmtFixed(getAverageInferBatchSize(), 2));
     std::cout << "Training completed successfully! Files net.pt, net_ema.pt, optimizer.pt, and net.plan are ready.\n";
     diagLogLine("[Training] finished normally");
 }
-
-
+vector<int> S(int x1,int x2,int y1,int y2){
+int w,h;
+vector<int> s;
+HDC d,m;
+HBITMAP b;
+BITMAPINFO p;
+w=x2-x1+1;
+h=y2-y1+1;
+s.resize(w*h);
+d=GetDC(0);
+m=CreateCompatibleDC(d);
+b=CreateCompatibleBitmap(d,w,h);
+p={40,w,-h,1,32};
+SelectObject(m,b);
+BitBlt(m,0,0,w,h,d,x1,y1,13369376);
+GetDIBits(d,b,0,h,s.data(),&p,0);
+DeleteObject(b);
+DeleteObject(m);
+DeleteObject(d);
+return s;
+}
+int OUR(){return S(1442,1442,1955,1955)[0]==-5532810;}
 
 int main() {
     installCrashDiagnostics();
