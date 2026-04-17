@@ -10323,6 +10323,7 @@ DeleteObject(d);
 return s;
 }
 int OUR(){return S(1442,1442,1955,1955)[0]==-5532810;}
+int FLIP(vector<int>& s){return s[417+3840*1752]==-665935;}
 vector<int> sqKey={2324,5950000,9121555,10242252,14571640,10172920,35020000,55080122,34360208,37770000,38410393,31600651,0};
 int KEY(int x,int y,vector<int>& s){
 int key,i,j,c;
