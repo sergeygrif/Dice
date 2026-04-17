@@ -10340,6 +10340,12 @@ d=INT_MAX;
 for(i=0;i<sqKey.size();i++)if(abs(sqKey[i]-key)<d){p=i;d=abs(sqKey[i]-key);}
 return p;
 }
+int SQUARE(int x,int y,int flip){
+int s;
+s=x+8*(7-y);
+if(flip)s^=63;
+return s;
+}
 int main() {
     installCrashDiagnostics();
 
