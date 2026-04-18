@@ -5379,6 +5379,7 @@ void mctsBatchedMT(Position& rootPos,
         pool.emplace_back(worker, t);
     }
 
+    size_t prevSnapshotLineCount = 0;
     auto emitSearchSnapshot = [&]() {
         float qRootNow = nodeQ(*rootNode);
         float mctsEvalWhiteNow = (rootPos.side == 0) ? qRootNow : (1.0f - qRootNow);
@@ -5411,6 +5412,13 @@ void mctsBatchedMT(Position& rootPos,
         std::vector<int> pvNow;
         extractBestPVUntilChance(T, rootPos, mask, pvNow, 256);
 
+        if (prevSnapshotLineCount) {
+            for (size_t i = 0; i < prevSnapshotLineCount; ++i) {
+                std::cout << "\r\033[2K";
+                if (i + 1 < prevSnapshotLineCount) std::cout << "\033[1A";
+            }
+        }
+
         std::cout << std::fixed << std::setprecision(6);
         std::cout << "eval=" << mctsEvalWhiteNow << '\n';
         for (size_t i = 0; i < pvNow.size(); ++i) {
@@ -5430,6 +5438,8 @@ void mctsBatchedMT(Position& rootPos,
                 << "prior " << ms.prior
                 << '\n';
         }
+        std::cout.flush();
+        prevSnapshotLineCount = 2 + rootMovesNow.size();
     };
 
     bool forceExit = false;
