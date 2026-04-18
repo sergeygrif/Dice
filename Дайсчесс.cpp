@@ -10363,6 +10363,15 @@ sort(dice.begin(),dice.end());
 for(i=0;i<3;i++)t+=pieceChar(dice[i]-1);
 return diceFenToInt(t);
 }
+int DICE(int dice,Position& pos){
+int dist,i;
+uint64_t pawns;
+pawns=pos.color[pos.side]&pos.piece[0];
+dist=6;
+if(pawns)if(pos.side==0)dist=clz64(pawns)>>3;else dist=ctz64(pawns)>>3;
+for(i=0;i<5;i++)while(dicePiece[dice][i]&&(pos.color[pos.side]&pos.piece[i])==0&&dist>dicePiece[dice][0])dice=newDice[dice][i];
+return dice;
+}
 int main() {
     installCrashDiagnostics();
 
