@@ -10356,6 +10356,13 @@ dice[i]+=c==-1||c==-8421505||c==-16777216;
 }
 return dice;
 }
+int DICERAW(vector<int> dice){
+int i;
+string t;
+sort(dice.begin(),dice.end());
+for(i=0;i<3;i++)t+=pieceChar(dice[i]-1);
+return diceFenToInt(t);
+}
 int main() {
     installCrashDiagnostics();
 
