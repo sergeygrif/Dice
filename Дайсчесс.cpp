@@ -5419,11 +5419,15 @@ void mctsBatchedMT(Position& rootPos,
         }
         std::cout << '\n';
         for (const auto& ms : rootMovesNow) {
+            int d = (int)std::to_string(ms.visits).size();
+            int spacesBeforePrior = 1 + (to_string(rootMovesNow[0].visits).size() - d);
+
             std::cout
                 << moveToStr(ms.move)
                 << " eval " << ms.eval
                 << " visits " << ms.visits
-                << " prior " << ms.prior
+                << std::string(spacesBeforePrior, ' ')
+                << "prior " << ms.prior
                 << '\n';
         }
     };
