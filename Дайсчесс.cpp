@@ -49,6 +49,25 @@
 
 using namespace std;
 
+static void clearConsoleFull() {
+#if defined(_WIN32)
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hOut == INVALID_HANDLE_VALUE) return;
+
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    if (!GetConsoleScreenBufferInfo(hOut, &csbi)) return;
+
+    const DWORD cellCount = (DWORD)csbi.dwSize.X * (DWORD)csbi.dwSize.Y;
+    const COORD home{ 0, 0 };
+    DWORD written = 0;
+
+    FillConsoleOutputCharacterA(hOut, ' ', cellCount, home, &written);
+    FillConsoleOutputAttribute(hOut, csbi.wAttributes, cellCount, home, &written);
+    SetConsoleCursorPosition(hOut, home);
+#else
+    std::cout << "\033[2J\033[H";
+#endif
+}
 
 
 #if defined(_MSC_VER)
@@ -5379,7 +5398,6 @@ void mctsBatchedMT(Position& rootPos,
         pool.emplace_back(worker, t);
     }
 
-    size_t prevSnapshotLineCount = 0;
     auto emitSearchSnapshot = [&]() {
         float qRootNow = nodeQ(*rootNode);
         float mctsEvalWhiteNow = (rootPos.side == 0) ? qRootNow : (1.0f - qRootNow);
@@ -5412,13 +5430,7 @@ void mctsBatchedMT(Position& rootPos,
         std::vector<int> pvNow;
         extractBestPVUntilChance(T, rootPos, mask, pvNow, 256);
 
-        if (prevSnapshotLineCount) {
-            for (size_t i = 0; i < prevSnapshotLineCount; ++i) {
-                std::cout << "\r\033[2K";
-                if (i + 1 < prevSnapshotLineCount) std::cout << "\033[1A";
-            }
-        }
-
+        clearConsoleFull();
         std::cout << std::fixed << std::setprecision(6);
         std::cout << "eval=" << mctsEvalWhiteNow << '\n';
         for (size_t i = 0; i < pvNow.size(); ++i) {
@@ -5439,7 +5451,6 @@ void mctsBatchedMT(Position& rootPos,
                 << '\n';
         }
         std::cout.flush();
-        prevSnapshotLineCount = 2 + rootMovesNow.size();
     };
 
     bool forceExit = false;
