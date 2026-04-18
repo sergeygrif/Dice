@@ -5230,7 +5230,9 @@ void mctsBatchedMT(Position& rootPos,
     double timeSec,
     float& outEvalWhite,
     std::vector<moveState>& outRootMoves,
-    std::vector<int>& outPVBeforeRoll) {
+    std::vector<int>& outPVBeforeRoll,
+    int write,
+    int abort) {
     MoveList ml;
     int term;
     genLegal(rootPos, path, mask, ml, term);
@@ -5242,6 +5244,9 @@ void mctsBatchedMT(Position& rootPos,
         outRootMoves.clear();
         outRootMoves.push_back({ ml.m[0], outEvalWhite, 0 });
         outPVBeforeRoll.push_back(ml.m[0]);
+        if (write == 1) {
+            std::cout << moveToStr(ml.m[0]) << std::endl;
+        }
         return;
     }
 
@@ -5278,6 +5283,7 @@ void mctsBatchedMT(Position& rootPos,
 
     const auto t0 = std::chrono::steady_clock::now();
     const auto tEnd = t0 + std::chrono::duration<double>(timeSec);
+    auto tNextWrite = t0 + std::chrono::seconds(1);
 
     std::atomic<bool> stop{ false };
     AtomicStopGuard stopGuard(stop);
@@ -5372,8 +5378,69 @@ void mctsBatchedMT(Position& rootPos,
         pool.emplace_back(worker, t);
     }
 
+    auto emitSearchSnapshot = [&]() {
+        float qRootNow = nodeQ(*rootNode);
+        float mctsEvalWhiteNow = (rootPos.side == 0) ? qRootNow : (1.0f - qRootNow);
+
+        std::vector<moveState> rootMovesNow;
+        uint8_t exNow = rootNode->expanded.load(std::memory_order_acquire);
+        if (exNow == 1 && rootNode->edgeCount) {
+            TTEdge* e0 = T.edgePtr(rootNode->edgeBegin);
+            rootMovesNow.reserve(rootNode->edgeCount);
+            for (int i = 0; i < (int)rootNode->edgeCount; ++i) {
+                const TTEdge& e = e0[i];
+                uint32_t v = e.visits.load(std::memory_order_relaxed);
+                float p = e.prior();
+                float ev = -1.0f;
+                if (v) ev = clamp01(e.sum() / (float)v);
+                rootMovesNow.push_back(moveState{ e.move, ev, (int)v, p });
+            }
+            std::sort(rootMovesNow.begin(), rootMovesNow.end(),
+                [](const moveState& a, const moveState& b) {
+                    if (a.visits != b.visits) return a.visits > b.visits;
+                    return a.eval > b.eval;
+                });
+            if (rootPos.side == 1) {
+                for (auto& ms : rootMovesNow) {
+                    if (ms.eval >= 0.0f) ms.eval = 1.0f - ms.eval;
+                }
+            }
+        }
+
+        std::vector<int> pvNow;
+        extractBestPVUntilChance(T, rootPos, mask, pvNow, 256);
+
+        std::cout << std::fixed << std::setprecision(6);
+        std::cout << "eval=" << mctsEvalWhiteNow << '\n';
+        for (size_t i = 0; i < pvNow.size(); ++i) {
+            if (i) std::cout << ' ';
+            std::cout << moveToStr(pvNow[i]);
+        }
+        std::cout << '\n';
+        for (const auto& ms : rootMovesNow) {
+            std::cout
+                << moveToStr(ms.move)
+                << " eval " << ms.eval
+                << " visits " << ms.visits
+                << " prior " << ms.prior
+                << '\n';
+        }
+    };
+
+    bool forceExit = false;
     while (std::chrono::steady_clock::now() < tEnd) {
         if (T.abort.load(std::memory_order_relaxed)) break;
+        if (write == 1) {
+            auto now = std::chrono::steady_clock::now();
+            if (now >= tNextWrite) {
+                emitSearchSnapshot();
+                if (abort == 1 && OUR() == 0) {
+                    forceExit = true;
+                    break;
+                }
+                tNextWrite += std::chrono::seconds(1);
+            }
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     stop.store(true, std::memory_order_relaxed);
@@ -5422,6 +5489,7 @@ void mctsBatchedMT(Position& rootPos,
     extractBestPVUntilChance(T, rootPos, mask, outPVBeforeRoll, 256);
 
     (void)simOK; (void)simFail; (void)nnExp;
+    if (forceExit) return;
 }
 
 // ===================== TRAINING PATCH BEGIN (FINAL) =====================
@@ -10439,7 +10507,7 @@ int main() {
         float mctsEvalWhite = 0.5f;
         std::vector<int> pvBeforeRoll;
         std::vector<moveState> rootMoves;
-        mctsBatchedMT(pos, path, mask, 10.0, mctsEvalWhite, rootMoves, pvBeforeRoll);
+        mctsBatchedMT(pos, path, mask, 10.0, mctsEvalWhite, rootMoves, pvBeforeRoll, 0, 0);
 
         float v = 0.5f;
         std::vector<float> pol((size_t)POLICY_SIZE, 0.0f);
