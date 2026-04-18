@@ -10382,8 +10382,8 @@ for(x=0;x<8;x++)for(y=0;y<8;y++){
 piece=PIECE(KEY(x,y,s));
 sq=SQUARE(x,y,FLIP(s));
 if(piece==12)continue;
-pos.color[piece/6]|=bit(c);
-pos.piece[piece%6]|=bit(c);
+pos.color[piece/6]|=bit(sq);
+pos.piece[piece%6]|=bit(sq);
 }
 pos.side=FLIP(s);
 pos.ep1={0,0};
