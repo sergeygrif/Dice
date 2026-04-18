@@ -10346,6 +10346,16 @@ s=x+8*(7-y);
 if(flip)s^=63;
 return s;
 }
+vector<int> DICEVECTOR(vector<int>& s){
+int i,j,k,c;
+vector<int> dice;
+dice={0,0,0};
+for(i=0;i<3;i++)for(j=0;j<3;j++)for(k=0;k<3;k++){
+c=s[690+227*i+42*j+3840*(585+45*k)];
+dice[i]+=c==-1||c==-8421505||c==-16777216;
+}
+return dice;
+}
 int main() {
     installCrashDiagnostics();
 
