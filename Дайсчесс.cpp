@@ -10488,6 +10488,21 @@ pos.dice=DICE(DICERAW(DICEVECTOR(s)),pos);
 pos.key=computeKey(pos);
 buildPathMask(pos,path,mask);
 }
+void SITE(){
+Position pos;
+array<uint64_t,4> path;
+array<int,64> mask;
+float eval;
+vector<moveState> moves;
+vector<int> pv;
+while(1){
+while(OUR());
+while(OUR()==0);
+Sleep(1000);
+SET(pos,path,mask);
+mctsBatchedMT(pos,path,mask,60,eval,moves,pv,1,1);
+}
+}
 int main() {
     installCrashDiagnostics();
 
@@ -10515,7 +10530,7 @@ int main() {
             std::cout << "TensorRT engine is not loaded.\n";
             return 1;
         }
-
+if(fen=="s")SITE();
         Position pos;
         std::array<uint64_t, 4> path;
         std::array<int, 64> mask;
