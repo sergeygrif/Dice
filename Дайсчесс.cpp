@@ -10559,7 +10559,7 @@ if(fen=="s")SITE();
         float mctsEvalWhite = 0.5f;
         std::vector<int> pvBeforeRoll;
         std::vector<moveState> rootMoves;
-        mctsBatchedMT(pos, path, mask, 10.0, mctsEvalWhite, rootMoves, pvBeforeRoll, 0, 0);
+        mctsBatchedMT(pos, path, mask, 10.0, mctsEvalWhite, rootMoves, pvBeforeRoll, 0, -1);
 
         float v = 0.5f;
         std::vector<float> pol((size_t)POLICY_SIZE, 0.0f);
