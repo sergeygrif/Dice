@@ -10451,6 +10451,15 @@ s=x+8*(7-y);
 if(flip)s^=63;
 return s;
 }
+int DICEKEY(int n,vector<int>& s){
+int key,x,y,p;
+key=0;
+for(x=0;x<158;x++)for(y=0;y<158;y++){
+p=s[655+227*n+x+3840*(550+y)];
+key+=p==-1||p==-8421505||p==-16777216;
+}
+return key;
+}
 int DICE(int x,int y,vector<int>& s){
 int i,j,p;
 for(i=0;i<3;i++)for(j=0;j<3;j++){
