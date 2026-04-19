@@ -10446,6 +10446,14 @@ s=x+8*(7-y);
 if(flip)s^=63;
 return s;
 }
+int DICE(int x,int y,vector<int>& s){
+int i,j,p;
+for(i=0;i<3;i++)for(j=0;j<3;j++){
+p=s[x+i-1+3840*(y+j-1)];
+if(p==-1||p==-8421505||p==-16777216)return 1;
+}
+return 0;
+}
 vector<int> DICEVECTOR(vector<int>& s){
 int i,j,k,c;
 vector<int> dice;
