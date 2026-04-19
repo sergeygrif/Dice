@@ -5243,6 +5243,7 @@ static void extractBestPVUntilChance(MCTSTable& T,
         makeMove(pos, mask, m);
     }
 }
+vector<int> S(int x1,int x2,int y1,int y2);
 int SIDE(int p);
 void mctsBatchedMT(Position& rootPos,
     std::array<uint64_t, 4>& path,
