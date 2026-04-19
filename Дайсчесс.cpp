@@ -10429,10 +10429,16 @@ key+=(c==-1)+10000*(c==-16777216);
 return key;
 }
 int PIECE(int key){
-int d,i,p;
-d=INT_MAX;
-for(i=0;i<sqKey.size();i++)if(abs(sqKey[i]-key)<d){p=i;d=abs(sqKey[i]-key);}
-return p;
+int min,i,dist,piece;
+min=INT_MAX;
+for(i=0;i<sqKey.size();i++){
+dist=abs(sqKey[i]%10000-key%10000)+abs(sqKey[i]/10000-key/10000);
+if(dist<min){
+piece=i;
+min=dist;
+}
+}
+return piece;
 }
 int SQUARE(int x,int y,int flip){
 int s;
