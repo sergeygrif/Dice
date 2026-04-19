@@ -10461,26 +10461,17 @@ key+=(p==-1||p==-8421505)+10000*(p==-16777216);
 }
 return key;
 }
-int DICE(int x,int y,vector<int>& s){
-int i,j,p;
-for(i=0;i<3;i++)for(j=0;j<3;j++){
-p=s[x+i-1+3840*(y+j-1)];
-if(p==-1||p==-8421505||p==-16777216)return 1;
-}
-return 0;
-}
 vector<int> DICEVECTOR(vector<int>& s){
-int i,j,k;
+int i;
 vector<int> dice;
-dice={0,0,0};
-for(i=0;i<3;i++)for(j=0;j<3;j++)for(k=0;k<3;k++)dice[i]+=DICE(690+227*i+42*j,585+45*k,s);
+for(i=0;i<3;i++)dice.push_back(NUMBER(diceKey,DICEKEY(i,s)));
 return dice;
 }
 int DICERAW(vector<int> dice){
 int i;
 string t;
 sort(dice.begin(),dice.end());
-for(i=0;i<3;i++)t+=pieceChar(dice[i]-1);
+for(i=0;i<3;i++)t+=pieceChar(dice[i]);
 return diceFenToInt(t);
 }
 int DICE(int dice,Position& pos){
