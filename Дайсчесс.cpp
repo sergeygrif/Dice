@@ -5243,7 +5243,7 @@ static void extractBestPVUntilChance(MCTSTable& T,
         makeMove(pos, mask, m);
     }
 }
-int OUR();
+int SIDE(int p);
 void mctsBatchedMT(Position& rootPos,
     std::array<uint64_t, 4>& path,
     std::array<int, 64>& mask,
@@ -5252,7 +5252,7 @@ void mctsBatchedMT(Position& rootPos,
     std::vector<moveState>& outRootMoves,
     std::vector<int>& outPVBeforeRoll,
     int write,
-    int our) {
+    int side) {
     MoveList ml;
     int term;
     genLegal(rootPos, path, mask, ml, term);
@@ -5460,7 +5460,7 @@ void mctsBatchedMT(Position& rootPos,
             auto now = std::chrono::steady_clock::now();
             if (now >= tNextWrite) {
                 emitSearchSnapshot();
-                if (our != -1 && OUR() != our) {
+                if (side != -1 && SIDE(S(1442,1442,1955,1955)[0]) != side) {
                     forceExit = true;
                     break;
                 }
