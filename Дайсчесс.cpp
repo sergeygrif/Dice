@@ -10424,7 +10424,7 @@ return -1;
 }
 int FLIP(vector<int>& s){return s[417+3840*1752]==-665935;}
 vector<int> sqKey={2324,5950000,9121555,10242252,14571640,10172920,35020000,55080122,34360208,37770000,38410393,31600651,0};
-int KEY(int x,int y,vector<int>& s){
+int SQKEY(int x,int y,vector<int>& s){
 int key,i,j,c;
 key=0;
 for(i=0;i<138;i++)for(j=0;j<138;j++){
@@ -10487,7 +10487,7 @@ int x,y,piece,sq;
 pos.color={0,0};
 pos.piece={0,0,0,0,0,0};
 for(x=0;x<8;x++)for(y=0;y<8;y++){
-piece=PIECE(KEY(x,y,s));
+piece=PIECE(SQKEY(x,y,s));
 sq=SQUARE(x,y,FLIP(s));
 if(piece==12)continue;
 pos.color[piece/6]|=bit(sq);
