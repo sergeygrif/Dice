@@ -5252,7 +5252,7 @@ void mctsBatchedMT(Position& rootPos,
     std::vector<moveState>& outRootMoves,
     std::vector<int>& outPVBeforeRoll,
     int write,
-    int abort) {
+    int our) {
     MoveList ml;
     int term;
     genLegal(rootPos, path, mask, ml, term);
@@ -5460,7 +5460,7 @@ void mctsBatchedMT(Position& rootPos,
             auto now = std::chrono::steady_clock::now();
             if (now >= tNextWrite) {
                 emitSearchSnapshot();
-                if (abort == 1 && OUR() == 0) {
+                if (our != -1 && OUR() != our) {
                     forceExit = true;
                     break;
                 }
