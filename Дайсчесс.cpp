@@ -10425,15 +10425,6 @@ return -1;
 int FLIP(vector<int>& s){return s[417+3840*1752]==-665935;}
 vector<int> sqKey={2324,5950000,9121555,10242252,14571640,10172920,35020000,55080122,34360208,37770000,38410393,31600651,0};
 vector<int> diceKey={1861,5160014,7681148,6141254,10991103,7942210};
-int SQKEY(int x,int y,vector<int>& s){
-int key,i,j,c;
-key=0;
-for(i=0;i<138;i++)for(j=0;j<138;j++){
-c=s[407+138*x+i+3840*(762+138*y+j)];
-key+=(c==-1)+10000*(c==-16777216);
-}
-return key;
-}
 int NUMBER(vector<int>& v,int key){
 int min,i,dist,num;
 min=INT_MAX;
@@ -10445,6 +10436,15 @@ min=dist;
 }
 }
 return num;
+}
+int SQKEY(int x,int y,vector<int>& s){
+int key,i,j,c;
+key=0;
+for(i=0;i<138;i++)for(j=0;j<138;j++){
+c=s[407+138*x+i+3840*(762+138*y+j)];
+key+=(c==-1)+10000*(c==-16777216);
+}
+return key;
 }
 int SQUARE(int x,int y,int flip){
 int s;
