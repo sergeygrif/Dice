@@ -10481,10 +10481,8 @@ if(pawns)if(pos.side==0)dist=clz64(pawns)>>3;else dist=ctz64(pawns)>>3;
 for(i=0;i<5;i++)while(dicePiece[dice][i]&&(pos.color[pos.side]&pos.piece[i])==0&&dist>dicePiece[dice][0])dice=newDice[dice][i];
 return dice;
 }
-void SET(Position& pos,array<uint64_t,4>& path,array<int,64>& mask){
+void SET(vector<int>& s,Position& pos,array<uint64_t,4>& path,array<int,64>& mask){
 int x,y,piece,sq;
-vector<int> s;
-s=S(0,3839,0,2399);
 pos.color={0,0};
 pos.piece={0,0,0,0,0,0};
 for(x=0;x<8;x++)for(y=0;y<8;y++){
@@ -10494,7 +10492,7 @@ if(piece==12)continue;
 pos.color[piece/6]|=bit(sq);
 pos.piece[piece%6]|=bit(sq);
 }
-pos.side=FLIP(s);
+pos.side=SIDE(s[1442+3840*1955])!=FLIP(s);
 pos.ep1={0,0};
 pos.ep2=0;
 pos.rook={0,7,56,63};
