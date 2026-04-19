@@ -10433,17 +10433,17 @@ key+=(c==-1)+10000*(c==-16777216);
 }
 return key;
 }
-int PIECE(int key){
-int min,i,dist,piece;
+int NUMBER(vector<int>& v,int key){
+int min,i,dist,num;
 min=INT_MAX;
-for(i=0;i<sqKey.size();i++){
-dist=abs(sqKey[i]%10000-key%10000)+abs(sqKey[i]/10000-key/10000);
+for(i=0;i<v.size();i++){
+dist=abs(v[i]%10000-key%10000)+abs(v[i]/10000-key/10000);
 if(dist<min){
-piece=i;
+num=i;
 min=dist;
 }
 }
-return piece;
+return num;
 }
 int SQUARE(int x,int y,int flip){
 int s;
@@ -10487,7 +10487,7 @@ int x,y,piece,sq;
 pos.color={0,0};
 pos.piece={0,0,0,0,0,0};
 for(x=0;x<8;x++)for(y=0;y<8;y++){
-piece=PIECE(SQKEY(x,y,s));
+piece=NUMBER(sqKey,SQKEY(x,y,s));
 sq=SQUARE(x,y,FLIP(s));
 if(piece==12)continue;
 pos.color[piece/6]|=bit(sq);
