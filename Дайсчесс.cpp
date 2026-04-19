@@ -10504,18 +10504,25 @@ pos.key=computeKey(pos);
 buildPathMask(pos,path,mask);
 }
 void SITE(){
+int last,side;
+vector<int> s;
 Position pos;
 array<uint64_t,4> path;
 array<int,64> mask;
 float eval;
 vector<moveState> moves;
 vector<int> pv;
+last=-1;
 while(1){
-while(OUR()&&moves.size());
-while(OUR()==0);
+while(1){
+side=SIDE(S(1442,1442,1955,1955)[0]);
+if(side!=-1&&side!=last)break;
+}
+last=side;
 Sleep(1000);
-SET(pos,path,mask);
-mctsBatchedMT(pos,path,mask,60,eval,moves,pv,1,1);
+s=S(0,3839,0,2399);
+SET(s,pos,path,mask);
+mctsBatchedMT(pos,path,mask,60,eval,moves,pv,1,side);
 }
 }
 int main() {
