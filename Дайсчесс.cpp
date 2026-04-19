@@ -10518,7 +10518,7 @@ side=SIDE(S(1442,1442,1955,1955)[0]);
 if(side!=-1&&side!=last)break;
 }
 last=side;
-Sleep(1000);
+Sleep(2000);
 s=S(0,3839,0,2399);
 SET(s,pos,path,mask);
 mctsBatchedMT(pos,path,mask,60,eval,moves,pv,1,side);
