@@ -10453,13 +10453,14 @@ if(flip)s^=63;
 return s;
 }
 int DICEKEY(int n,vector<int>& s){
-int key,x,y,p;
-key=0;
+int w,b,x,y,p;
+w=b=0;
 for(x=0;x<158;x++)for(y=0;y<158;y++){
 p=s[655+227*n+x+3840*(550+y)];
-key+=(p==-1||p==-8421505)+10000*(p==-16777216);
+w+=p==-1||p==-8421505;
+b+=p==-16777216;
 }
-return key;
+return max(w,b)+10000*min(w,b);
 }
 vector<int> DICEVECTOR(vector<int>& s){
 int i;
