@@ -10496,7 +10496,7 @@ float eval;
 vector<moveState> moves;
 vector<int> pv;
 while(1){
-while(OUR());
+while(OUR()&&moves.size());
 while(OUR()==0);
 Sleep(1000);
 SET(pos,path,mask);
