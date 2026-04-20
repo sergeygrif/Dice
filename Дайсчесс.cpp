@@ -10516,25 +10516,27 @@ for(i=0;i<3;i++)for(j=0;j<158;j++)for(k=0;k<158;k++)if(s2[655+227*i+j+3840*(550+
 return 1;
 }
 void SITE(){
-int last,side;
-vector<int> s;
+int side1,side2;
+vector<int> s1,s2;
 Position pos;
 array<uint64_t,4> path;
 array<int,64> mask;
 float eval;
 vector<moveState> moves;
 vector<int> pv;
-last=-1;
+side1=-1;
 while(1){
+s1=S(0,3839,0,2399);
 while(1){
-side=SIDE(S(1442,1442,1955,1955)[0]);
-if(side!=-1&&side!=last)break;
+Sleep(100);
+s2=S(0,3839,0,2399);
+side2=SIDE(s2[1442+3840*1955]);
+if(side2!=-1&&side2!=side1&&WHITE(s2)&&EQUAL(s1,s2))break;
+s1=s2;
 }
-last=side;
-Sleep(2000);
-s=S(0,3839,0,2399);
-SET(s,pos,path,mask);
-mctsBatchedMT(pos,path,mask,60,eval,moves,pv,1,side);
+side1=side2;
+SET(s2,pos,path,mask);
+mctsBatchedMT(pos,path,mask,600,eval,moves,pv,1,side2);
 }
 }
 int main() {
