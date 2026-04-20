@@ -5266,7 +5266,8 @@ void mctsBatchedMT(Position& rootPos,
         outRootMoves.push_back({ ml.m[0], outEvalWhite, 0 });
         outPVBeforeRoll.push_back(ml.m[0]);
         if (write == 1) {
-            std::cout << moveToStr(ml.m[0]) << std::endl;
+            clearConsoleFull();
+std::cout << moveToStr(ml.m[0]) << std::endl;
         }
         return;
     }
