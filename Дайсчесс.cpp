@@ -10504,6 +10504,11 @@ pos.dice=DICE(DICERAW(DICEVECTOR(s)),pos);
 pos.key=computeKey(pos);
 buildPathMask(pos,path,mask);
 }
+int WHITE(vector<int>& s){
+int i,j,k;
+for(i=0;i<3;i++)for(j=0;j<158;j++)for(k=0;k<158;k++)if(s[655+227*i+j+3840*(550+k)]==-1)return 1;
+return 0;
+}
 void SITE(){
 int last,side;
 vector<int> s;
