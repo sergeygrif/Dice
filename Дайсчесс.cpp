@@ -10475,6 +10475,11 @@ if(pawns)if(pos.side==0)dist=clz64(pawns)>>3;else dist=ctz64(pawns)>>3;
 for(i=0;i<5;i++)while(dicePiece[dice][i]&&(pos.color[pos.side]&pos.piece[i])==0&&dist>dicePiece[dice][0])dice=newDice[dice][i];
 return dice;
 }
+int EQUAL(vector<int>& s1,vector<int>& s2){
+int i,j,k;
+for(i=0;i<3;i++)for(j=0;j<158;j++)for(k=0;k<158;k++)if(s2[655+227*i+j+3840*(550+k)]!=s1[655+227*i+j+3840*(550+k)])return 0;
+return 1;
+}
 void SET(vector<int>& s,Position& pos,array<uint64_t,4>& path,array<int,64>& mask){
 int sq,piece;
 array<int,64> board;
@@ -10495,11 +10500,6 @@ pos.castle=0;
 pos.dice=DICE(DICERAW(DICEVECTOR(s)),pos);
 pos.key=computeKey(pos);
 buildPathMask(pos,path,mask);
-}
-int EQUAL(vector<int>& s1,vector<int>& s2){
-int i,j,k;
-for(i=0;i<3;i++)for(j=0;j<158;j++)for(k=0;k<158;k++)if(s2[655+227*i+j+3840*(550+k)]!=s1[655+227*i+j+3840*(550+k)])return 0;
-return 1;
 }
 void SITE(){
 int side1,side2;
