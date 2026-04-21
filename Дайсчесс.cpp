@@ -10442,26 +10442,15 @@ min=dist;
 }
 return num;
 }
-int SQKEY(int x,int y,vector<int>& s){
-int key,i,j,c;
+int PIECE(int sq,vector<int>& s){
+int key,x,y,pixel;
+if(FLIP(s)==0)sq^=56;else sq^=7;
 key=0;
-for(i=0;i<138;i++)for(j=0;j<138;j++){
-c=s[407+138*x+i+3840*(762+138*y+j)];
-key+=(c==-1)+10000*(c==-16777216);
+for(x=0;x<138;x++)for(y=0;y<138;y++){
+pixel=s[407+138*(sq%8)+x+3840*(762+138*(sq/8)+y)];
+key+=(pixel==-1)+10000*(pixel==-16777216);
 }
-return key;
-}
-int SQUARE(int x,int y,int flip){
-int s;
-s=x+8*(7-y);
-if(flip)s^=63;
-return s;
-}
-array<int,64> BOARD(vector<int>& s){
-int x,y;
-array<int,64> board;
-for(x=0;x<8;x++)for(y=0;y<8;y++)board[SQUARE(x,y,FLIP(s))]=NUMBER(sqKey,SQKEY(x,y,s));
-return board;
+return NUMBER(sqKey,key);
 }
 int DICEKEY(int n,vector<int>& s){
 int w,b,x,y,p;
