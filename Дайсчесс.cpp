@@ -10452,32 +10452,23 @@ key+=(pixel==-1)+10000*(pixel==-16777216);
 }
 return NUMBER(sqKey,key);
 }
-int DICEKEY(int n,vector<int>& s){
-int w,b,x,y,p;
-w=b=0;
-for(x=0;x<158;x++)for(y=0;y<158;y++){
-p=s[655+227*n+x+3840*(550+y)];
-w+=p==-1||p==-8421505;
-b+=p==-16777216;
-}
-return max(w,b)+10000*min(w,b);
-}
-vector<int> DICEVECTOR(vector<int>& s){
-int i;
-vector<int> dice;
-for(i=0;i<3;i++)dice.push_back(NUMBER(diceKey,DICEKEY(i,s)));
-return dice;
-}
-int DICERAW(vector<int> dice){
-int i;
-string t;
-sort(dice.begin(),dice.end());
-for(i=0;i<3;i++)t+=pieceChar(dice[i]);
-return diceFenToInt(t);
-}
-int DICE(int dice,Position& pos){
-int dist,i;
+int DICE(vector<int>& s,Position& pos){
+int i,white,black,x,y,pixel,dice,dist;
 uint64_t pawns;
+string t;
+vector<int> v;
+for(i=0;i<3;i++){
+white=black=0;
+for(x=0;x<158;x++)for(y=0;y<158;y++){
+pixel=s[655+227*i+x+3840*(550+y)];
+white+=pixel==-1||pixel==-8421505;
+black+=pixel==-16777216;
+}
+v.push_back(NUMBER(diceKey,max(white,black)+10000*min(white,black)));
+}
+sort(v.begin(),v.end());
+for(i=0;i<3;i++)t+=pieceChar(v[i]);
+dice=diceFenToInt(t);
 pawns=pos.color[pos.side]&pos.piece[0];
 dist=6;
 if(pawns)if(pos.side==0)dist=clz64(pawns)>>3;else dist=ctz64(pawns)>>3;
