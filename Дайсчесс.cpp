@@ -10504,7 +10504,7 @@ if(piece==12)continue;
 pos.color[piece/6]|=bit(sq);
 pos.piece[piece%6]|=bit(sq);
 }
-pos.side=SIDE(s[1442+3840*1955])!=FLIP(s);
+pos.side=SIDE(s);
 pos.ep1={0,0};
 pos.ep2=0;
 pos.rook={0,7,56,63};
