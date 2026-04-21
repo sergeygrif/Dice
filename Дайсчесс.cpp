@@ -5305,6 +5305,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
     const auto t0 = std::chrono::steady_clock::now();
     const auto tEnd = t0 + std::chrono::duration<double>(timeSec);
     auto tNextWrite = t0 + std::chrono::seconds(1);
+    auto tNextAbortCheck = t0 + std::chrono::milliseconds(100);
 
     std::atomic<bool> stop{ false };
     AtomicStopGuard stopGuard(stop);
@@ -5457,14 +5458,19 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
     bool forceExit = false;
     while (std::chrono::steady_clock::now() < tEnd) {
         if (T.abort.load(std::memory_order_relaxed)) break;
+        auto now = std::chrono::steady_clock::now();
+
+        if (abort && POS.key != rootPos.key && now >= tNextAbortCheck) {
+            forceExit = true;
+            break;
+        }
+        while (now >= tNextAbortCheck) {
+            tNextAbortCheck += std::chrono::milliseconds(100);
+        }
+
         if (write == 1) {
-            auto now = std::chrono::steady_clock::now();
             if (now >= tNextWrite) {
                 emitSearchSnapshot();
-                if (abort && POS.key!=rootPos.key) {
-                    forceExit = true;
-                    break;
-                }
                 tNextWrite += std::chrono::seconds(1);
             }
         }
