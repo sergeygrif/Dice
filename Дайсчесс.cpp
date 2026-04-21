@@ -10453,6 +10453,12 @@ s=x+8*(7-y);
 if(flip)s^=63;
 return s;
 }
+array<int,64> BOARD(vector<int>& s){
+int x,y;
+array<int,64> board;
+for(x=0;x<8;x++)for(y=0;y<8;y++)board[SQUARE(x,y,FLIP(s))]=NUMBER(sqKey,SQKEY(x,y,s));
+return board;
+}
 int DICEKEY(int n,vector<int>& s){
 int w,b,x,y,p;
 w=b=0;
