@@ -5243,8 +5243,7 @@ static void extractBestPVUntilChance(MCTSTable& T,
         makeMove(pos, mask, m);
     }
 }
-vector<int> S(int x1,int x2,int y1,int y2);
-int SIDE(int p);
+int STATE();
 void mctsBatchedMT(Position& rootPos,
     std::array<uint64_t, 4>& path,
     std::array<int, 64>& mask,
@@ -5253,7 +5252,7 @@ void mctsBatchedMT(Position& rootPos,
     std::vector<moveState>& outRootMoves,
     std::vector<int>& outPVBeforeRoll,
     int write,
-    int side) {
+    int state) {
     MoveList ml;
     int term;
     genLegal(rootPos, path, mask, ml, term);
@@ -5462,7 +5461,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             auto now = std::chrono::steady_clock::now();
             if (now >= tNextWrite) {
                 emitSearchSnapshot();
-                if (side != -1 && SIDE(S(1442,1442,1955,1955)[0]) != side) {
+                if (state != -1 && STATE() != state) {
                     forceExit = true;
                     break;
                 }
