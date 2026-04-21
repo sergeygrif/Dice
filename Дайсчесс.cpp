@@ -10400,6 +10400,18 @@ array<uint64_t,2> ep;
 int castle;
 vector<int> sqKey={2324,5950000,9121555,10242252,14571640,10172920,35020000,55080122,34360208,37770000,38410393,31600651,0};
 vector<int> diceKey={1861,140516,7681148,6141254,10991103,7942210};
+int NUMBER(vector<int>& v,int key){
+int min,i,dist,num;
+min=INT_MAX;
+for(i=0;i<v.size();i++){
+dist=abs(v[i]%10000-key%10000)+abs(v[i]/10000-key/10000);
+if(dist<min){
+num=i;
+min=dist;
+}
+}
+return num;
+}
 vector<int> S(int x1,int x2,int y1,int y2){
 int w,h;
 vector<int> s;
@@ -10430,18 +10442,6 @@ return -1;
 }
 int FLIP(vector<int>& s){return s[417+3840*1752]==-665935;}
 int SIDE(vector<int>& s){return STATE(s)!=FLIP(s);}
-int NUMBER(vector<int>& v,int key){
-int min,i,dist,num;
-min=INT_MAX;
-for(i=0;i<v.size();i++){
-dist=abs(v[i]%10000-key%10000)+abs(v[i]/10000-key/10000);
-if(dist<min){
-num=i;
-min=dist;
-}
-}
-return num;
-}
 int PIECE(int sq,vector<int>& s){
 int key,x,y,pixel;
 if(FLIP(s)==0)sq^=56;else sq^=7;
