@@ -5243,7 +5243,7 @@ static void extractBestPVUntilChance(MCTSTable& T,
         makeMove(pos, mask, m);
     }
 }
-int STATE();
+Position POS;
 void mctsBatchedMT(Position& rootPos,
     std::array<uint64_t, 4>& path,
     std::array<int, 64>& mask,
@@ -5252,7 +5252,7 @@ void mctsBatchedMT(Position& rootPos,
     std::vector<moveState>& outRootMoves,
     std::vector<int>& outPVBeforeRoll,
     int write,
-    int state) {
+    int abort) {
     MoveList ml;
     int term;
     genLegal(rootPos, path, mask, ml, term);
@@ -5461,7 +5461,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             auto now = std::chrono::steady_clock::now();
             if (now >= tNextWrite) {
                 emitSearchSnapshot();
-                if (state != -1 && STATE() != state) {
+                if (abort && POS.key!=rootPos.key) {
                     forceExit = true;
                     break;
                 }
@@ -10575,7 +10575,7 @@ if(fen=="s")SITE();
         float mctsEvalWhite = 0.5f;
         std::vector<int> pvBeforeRoll;
         std::vector<moveState> rootMoves;
-        mctsBatchedMT(pos, path, mask, 10.0, mctsEvalWhite, rootMoves, pvBeforeRoll, 0, -1);
+        mctsBatchedMT(pos, path, mask, 10.0, mctsEvalWhite, rootMoves, pvBeforeRoll, 0, 0);
 
         float v = 0.5f;
         std::vector<float> pol((size_t)POLICY_SIZE, 0.0f);
