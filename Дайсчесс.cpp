@@ -10492,12 +10492,13 @@ for(i=0;i<5;i++)while(dicePiece[dice][i]&&(pos.color[pos.side]&pos.piece[i])==0&
 return dice;
 }
 void SET(vector<int>& s,Position& pos,array<uint64_t,4>& path,array<int,64>& mask){
-int x,y,piece,sq;
+int sq,piece;
+array<int,64> board;
+board=BOARD(s);
 pos.color={0,0};
 pos.piece={0,0,0,0,0,0};
-for(x=0;x<8;x++)for(y=0;y<8;y++){
-piece=NUMBER(sqKey,SQKEY(x,y,s));
-sq=SQUARE(x,y,FLIP(s));
+for(sq=0;sq<64;sq++){
+piece=board[sq];
 if(piece==12)continue;
 pos.color[piece/6]|=bit(sq);
 pos.piece[piece%6]|=bit(sq);
