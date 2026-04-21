@@ -10421,13 +10421,15 @@ DeleteObject(m);
 DeleteObject(d);
 return s;
 }
-int SIDE(int p){
+int STATE(int p){
 if(p==-5532810)return 0;
 if(p==-11842499)return 1;
 return -1;
 }
+int STATE(){return STATE(S(1442,1442,1955,1955)[0]);}
+int STATE(vector<int>& s){return STATE(s[1442+3840*1955]);}
 int FLIP(vector<int>& s){return s[417+3840*1752]==-665935;}
-int SIDE(vector<int>& s){return SIDE(s[1442+3840*1955])!=FLIP(s);}
+int SIDE(vector<int>& s){return STATE(s)!=FLIP(s);}
 int NUMBER(vector<int>& v,int key){
 int min,i,dist,num;
 min=INT_MAX;
