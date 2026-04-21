@@ -10424,6 +10424,7 @@ if(p==-11842499)return 1;
 return -1;
 }
 int FLIP(vector<int>& s){return s[417+3840*1752]==-665935;}
+int SIDE(vector<int>& s){return SIDE(s[1442+3840*1955])!=FLIP(s);}
 vector<int> sqKey={2324,5950000,9121555,10242252,14571640,10172920,35020000,55080122,34360208,37770000,38410393,31600651,0};
 vector<int> diceKey={1861,140516,7681148,6141254,10991103,7942210};
 int NUMBER(vector<int>& v,int key){
