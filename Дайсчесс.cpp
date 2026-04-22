@@ -10491,6 +10491,21 @@ if(s2[n]!=s1[n])return 0;
 }
 return 1;
 }
+vector<int> NEW(vector<int> s1){
+time_point<steady_clock> t1,t2;
+vector<int> s2;
+t1=steady_clock::now()+hours(1);
+while(1){
+t2=steady_clock::now();
+s2=S();
+if(EQUAL(s1,s2)==0){
+t1=t2;
+s1=s2;
+continue;
+}
+if((t2-t1).count()>=100000000&&STATE(s2)!=-1)return s2;
+}
+}
 void SET(vector<int>& s,Position& pos,array<uint64_t,4>& path,array<int,64>& mask){
 int sq,piece;
 array<int,64> board;
