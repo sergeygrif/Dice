@@ -5244,6 +5244,8 @@ static void extractBestPVUntilChance(MCTSTable& T,
     }
 }
 Position POS;
+array<uint64_t,4> PATH;
+array<int,64> MASK;
 void mctsBatchedMT(Position& rootPos,
     std::array<uint64_t, 4>& path,
     std::array<int, 64>& mask,
@@ -5305,7 +5307,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
     const auto t0 = std::chrono::steady_clock::now();
     const auto tEnd = t0 + std::chrono::duration<double>(timeSec);
     auto tNextWrite = t0 + std::chrono::seconds(1);
-    auto tNextAbortCheck = t0 + std::chrono::milliseconds(100);
+    auto tNextAbortCheck = t0 + std::chrono::milliseconds(50);
 
     std::atomic<bool> stop{ false };
     AtomicStopGuard stopGuard(stop);
@@ -5465,7 +5467,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             break;
         }
         while (now >= tNextAbortCheck) {
-            tNextAbortCheck += std::chrono::milliseconds(100);
+            tNextAbortCheck += std::chrono::milliseconds(50);
         }
 
         if (write == 1) {
@@ -10510,7 +10512,7 @@ t1=t2;
 s1=s2;
 continue;
 }
-if((t2-t1).count()>=200000000)return s2;
+if((t2-t1).count()>=100000000)return s2;
 }
 }
 void SET(vector<int>& s,Position& pos,array<uint64_t,4>& path,array<int,64>& mask){
