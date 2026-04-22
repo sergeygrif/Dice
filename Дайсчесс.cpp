@@ -10468,19 +10468,22 @@ board[sq]=NUMBER(sqKey,key);
 return board;
 }
 int DICE(vector<int>& s,Position& pos){
-int i,white,black,x,y,pixel,dice,dist;
+int light,i,white,black,x,y,pixel,dice,dist;
 uint64_t pawns;
 string t;
 vector<int> v;
+light=0;
 for(i=0;i<3;i++){
 white=black=0;
 for(x=0;x<158;x++)for(y=0;y<158;y++){
 pixel=s[655+227*i+x+1920*(550+y)];
 white+=pixel==-1||pixel==-8421505;
 black+=pixel==-16777216;
+light+=pixel==-1;
 }
 v.push_back(NUMBER(diceKey,max(white,black)+10000*min(white,black)));
 }
+if(light==0)return 0;
 sort(v.begin(),v.end());
 for(i=0;i<3;i++)t+=pieceChar(v[i]);
 dice=diceFenToInt(t);
