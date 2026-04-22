@@ -10439,22 +10439,22 @@ DeleteObject(m);
 DeleteObject(d);
 return s;
 }
-vector<int> S(){return S(0,3839,0,2399);}
+vector<int> S(){return S(0,1919,0,2399);}
 int STATE(vector<int>& s){
 int pixel;
-pixel=s[1442+3840*1955];
+pixel=s[1442+1920*1955];
 if(pixel==-5532810)return 0;
 if(pixel==-11842499)return 1;
 return -1;
 }
-int FLIP(vector<int>& s){return s[417+3840*1752]==-665935;}
+int FLIP(vector<int>& s){return s[417+1920*1752]==-665935;}
 int SIDE(vector<int>& s){return STATE(s)!=FLIP(s);}
 int PIECE(int sq,vector<int>& s){
 int key,x,y,pixel;
 if(FLIP(s)==0)sq^=56;else sq^=7;
 key=0;
 for(x=0;x<138;x++)for(y=0;y<138;y++){
-pixel=s[407+138*(sq%8)+x+3840*(762+138*(sq/8)+y)];
+pixel=s[407+138*(sq%8)+x+1920*(762+138*(sq/8)+y)];
 key+=(pixel==-1)+10000*(pixel==-16777216);
 }
 return NUMBER(sqKey,key);
@@ -10467,7 +10467,7 @@ vector<int> v;
 for(i=0;i<3;i++){
 white=black=0;
 for(x=0;x<158;x++)for(y=0;y<158;y++){
-pixel=s[655+227*i+x+3840*(550+y)];
+pixel=s[655+227*i+x+1920*(550+y)];
 white+=pixel==-1||pixel==-8421505;
 black+=pixel==-16777216;
 }
@@ -10485,7 +10485,7 @@ return dice;
 int EQUAL(vector<int>& s1,vector<int>& s2){
 int i,j,k;
 if(s1.empty())return 0;
-for(i=0;i<3;i++)for(j=0;j<158;j++)for(k=0;k<158;k++)if(s2[655+227*i+j+3840*(550+k)]!=s1[655+227*i+j+3840*(550+k)])return 0;
+for(i=0;i<3;i++)for(j=0;j<158;j++)for(k=0;k<158;k++)if(s2[655+227*i+j+1920*(550+k)]!=s1[655+227*i+j+1920*(550+k)])return 0;
 return 1;
 }
 void SET(vector<int>& s,Position& pos,array<uint64_t,4>& path,array<int,64>& mask){
