@@ -10467,6 +10467,12 @@ board[sq]=NUMBER(sqKey,key);
 }
 return board;
 }
+vector<int> SQUARE(array<int,64>& board1,array<int,64>& board2){
+int sq;
+vector<int> square;
+for(sq=0;sq<64;sq++)if(board2[sq]!=board1[sq])square.push_back(sq);
+return square;
+}
 int DICE(vector<int>& s,Position& pos){
 int light,i,white,black,x,y,pixel,dice,dist;
 uint64_t pawns;
