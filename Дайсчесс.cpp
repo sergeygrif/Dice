@@ -10451,15 +10451,19 @@ return pixel3==-11842499;
 }
 int FLIP(vector<int>& s){return s[417+1920*1752]==-665935;}
 int SIDE(vector<int>& s){return STATE(s)!=FLIP(s);}
-int PIECE(int sq,vector<int>& s){
-int key,x,y,pixel;
+array<int,64> BOARD(vector<int>& s){
+int sq,key,x,y,pixel;
+array<int,64> board;
+for(sq=0;sq<64;sq++){
 if(FLIP(s)==0)sq^=56;else sq^=7;
 key=0;
 for(x=0;x<138;x++)for(y=0;y<138;y++){
 pixel=s[407+138*(sq%8)+x+1920*(762+138*(sq/8)+y)];
 key+=(pixel==-1)+10000*(pixel==-16777216);
 }
-return NUMBER(sqKey,key);
+board[sq]=NUMBER(sqKey,key);
+}
+return board;
 }
 int DICE(vector<int>& s,Position& pos){
 int i,white,black,x,y,pixel,dice,dist;
