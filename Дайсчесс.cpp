@@ -48,7 +48,7 @@
 #endif
 
 using namespace std;
-
+using namespace chrono;
 static void clearConsoleFull() {
 #if defined(_WIN32)
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
