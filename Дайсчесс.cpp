@@ -10505,7 +10505,7 @@ t1=t2;
 s1=s2;
 continue;
 }
-if((t2-t1).count()>=100000000)return s2;
+if((t2-t1).count()>=200000000)return s2;
 }
 }
 void SET(vector<int>& s,Position& pos,array<uint64_t,4>& path,array<int,64>& mask){
