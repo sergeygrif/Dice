@@ -10537,6 +10537,7 @@ if((t2-t1).count()>=100000000)return s2;
 }
 void START(Position& pos,array<uint64_t,4>& path,array<int,64>& mask){
 pos.rook={0,7,56,63};
+pos.dice=0;
 path={bit(1)|bit(2)|bit(3),bit(5)|bit(6),bit(57)|bit(58)|bit(59),bit(61)|bit(62)};
 mask.fill(0);
 mask[0]=1;
