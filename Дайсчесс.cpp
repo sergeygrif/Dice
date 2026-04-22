@@ -10441,11 +10441,12 @@ return s;
 }
 vector<int> S(){return S(0,1919,0,2399);}
 int STATE(vector<int>& s){
-int pixel;
-pixel=s[1442+1920*1955];
-if(pixel==-5532810)return 0;
-if(pixel==-11842499)return 1;
-return -1;
+int pixel1,pixel2;
+if(s.empty())return -1;
+pixel1=s[1335+1920*997];
+pixel2=s[1442+1920*1955];
+if(pixel1==-1||pixel2!=-5532810&&pixel2!=-11842499)return -1;
+return pixel2==-11842499;
 }
 int FLIP(vector<int>& s){return s[417+1920*1752]==-665935;}
 int SIDE(vector<int>& s){return STATE(s)!=FLIP(s);}
