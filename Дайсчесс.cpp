@@ -10485,7 +10485,8 @@ return dice;
 }
 int EQUAL(vector<int>& s1,vector<int>& s2){
 int i,j,k,n;
-if(s2.size()!=s1.size()||STATE(s2)!=STATE(s1))return 0;
+if(STATE(s2)!=STATE(s1))return 0;
+if(STATE(s2)==-1)return 1;
 for(i=0;i<3;i++)for(j=0;j<158;j++)for(k=0;k<158;k++){
 n=655+227*i+j+1920*(550+k);
 if(s2[n]!=s1[n])return 0;
