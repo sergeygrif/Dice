@@ -10439,6 +10439,7 @@ DeleteObject(m);
 DeleteObject(d);
 return s;
 }
+vector<int> S(){return S(0,3839,0,2399);}
 int STATE(vector<int>& s){
 int pixel;
 pixel=s[1442+3840*1955];
