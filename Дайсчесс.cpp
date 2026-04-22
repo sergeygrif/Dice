@@ -5243,6 +5243,7 @@ static void extractBestPVUntilChance(MCTSTable& T,
         makeMove(pos, mask, m);
     }
 }
+int SEARCH=0;
 Position POS;
 array<uint64_t,4> PATH;
 array<int,64> MASK;
