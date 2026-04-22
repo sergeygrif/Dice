@@ -10468,6 +10468,17 @@ board[sq]=NUMBER(sqKey,key);
 }
 return board;
 }
+void BOARD(array<int,64>& board,Position& pos){
+int sq,piece;
+pos.color={0,0};
+pos.piece={0,0,0,0,0,0};
+for(sq=0;sq<64;sq++){
+piece=board[sq];
+if(piece==12)continue;
+pos.color[piece/6]|=bit(sq);
+pos.piece[piece%6]|=bit(sq);
+}
+}
 vector<int> SQUARE(array<int,64>& board1,array<int,64>& board2){
 int sq;
 vector<int> square;
