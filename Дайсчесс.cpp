@@ -10538,12 +10538,15 @@ if((t2-t1).count()>=100000000)return s2;
 }
 }
 void START(){
+POS.color={0,0};
+POS.piece={0,0,0,0,0,0};
+POS.side=0;
 POS.ep1={0,0};
 POS.ep2=0;
 POS.rook={0,7,56,63};
 POS.castle=15;
 POS.dice=0;
-POS.key=0;
+POS.key=computeKey(POS);
 PATH={bit(1)|bit(2)|bit(3),bit(5)|bit(6),bit(57)|bit(58)|bit(59),bit(61)|bit(62)};
 MASK.fill(0);
 MASK[0]=1;
