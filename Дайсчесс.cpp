@@ -10650,7 +10650,14 @@ int main() {
             std::cout << "TensorRT engine is not loaded.\n";
             return 1;
         }
-if(fen=="s"){START(POS);LOAD();SEARCH();}
+if(fen=="s"){
+    START(POS);
+    std::thread loadThread(LOAD);
+    std::thread searchThread(SEARCH);
+    loadThread.join();
+    searchThread.join();
+    return 0;
+}
         Position pos;
         std::array<uint64_t, 4> path;
         std::array<int, 64> mask;
