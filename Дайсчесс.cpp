@@ -10534,16 +10534,16 @@ continue;
 if((t2-t1).count()>=100000000)return s2;
 }
 }
-void START(){
-POS.color={0,0};
-POS.piece={0,0,0,0,0,0};
-POS.side=0;
-POS.ep1={0,0};
-POS.ep2=0;
-POS.rook={0,7,56,63};
-POS.castle=15;
-POS.dice=0;
-POS.key=computeKey(POS);
+void START(Position& pos){
+pos.color={0,0};
+pos.piece={0,0,0,0,0,0};
+pos.side=0;
+pos.ep1={0,0};
+pos.ep2=0;
+pos.rook={0,7,56,63};
+pos.castle=15;
+pos.dice=0;
+pos.key=computeKey(POS);
 }
 void START(array<uint64_t,4>& path,array<int,64>& mask){
 path={bit(1)|bit(2)|bit(3),bit(5)|bit(6),bit(57)|bit(58)|bit(59),bit(61)|bit(62)};
@@ -10570,7 +10570,7 @@ START(path,mask);
 while(1){
 s2=NEW(s1);
 if(STATE(s2)==-1){
-START();
+START(POS);
 END(board1,board2,s1,s2);
 continue;
 }
