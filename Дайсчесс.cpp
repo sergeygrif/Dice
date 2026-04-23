@@ -10608,49 +10608,19 @@ POS.dice=newDice[POS.dice][dice];
 END(board1,board2,s1,s2);
 }
 }
-void SET(vector<int>& s,Position& pos,array<uint64_t,4>& path,array<int,64>& mask){
-int sq,piece;
-array<int,64> board;
-board=BOARD(s);
-pos.color={0,0};
-pos.piece={0,0,0,0,0,0};
-for(sq=0;sq<64;sq++){
-piece=board[sq];
-if(piece==12)continue;
-pos.color[piece/6]|=bit(sq);
-pos.piece[piece%6]|=bit(sq);
-}
-pos.side=SIDE(s);
-pos.ep1={0,0};
-pos.ep2=0;
-pos.rook={0,7,56,63};
-pos.castle=0;
-pos.dice=DICE(DICERAW(DICEVECTOR(s)),pos);
-pos.key=computeKey(pos);
-buildPathMask(pos,path,mask);
-}
-void SITE(){
-int side1,side2;
-vector<int> s1,s2;
+void SEARCH(){
 Position pos;
 array<uint64_t,4> path;
 array<int,64> mask;
 float eval;
 vector<moveState> moves;
 vector<int> pv;
-side1=-1;
+START(pos);
+START(path,mask);
 while(1){
-s1=S(0,3839,0,2399);
-while(1){
-Sleep(100);
-s2=S(0,3839,0,2399);
-side2=SIDE(s2[1442+3840*1955]);
-if(side2!=-1&&side2!=side1&&WHITE(s2)&&EQUAL(s1,s2))break;
-s1=s2;
-}
-side1=side2;
-SET(s2,pos,path,mask);
-mctsBatchedMT(pos,path,mask,600,eval,moves,pv,1,side2);
+while(POS.key==pos.key||POS.dice==0);
+pos=POS;
+mctsBatchedMT(pos,path,mask,600,eval,moves,pv,1,1);
 }
 }
 int main() {
