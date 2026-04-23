@@ -10650,7 +10650,7 @@ int main() {
             std::cout << "TensorRT engine is not loaded.\n";
             return 1;
         }
-if(fen=="s")SITE();
+if(fen=="s"){START(POS);LOAD();SEARCH();}
         Position pos;
         std::array<uint64_t, 4> path;
         std::array<int, 64> mask;
