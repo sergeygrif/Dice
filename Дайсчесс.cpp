@@ -10404,8 +10404,6 @@ float b=stof(fmtFixed(getAverageInferBatchSize(), 2));
     std::cout << "Training completed successfully! Files net.pt, net_ema.pt, optimizer.pt, and net.plan are ready.\n";
     diagLogLine("[Training] finished normally");
 }
-array<uint64_t,2> ep;
-int castle;
 vector<int> sqKey={2324,5950000,9121555,10242252,14571640,10172920,35020000,55080122,34360208,37770000,38410393,31600651,0};
 vector<int> diceKey={1861,140516,7681148,6141254,10991103,7942210};
 int NUMBER(vector<int>& v,int key){
