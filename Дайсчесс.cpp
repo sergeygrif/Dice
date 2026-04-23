@@ -10467,6 +10467,13 @@ board[sq]=NUMBER(sqKey,key);
 }
 return board;
 }
+vector<int> SQUARE(array<int,64>& board1,array<int,64>& board2){
+int sq;
+vector<int> square;
+for(sq=0;sq<64;sq++)if(board2[sq]!=board1[sq])square.push_back(sq);
+sort(square.begin(),square.end(),[&](int a,int b){return board2[a]>board2[b];});
+return square;
+}
 void BOARD(array<int,64>& board){
 int sq,piece;
 POS.color={0,0};
@@ -10477,12 +10484,6 @@ if(piece==12)continue;
 POS.color[piece/6]|=bit(sq);
 POS.piece[piece%6]|=bit(sq);
 }
-}
-vector<int> SQUARE(array<int,64>& board1,array<int,64>& board2){
-int sq;
-vector<int> square;
-for(sq=0;sq<64;sq++)if(board2[sq]!=board1[sq])square.push_back(sq);
-return square;
 }
 void DICE(vector<int>& s){
 int light,i,white,black,x,y,pixel,dist;
