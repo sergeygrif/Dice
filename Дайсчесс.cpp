@@ -10555,6 +10555,16 @@ MASK[56]=4;
 MASK[60]=12;
 MASK[63]=8;
 }
+void START(array<uint64_t,4>& path,array<int,64>& mask){
+path={bit(1)|bit(2)|bit(3),bit(5)|bit(6),bit(57)|bit(58)|bit(59),bit(61)|bit(62)};
+mask.fill(0);
+mask[0]=1;
+mask[4]=3;
+mask[7]=2;
+mask[56]=4;
+mask[60]=12;
+mask[63]=8;
+}
 void END(array<int,64>& board1,array<int,64>& board2,vector<int>& s1,vector<int>& s2){
 POS.key==computeKey(POS);
 s1=s2;
