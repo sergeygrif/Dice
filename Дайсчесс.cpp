@@ -5244,8 +5244,6 @@ static void extractBestPVUntilChance(MCTSTable& T,
     }
 }
 Position POS;
-array<uint64_t,4> PATH;
-array<int,64> MASK;
 void mctsBatchedMT(Position& rootPos,
     std::array<uint64_t, 4>& path,
     std::array<int, 64>& mask,
