@@ -10557,6 +10557,11 @@ MASK[56]=4;
 MASK[60]=12;
 MASK[63]=8;
 }
+void END(array<int,64>& board1,array<int,64>& board2,vector<int>& s1,vector<int>& s2){
+POS.key==computeKey(POS);
+s1=s2;
+board1=board2;
+}
 void SET(vector<int>& s,Position& pos,array<uint64_t,4>& path,array<int,64>& mask){
 int sq,piece;
 array<int,64> board;
