@@ -10546,14 +10546,6 @@ POS.rook={0,7,56,63};
 POS.castle=15;
 POS.dice=0;
 POS.key=computeKey(POS);
-PATH={bit(1)|bit(2)|bit(3),bit(5)|bit(6),bit(57)|bit(58)|bit(59),bit(61)|bit(62)};
-MASK.fill(0);
-MASK[0]=1;
-MASK[4]=3;
-MASK[7]=2;
-MASK[56]=4;
-MASK[60]=12;
-MASK[63]=8;
 }
 void START(array<uint64_t,4>& path,array<int,64>& mask){
 path={bit(1)|bit(2)|bit(3),bit(5)|bit(6),bit(57)|bit(58)|bit(59),bit(61)|bit(62)};
