@@ -10467,15 +10467,15 @@ board[sq]=NUMBER(sqKey,key);
 }
 return board;
 }
-void BOARD(array<int,64>& board,Position& pos){
+void BOARD(array<int,64>& board){
 int sq,piece;
-pos.color={0,0};
-pos.piece={0,0,0,0,0,0};
+POS.color={0,0};
+POS.piece={0,0,0,0,0,0};
 for(sq=0;sq<64;sq++){
 piece=board[sq];
 if(piece==12)continue;
-pos.color[piece/6]|=bit(sq);
-pos.piece[piece%6]|=bit(sq);
+POS.color[piece/6]|=bit(sq);
+POS.piece[piece%6]|=bit(sq);
 }
 }
 vector<int> SQUARE(array<int,64>& board1,array<int,64>& board2){
@@ -10484,7 +10484,7 @@ vector<int> square;
 for(sq=0;sq<64;sq++)if(board2[sq]!=board1[sq])square.push_back(sq);
 return square;
 }
-int DICE(vector<int>& s,Position& pos){
+int DICE(vector<int>& s){
 int light,i,white,black,x,y,pixel,dice,dist;
 uint64_t pawns;
 string t;
@@ -10504,10 +10504,10 @@ if(light==0)return 0;
 sort(v.begin(),v.end());
 for(i=0;i<3;i++)t+=pieceChar(v[i]);
 dice=diceFenToInt(t);
-pawns=pos.color[pos.side]&pos.piece[0];
+pawns=POS.color[POS.side]&POS.piece[0];
 dist=6;
-if(pawns)if(pos.side==0)dist=clz64(pawns)>>3;else dist=ctz64(pawns)>>3;
-for(i=0;i<5;i++)while(dicePiece[dice][i]&&(pos.color[pos.side]&pos.piece[i])==0&&dist>dicePiece[dice][0])dice=newDice[dice][i];
+if(pawns)if(POS.side==0)dist=clz64(pawns)>>3;else dist=ctz64(pawns)>>3;
+for(i=0;i<5;i++)while(dicePiece[dice][i]&&(POS.color[POS.side]&POS.piece[i])==0&&dist>dicePiece[dice][0])dice=newDice[dice][i];
 return dice;
 }
 int EQUAL(vector<int>& s1,vector<int>& s2){
