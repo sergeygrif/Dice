@@ -10562,8 +10562,11 @@ board1=board2;
 }
 void LOAD(){
 int side,from,to,dice;
+array<uint64_t,4> path;
+array<int,64> mask;
 array<int,64> board1,board2;
 vector<int> s1,s2,square;
+START(path,mask);
 while(1){
 s2=NEW(s1);
 if(STATE(s2)==-1){
@@ -10600,7 +10603,7 @@ to=square[1];
 dice=board1[from]%6;
 if(dice==0&&(from^to)==16)POS.ep1[!side]|=bit((from+to)/2);
 if(dice==0&&POS.ep1[side]&epMask[to])POS.ep2|=bit(to);
-POS.castle&=~(MASK[from]|MASK[to]);
+POS.castle&=~(mask[from]|mask[to]);
 POS.dice=newDice[POS.dice][dice];
 END(board1,board2,s1,s2);
 }
