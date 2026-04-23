@@ -10484,8 +10484,8 @@ vector<int> square;
 for(sq=0;sq<64;sq++)if(board2[sq]!=board1[sq])square.push_back(sq);
 return square;
 }
-int DICE(vector<int>& s){
-int light,i,white,black,x,y,pixel,dice,dist;
+void DICE(vector<int>& s){
+int light,i,white,black,x,y,pixel,dist;
 uint64_t pawns;
 string t;
 vector<int> v;
@@ -10500,15 +10500,17 @@ light+=pixel==-1;
 }
 v.push_back(NUMBER(diceKey,max(white,black)+10000*min(white,black)));
 }
-if(light==0)return 0;
+if(light==0){
+POS.dice=0;
+return;
+}
 sort(v.begin(),v.end());
 for(i=0;i<3;i++)t+=pieceChar(v[i]);
-dice=diceFenToInt(t);
+POS.dice=diceFenToInt(t);
 pawns=POS.color[POS.side]&POS.piece[0];
 dist=6;
 if(pawns)if(POS.side==0)dist=clz64(pawns)>>3;else dist=ctz64(pawns)>>3;
-for(i=0;i<5;i++)while(dicePiece[dice][i]&&(POS.color[POS.side]&POS.piece[i])==0&&dist>dicePiece[dice][0])dice=newDice[dice][i];
-return dice;
+for(i=0;i<5;i++)while(dicePiece[POS.dice][i]&&(POS.color[POS.side]&POS.piece[i])==0&&dist>dicePiece[POS.dice][0])POS.dice=newDice[POS.dice][i];
 }
 int EQUAL(vector<int>& s1,vector<int>& s2){
 int i,j,k,n;
