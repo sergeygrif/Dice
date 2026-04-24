@@ -10521,7 +10521,7 @@ for(i=0;i<3;i++)for(j=0;j<158;j++)for(k=0;k<158;k++){
 n=655+227*i+j+1920*(550+k);
 diff+=DIFF(s2[n],s1[n]);
 }
-return diff==0;
+return diff<10000;
 }
 vector<int> NEW(vector<int> s1){
 time_point<steady_clock> t1,t2;
