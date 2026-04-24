@@ -10513,12 +10513,12 @@ for(i=0;i<3;i++)for(x=0;x<158;x++)for(y=0;y<158;y++)if(s[655+227*i+x+1920*(550+y
 return 0;
 }
 int EQUAL(vector<int>& s1,vector<int>& s2){
-int diff,i,j,k,n;
+int diff,i,x,y,n;
 if(STATE(s2)!=STATE(s1))return 0;
 if(STATE(s2)==-1)return 1;
 diff=0;
-for(i=0;i<3;i++)for(j=0;j<158;j++)for(k=0;k<158;k++){
-n=655+227*i+j+1920*(550+k);
+for(i=0;i<3;i++)for(x=0;x<158;x++)for(y=0;y<158;y++){
+n=655+227*i+x+1920*(550+y);
 diff+=DIFF(s2[n],s1[n]);
 }
 return diff<10000;
