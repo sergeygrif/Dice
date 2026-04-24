@@ -10513,14 +10513,15 @@ if(pawns)if(POS.side==0)dist=clz64(pawns)>>3;else dist=ctz64(pawns)>>3;
 for(i=0;i<5;i++)while(dicePiece[POS.dice][i]&&(POS.color[POS.side]&POS.piece[i])==0&&dist>dicePiece[POS.dice][0])POS.dice=newDice[POS.dice][i];
 }
 int EQUAL(vector<int>& s1,vector<int>& s2){
-int i,j,k,n;
+int diff,i,j,k,n;
 if(STATE(s2)!=STATE(s1))return 0;
 if(STATE(s2)==-1)return 1;
+diff=0;
 for(i=0;i<3;i++)for(j=0;j<158;j++)for(k=0;k<158;k++){
 n=655+227*i+j+1920*(550+k);
-if(s2[n]!=s1[n])return 0;
+diff+=DIFF(s2[n],s1[n]);
 }
-return 1;
+return diff==0;
 }
 vector<int> NEW(vector<int> s1){
 time_point<steady_clock> t1,t2;
