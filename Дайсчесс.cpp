@@ -10570,6 +10570,10 @@ POS.key=computeKey(POS);
 s1=s2;
 board1=board2;
 }
+void END2(array<int,64>& board1,array<int,64>& board2,vector<int>& s1,vector<int>& s2){
+if(LIGHT(s2)==0)POS.dice=0;
+END(board1,board2,s1,s2);
+}
 void LOAD(){
 int side,from,to,dice;
 array<uint64_t,4> path;
