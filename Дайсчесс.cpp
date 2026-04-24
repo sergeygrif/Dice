@@ -10438,6 +10438,7 @@ DeleteObject(d);
 return s;
 }
 vector<int> S(){return S(0,1919,0,2399);}
+int DIFF(int a,int b){return abs(b&255-a&255)+abs((b>>8)&255-(a>>8)&255)+abs((b>>16)&255-(a>>16)&255);}
 int STATE(vector<int>& s){
 if(s.empty()||s[960+1920*295]!=-469625||s[960+1920*630]==-15324372||s[1335+1920*980]==-15189205)return -1;
 return s[1442+1920*1935]==-15785961;
