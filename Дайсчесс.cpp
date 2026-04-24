@@ -10603,12 +10603,12 @@ if(square.size()==4){
 POS.castle&=12-9*side;
 POS.dice=newDice[POS.dice][5];
 POS.dice=newDice[POS.dice][3];
-END(board1,board2,s1,s2);
+END2(board1,board2,s1,s2);
 continue;
 }
 if(square.size()==3){
 POS.dice=newDice[POS.dice][0];
-END(board1,board2,s1,s2);
+END2(board1,board2,s1,s2);
 continue;
 }
 from=square[0];
@@ -10618,7 +10618,7 @@ if(dice==0&&(from^to)==16)POS.ep1[!side]|=bit((from+to)/2);
 if(dice==0&&POS.ep1[side]&epMask[to])POS.ep2|=bit(to);
 POS.castle&=~(mask[from]|mask[to]);
 POS.dice=newDice[POS.dice][dice];
-END(board1,board2,s1,s2);
+END2(board1,board2,s1,s2);
 }
 }
 void SEARCH(){
