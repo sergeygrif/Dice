@@ -10485,7 +10485,7 @@ POS.piece[piece%6]|=bit(sq);
 }
 }
 void DICE(vector<int>& s){
-int light,i,white,black,x,y,pixel,dist;
+int i,white,black,x,y,pixel,dist;
 uint64_t pawns;
 string t;
 vector<int> v;
@@ -10496,13 +10496,8 @@ for(x=0;x<158;x++)for(y=0;y<158;y++){
 pixel=s[655+227*i+x+1920*(550+y)];
 white+=pixel==-1||pixel==-8421505;
 black+=pixel==-16777216;
-light+=pixel==-1;
 }
 v.push_back(NUMBER(diceKey,max(white,black)+10000*min(white,black)));
-}
-if(light==0){
-POS.dice=0;
-return;
 }
 sort(v.begin(),v.end());
 for(i=0;i<3;i++)t+=pieceChar(v[i]);
