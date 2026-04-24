@@ -10512,6 +10512,11 @@ dist=6;
 if(pawns)if(POS.side==0)dist=clz64(pawns)>>3;else dist=ctz64(pawns)>>3;
 for(i=0;i<5;i++)while(dicePiece[POS.dice][i]&&(POS.color[POS.side]&POS.piece[i])==0&&dist>dicePiece[POS.dice][0])POS.dice=newDice[POS.dice][i];
 }
+int LIGHT(vector<int>& s){
+int i,x,y;
+for(i=0;i<3;i++)for(x=0;x<158;x++)for(y=0;y<158;y++)if(s[655+227*i+x+1920*(550+y)]==-1)return 1;
+return 0;
+}
 int EQUAL(vector<int>& s1,vector<int>& s2){
 int diff,i,j,k,n;
 if(STATE(s2)!=STATE(s1))return 0;
