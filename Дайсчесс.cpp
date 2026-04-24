@@ -10620,7 +10620,7 @@ vector<int> pv;
 START(pos);
 START(path,mask);
 while(1){
-while(POS.key==pos.key||POS.dice==0);
+while(POS.key==pos.key||POS.dice==0)Sleep(1);
 pos=POS;
 mctsBatchedMT(pos,path,mask,600,eval,moves,pv,1,1);
 }
