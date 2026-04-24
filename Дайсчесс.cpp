@@ -10565,7 +10565,6 @@ mask[60]=12;
 mask[63]=8;
 }
 void END(array<int,64>& board1,array<int,64>& board2,vector<int>& s1,vector<int>& s2){
-if(LIGHT(s2)==0)POS.dice=0;
 POS.key=computeKey(POS);
 s1=s2;
 board1=board2;
