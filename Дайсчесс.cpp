@@ -10445,13 +10445,20 @@ return s[1442+1920*1935]==-15785961;
 int FLIP(vector<int>& s){return s[417+1920*1752]==-665935;}
 int SIDE(vector<int>& s){return STATE(s)!=FLIP(s);}
 array<int,64> BOARD(vector<int>& s){
-int sq,key,x,y,pixel;
+int sq,w,h,key,x,y,pixel;
 array<int,64> board;
 for(sq=0;sq<64;sq++){
-if(FLIP(s)==0)sq^=56;else sq^=7;
+if(FLIP(s)==0){
+w=sq%8;
+h=7-sq/8;
+}
+else{
+w=7-sq%8;
+h=sq/8;
+}
 key=0;
 for(x=0;x<138;x++)for(y=0;y<138;y++){
-pixel=s[407+138*(sq%8)+x+1920*(762+138*(sq/8)+y)];
+pixel=s[407+138*w+x+1920*(762+138*h+y)];
 key+=(pixel==-1)+10000*(pixel==-16777216);
 }
 board[sq]=NUMBER(sqKey,key);
