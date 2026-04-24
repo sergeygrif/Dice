@@ -10442,9 +10442,9 @@ int STATE(vector<int>& s){
 int pixel1,pixel2,pixel3;
 if(s.empty())return -1;
 pixel1=s[960+1920*629];
-pixel2=s[1335+1920*997];
+pixel2=s[1335+1920*980];
 pixel3=s[1442+1920*1955];
-if(pixel1==-15455703||pixel2==-1||pixel3!=-5532810&&pixel3!=-11842499)return -1;
+if(pixel1==-15455703||pixel2==-15189205||pixel3!=-5532810&&pixel3!=-11842499)return -1;
 return pixel3==-11842499;
 }
 int FLIP(vector<int>& s){return s[417+1920*1752]==-665935;}
