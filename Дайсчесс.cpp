@@ -10487,12 +10487,12 @@ if(pawns)if(POS.side==0)d=clz64(pawns)>>3;else d=ctz64(pawns)>>3;
 for(i=0;i<5;i++)while(dicePiece[dice][i]&&(POS.color[POS.side]&POS.piece[i])==0&&d>dicePiece[dice][0])dice=newDice[dice][i];
 return dice;
 }
-vector<int> DIFF(vector<int>& b1,vector<int>& b2){
+vector<int> WAY(vector<int>& b1,vector<int>& b2){
 int sq;
-vector<int> diff;
-for(sq=0;sq<64;sq++)if(b2[sq]!=b1[sq])diff.push_back(sq);
-sort(diff.begin(),diff.end(),[&](int a,int b){return b2[a]>b2[b];});
-return diff;
+vector<int> way;
+for(sq=0;sq<64;sq++)if(b2[sq]!=b1[sq])way.push_back(sq);
+sort(way.begin(),way.end(),[&](int a,int b){return b2[a]>b2[b];});
+return way;
 }
 void START(Position& pos,array<uint64_t,4>& path,array<int,64>& mask){
 path={bit(1)|bit(2)|bit(3),bit(5)|bit(6),bit(57)|bit(58)|bit(59),bit(61)|bit(62)};
