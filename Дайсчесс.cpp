@@ -5305,7 +5305,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
     const auto t0 = std::chrono::steady_clock::now();
     const auto tEnd = t0 + std::chrono::duration<double>(timeSec);
     auto tNextWrite = t0 + std::chrono::seconds(1);
-    auto tNextAbortCheck = t0 + std::chrono::milliseconds(50);
+    auto tNextAbortCheck = t0 + std::chrono::milliseconds(1);
 
     std::atomic<bool> stop{ false };
     AtomicStopGuard stopGuard(stop);
@@ -5465,7 +5465,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             break;
         }
         while (now >= tNextAbortCheck) {
-            tNextAbortCheck += std::chrono::milliseconds(50);
+            tNextAbortCheck += std::chrono::milliseconds(1);
         }
 
         if (write == 1) {
