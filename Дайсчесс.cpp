@@ -10399,7 +10399,7 @@ float b=stof(fmtFixed(getAverageInferBatchSize(), 2));
     diagLogLine("[Training] finished normally");
 }
 vector<int> sqKey={100002324,505950000,609121555,110242252,614571640,610172920,35020000,355080122,34360208,37770000,338410393,631600651,0};
-vector<int> diceKey={100001856};
+vector<int> diceKey={100001856,405160010};
 int NUMBER(vector<int>& v,int key){
 int min,i,dist,num;
 min=INT_MAX;
