@@ -10460,24 +10460,6 @@ board.push_back(NUMBER(key,sqKey));
 }
 return board;
 }
-vector<int> SQUARE(array<int,64>& board1,array<int,64>& board2){
-int sq;
-vector<int> square;
-for(sq=0;sq<64;sq++)if(board2[sq]!=board1[sq])square.push_back(sq);
-sort(square.begin(),square.end(),[&](int a,int b){return board2[a]>board2[b];});
-return square;
-}
-void BOARD(array<int,64>& board){
-int sq,piece;
-POS.color={0,0};
-POS.piece={0,0,0,0,0,0};
-for(sq=0;sq<64;sq++){
-piece=board[sq];
-if(piece==12)continue;
-POS.color[piece/6]|=bit(sq);
-POS.piece[piece%6]|=bit(sq);
-}
-}
 int DICE(vector<int>& s){
 int l,i,x,y,p,n,dice,d;
 long long key;
@@ -10504,6 +10486,24 @@ d=6;
 if(pawns)if(POS.side==0)d=clz64(pawns)>>3;else d=ctz64(pawns)>>3;
 for(i=0;i<5;i++)while(dicePiece[dice][i]&&(POS.color[POS.side]&POS.piece[i])==0&&d>dicePiece[dice][0])dice=newDice[dice][i];
 return dice;
+}
+vector<int> SQUARE(array<int,64>& board1,array<int,64>& board2){
+int sq;
+vector<int> square;
+for(sq=0;sq<64;sq++)if(board2[sq]!=board1[sq])square.push_back(sq);
+sort(square.begin(),square.end(),[&](int a,int b){return board2[a]>board2[b];});
+return square;
+}
+void BOARD(array<int,64>& board){
+int sq,piece;
+POS.color={0,0};
+POS.piece={0,0,0,0,0,0};
+for(sq=0;sq<64;sq++){
+piece=board[sq];
+if(piece==12)continue;
+POS.color[piece/6]|=bit(sq);
+POS.piece[piece%6]|=bit(sq);
+}
 }
 int EQUAL(vector<int>& s1,vector<int>& s2){
 int diff,i,x,y,n;
