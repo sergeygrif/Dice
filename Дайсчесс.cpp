@@ -10400,17 +10400,17 @@ float b=stof(fmtFixed(getAverageInferBatchSize(), 2));
 }
 vector<long long> sqKey={100002324,505950000,609121555,110242252,614571640,610172920,35020000,355080122,34360208,37770000,338410393,631600651,0};
 vector<long long> diceKey={100001856,405160010,6571113,6831247,309371046,606462162,324110006,341110119,126520169,122750009,430810277,826600559,188800000000,285506010000,115807560000,127107610000,110310990000,220107560000,1124640000,14842670000,26427290000,5623910000,33132030000,64527490000};
-int NUMBER(vector<int>& v,int key){
-int min,i,dist,num;
+int NUMBER(long long key,vector<long long>& v){
+int min,i,d,n;
 min=INT_MAX;
 for(i=0;i<v.size();i++){
-dist=abs(v[i]%10000-key%10000)+abs(v[i]/10000-key/10000);
-if(dist<min){
-num=i;
-min=dist;
+d=abs(v[i]%10000-key%10000)+abs(v[i]/10000%10000-key/10000%10000)+abs(v[i]/100000000-key/100000000);
+if(d<min){
+n=i;
+min=d;
 }
 }
-return num;
+return n;
 }
 vector<int> S(int x1,int x2,int y1,int y2){
 int w,h;
