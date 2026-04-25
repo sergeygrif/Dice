@@ -10524,6 +10524,12 @@ POS.color[piece/6]|=bit(sq);
 POS.piece[piece%6]|=bit(sq);
 }
 }
+void END(int dice,vector<int>& s1,vector<int>& s2,vector<int>& b1,vector<int>& b2){
+if(dice==0)POS.dice=0;
+POS.key=computeKey(POS);
+s1=s2;
+b1=b2;
+}
 int EQUAL(vector<int>& s1,vector<int>& s2){
 int diff,i,x,y,n;
 if(STATE(s2)!=STATE(s1))return 0;
