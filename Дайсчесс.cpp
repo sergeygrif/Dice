@@ -10487,12 +10487,12 @@ if(pawns)if(POS.side==0)d=clz64(pawns)>>3;else d=ctz64(pawns)>>3;
 for(i=0;i<5;i++)while(dicePiece[dice][i]&&(POS.color[POS.side]&POS.piece[i])==0&&d>dicePiece[dice][0])dice=newDice[dice][i];
 return dice;
 }
-vector<int> SQUARE(array<int,64>& board1,array<int,64>& board2){
+vector<int> DIFF(vector<int>& b1,vector<int>& b2){
 int sq;
-vector<int> square;
-for(sq=0;sq<64;sq++)if(board2[sq]!=board1[sq])square.push_back(sq);
-sort(square.begin(),square.end(),[&](int a,int b){return board2[a]>board2[b];});
-return square;
+vector<int> diff;
+for(sq=0;sq<64;sq++)if(b2[sq]!=b1[sq])diff.push_back(sq);
+sort(diff.begin(),diff.end(),[&](int a,int b){return b2[a]>b2[b];});
+return diff;
 }
 void BOARD(array<int,64>& board){
 int sq,piece;
