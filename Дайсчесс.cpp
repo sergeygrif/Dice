@@ -10478,38 +10478,32 @@ POS.color[piece/6]|=bit(sq);
 POS.piece[piece%6]|=bit(sq);
 }
 }
-void DICE(vector<int>& s){
-int light,i,white,black,x,y,pixel,dist;
+int DICE(vector<int>& s){
+int l,i,x,y,p,n,dice,d;
+long long key;
 uint64_t pawns;
 string t;
 vector<int> v;
-light=0;
+l=0;
 for(i=0;i<3;i++){
-white=black=0;
+key=0;
 for(x=0;x<158;x++)for(y=0;y<158;y++){
-pixel=s[655+227*i+x+1920*(550+y)];
-white+=pixel==-1||pixel==-8421505;
-black+=pixel==-16777216;
-light+=pixel==-1;
+p=s[655+227*i+x+1920*(550+y)];
+key+=(p==-1)+10000*(p==-16777216)+100000000*(p==-8421505);
 }
-v.push_back(NUMBER(diceKey,max(white,black)+10000*min(white,black)));
+n=NUMBER(key,diceKey);
+v.push_back(n%6);
+if(n<12)l=1;
 }
-if(light==0){
-POS.dice=0;
-return;
-}
+if(l==0)return 0;
 sort(v.begin(),v.end());
 for(i=0;i<3;i++)t+=pieceChar(v[i]);
-POS.dice=diceFenToInt(t);
+dice=diceFenToInt(t);
 pawns=POS.color[POS.side]&POS.piece[0];
-dist=6;
-if(pawns)if(POS.side==0)dist=clz64(pawns)>>3;else dist=ctz64(pawns)>>3;
-for(i=0;i<5;i++)while(dicePiece[POS.dice][i]&&(POS.color[POS.side]&POS.piece[i])==0&&dist>dicePiece[POS.dice][0])POS.dice=newDice[POS.dice][i];
-}
-int LIGHT(vector<int>& s){
-int i,x,y;
-for(i=0;i<3;i++)for(x=0;x<158;x++)for(y=0;y<158;y++)if(s[655+227*i+x+1920*(550+y)]==-1)return 1;
-return 0;
+d=6;
+if(pawns)if(POS.side==0)d=clz64(pawns)>>3;else d=ctz64(pawns)>>3;
+for(i=0;i<5;i++)while(dicePiece[dice][i]&&(POS.color[POS.side]&POS.piece[i])==0&&d>dicePiece[dice][0])dice=newDice[dice][i];
+return dice;
 }
 int EQUAL(vector<int>& s1,vector<int>& s2){
 int diff,i,x,y,n;
