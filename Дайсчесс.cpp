@@ -10530,6 +10530,17 @@ POS.key=computeKey(POS);
 s1=s2;
 b1=b2;
 }
+int DIFF(vector<int>& s1,vector<int>& s2){
+int diff,i,x,y,n;
+if(STATE(s2)!=STATE(s1))return INT_MAX;
+if(STATE(s2)==-1)return 0;
+diff=0;
+for(i=0;i<3;i++)for(x=0;x<158;x++)for(y=0;y<158;y++){
+n=655+227*i+x+1920*(550+y);
+diff+=DIFF(s2[n],s1[n]);
+}
+return diff;
+}
 int EQUAL(vector<int>& s1,vector<int>& s2){
 int diff,i,x,y,n;
 if(STATE(s2)!=STATE(s1))return 0;
