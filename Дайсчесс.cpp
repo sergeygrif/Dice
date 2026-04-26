@@ -10513,7 +10513,7 @@ pos.castle=15;
 pos.dice=0;
 pos.key=computeKey(pos);
 }
-void BOARD(vector<int>& board){
+void SET(vector<int>& board){
 int sq,piece;
 POS.color={0,0};
 POS.piece={0,0,0,0,0,0};
