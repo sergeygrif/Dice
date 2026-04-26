@@ -10442,10 +10442,10 @@ b+=16777216;
 return abs(b%256-a%256)+abs(b/256%256-a/256%256)+abs(b/65536-a/65536);
 }
 int STATE(vector<int>& s){
-if(s.empty()||s[960+1920*630]==-15324372||s[960+1920*730]!=-15192275||s[1335+1920*980]==-15189205)return -1;
-return s[1445+1920*590]==-16443635;
+if(s.empty()||s[553+1104*80]==-15324372||s[553+1104*180]!=-15192275||s[928+1104*430]==-15189205)return -1;
+return s[1038+1104*40]==-16443635;
 }
-int FLIP(vector<int>& s){return s[417+1920*1752]==-665935;}
+int FLIP(vector<int>& s){return s[10+1104*1202]==-665935;}
 int SIDE(vector<int>& s){return STATE(s)!=FLIP(s);}
 vector<int> BOARD(vector<int>& s){
 int sq,SQ,x,y,p;
@@ -10455,7 +10455,7 @@ for(sq=0;sq<64;sq++){
 if(FLIP(s)==0)SQ=sq^56;else SQ=sq^7;
 key=0;
 for(x=0;x<138;x++)for(y=0;y<138;y++){
-p=s[407+138*(SQ%8)+x+1920*(762+138*(SQ/8)+y)];
+p=s[138*(SQ%8)+x+1104*(212+138*(SQ/8)+y)];
 key+=(p==-1)+10000*(p==-16777216)+100000000*(p==-8421505);
 }
 board.push_back(NUMBER(key,sqKey));
@@ -10472,7 +10472,7 @@ l=0;
 for(i=0;i<3;i++){
 key=0;
 for(x=0;x<158;x++)for(y=0;y<158;y++){
-p=s[655+227*i+x+1920*(550+y)];
+p=s[248+227*i+x+1104*y];
 key+=(p==-1)+10000*(p==-16777216)+100000000*(p==-8421505);
 }
 n=NUMBER(key,diceKey);
@@ -10540,7 +10540,7 @@ if(STATE(s2)!=STATE(s1))return INT_MAX;
 if(STATE(s2)==-1)return 0;
 diff=0;
 for(i=0;i<3;i++)for(x=0;x<158;x++)for(y=0;y<158;y++){
-n=655+227*i+x+1920*(550+y);
+n=248+227*i+x+1104*y;
 diff+=DIFF(s2[n],s1[n]);
 }
 return diff;
