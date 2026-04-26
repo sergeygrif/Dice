@@ -10435,7 +10435,7 @@ DeleteObject(m);
 DeleteObject(d);
 return s;
 }
-vector<int> S(){return S(0,1919,0,2399);}
+vector<int> S(){return S(407,1510,550,1865);}
 int DIFF(int a,int b){
 a+=16777216;
 b+=16777216;
