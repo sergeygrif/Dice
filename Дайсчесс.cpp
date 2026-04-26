@@ -10572,9 +10572,9 @@ END(0,s1,s2,b1,b2);
 continue;
 }
 b2=BOARD(s2);
-dice=DICE(s2);
 SET(b2);
 POS.side=SIDE(s2);
+dice=DICE(s2);
 if(POS.dice==0){
 POS.ep1[!POS.side]=0;
 POS.ep2=0;
