@@ -10546,19 +10546,14 @@ diff+=DIFF(s2[n],s1[n]);
 return diff;
 }
 vector<int> S(vector<int>& s){
-time_point<steady_clock> t1,t2;
+int diff;
 vector<int> s1,s2;
-t1=steady_clock::now()+hours(1);
+diff=0;
 s1=s;
 while(1){
-t2=steady_clock::now();
 s2=S();
-if(DIFF(s1,s2)>=10000){
-t1=t2;
+if(DIFF(s1,s2)>=10000)diff=1;else if(diff)return s2;
 s1=s2;
-continue;
-}
-if((t2-t1).count()>=100000000)return s2;
 }
 }
 void LOAD(){
