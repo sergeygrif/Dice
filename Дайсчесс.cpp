@@ -10646,12 +10646,13 @@ int main() {
             return 1;
         }
 if(fen=="s"){
-    START(POS);
-    std::thread loadThread(LOAD);
-    std::thread searchThread(SEARCH);
-    loadThread.join();
-    searchThread.join();
-    return 0;
+START();
+START(POS);
+thread loadThread(LOAD);
+thread searchThread(SEARCH);
+loadThread.join();
+searchThread.join();
+return 0;
 }
         Position pos;
         std::array<uint64_t, 4> path;
