@@ -10496,6 +10496,16 @@ for(sq=0;sq<64;sq++)if(b2[sq]!=b1[sq])way.push_back(sq);
 sort(way.begin(),way.end(),[&](int a,int b){return b2[a]>b2[b];});
 return way;
 }
+void START(){
+PATH={bit(1)|bit(2)|bit(3),bit(5)|bit(6),bit(57)|bit(58)|bit(59),bit(61)|bit(62)};
+MASK.fill(0);
+MASK[0]=1;
+MASK[4]=3;
+MASK[7]=2;
+MASK[56]=4;
+MASK[60]=12;
+MASK[63]=8;
+}
 void START(Position& pos,array<uint64_t,4>& path,array<int,64>& mask){
 path={bit(1)|bit(2)|bit(3),bit(5)|bit(6),bit(57)|bit(58)|bit(59),bit(61)|bit(62)};
 mask.fill(0);
