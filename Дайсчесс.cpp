@@ -10561,6 +10561,51 @@ continue;
 if((t2-t1).count()>=100000000)return s2;
 }
 }
+void LOAD(){
+int dice,side,from,to,piece;
+vector<int> s1,s2,b1,b2,way;
+while(1){
+s2=S(s1);
+if(STATE(s2)==-1){
+START(POS);
+END(0,s1,s2,b1,b2);
+continue;
+}
+b2=BOARD(s2);
+dice=DICE(s2);
+SET(b2);
+POS.side=SIDE(s2);
+if(POS.dice==0){
+POS.ep1[!POS.side]=0;
+POS.ep2=0;
+POS.dice=dice;
+END(dice,s1,s2,b1,b2);
+continue;
+}
+side=SIDE(s1);
+way=WAY(b1,b2);
+if(way.size()==4){
+POS.castle&=12-9*side;
+POS.dice=newDice[POS.dice][5];
+POS.dice=newDice[POS.dice][3];
+END(dice,s1,s2,b1,b2);
+continue;
+}
+if(way.size()==3){
+POS.dice=newDice[POS.dice][0];
+END(dice,s1,s2,b1,b2);
+continue;
+}
+from=way[0];
+to=way[1];
+piece=b1[from]%6;
+if(piece==0&&(from^to)==16)POS.ep1[!side]|=bit((from+to)/2);
+if(piece==0&&POS.ep1[side]&epMask[to])POS.ep2|=bit(to);
+POS.castle&=~(MASK[from]|MASK[to]);
+POS.dice=newDice[POS.dice][piece];
+END(dice,s1,s2,b1,b2);
+}
+}
 int main() {
     installCrashDiagnostics();
 
