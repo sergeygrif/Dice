@@ -10606,6 +10606,18 @@ POS.dice=newDice[POS.dice][piece];
 END(dice,s1,s2,b1,b2);
 }
 }
+void SEARCH(){
+Position pos;
+float eval;
+vector<moveState> moves;
+vector<int> pv;
+START(pos);
+while(1){
+while(POS.key==pos.key||POS.dice==0)Sleep(1);
+pos=POS;
+mctsBatchedMT(pos,PATH,MASK,3600,eval,moves,pv,1,1);
+}
+}
 int main() {
     installCrashDiagnostics();
 
