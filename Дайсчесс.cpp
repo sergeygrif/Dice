@@ -10545,15 +10545,21 @@ diff+=DIFF(s2[n],s1[n]);
 }
 return diff;
 }
-vector<int> S(vector<int>& s){
-int diff;
-vector<int> s1,s2;
-diff=0;
-s1=s;
-while(1){
-s2=S();
-if(DIFF(s1,s2)>=10000)diff=1;else if(diff)return s2;
-s1=s2;
+vector<int> S(int dice,vector<int>& s){
+int i,t;
+time_point<steady_clock> t1,t2;
+vector<vector<int>> v;
+t1=steady_clock::now()+hours(1);
+v={s,{}};
+for(i=1;;i=!i){
+t2=steady_clock::now();
+v[i]=S();
+if(DIFF(v[0],v[1])>=10000){
+t1=t2;
+continue;
+}
+t=(t2-t1).count()/1000000;
+if(dice==0&&t>=100||dice&&t>=0)return v[i];
 }
 }
 void LOAD(){
