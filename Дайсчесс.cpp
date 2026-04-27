@@ -4344,6 +4344,23 @@ static AI_FORCEINLINE void publishReady(TTNode* n,
     n->expanded.store(1, std::memory_order_release);
 }
 
+static AI_FORCEINLINE void publishTerminalWithMove(MCTSTable& T,
+    TTNode* n,
+    uint64_t key,
+    int move) {
+    uint32_t begin = 0;
+    if (move != 0 && T.allocEdges(1, begin)) {
+        TTEdge& e = T.edges[(size_t)begin];
+        e.move = (uint16_t)move;
+        e.setPrior(1.0f);
+        e.valueSum.store(0.0f, std::memory_order_relaxed);
+        e.visits.store(0, std::memory_order_relaxed);
+        publishReady(n, key, begin, 1, 1, 0);
+        return;
+    }
+    publishReady(n, key, 0, 0, 1, 0);
+}
+
 // Old expansion: policy logits in CHW [pl][sq]
 // Fixed expansion: clamp priors BEFORE renorm, and write e.prior ONCE (no later overwrite).
 // ===== stack-only helpers (NO heap) =====
@@ -4984,7 +5001,7 @@ static void ensureRootExpanded(MCTSTable& T,
 
         Trace empty; empty.reset();
         backprop(root, 1.0f, empty);
-        publishReady(root, rootPos.key, 0, 0, 1, 0);
+        publishTerminalWithMove(T, root, rootPos.key, ml.n ? ml.m[0] : 0);
         rootClaim.release();
         return;
     }
@@ -5123,7 +5140,7 @@ static bool runOneSim(MCTSTable& T,
                 node->chance = 0;
 
                 backprop(node, 1.0f, tr);
-                publishReady(node, pos.key, 0, 0, 1, 0);
+                publishTerminalWithMove(T, node, pos.key, ml.n ? ml.m[0] : 0);
                 claim.release();
                 if (diag) diag->depth = (uint32_t)tr.n;
                 return true;
@@ -5228,7 +5245,13 @@ static void extractBestPVUntilChance(MCTSTable& T,
         uint8_t ex = n->expanded.load(std::memory_order_acquire);
         if (ex != 1) break;
 
-        if (n->terminal) break;
+        if (n->terminal) {
+            if (n->edgeCount) {
+                TTEdge* e0 = T.edgePtr(n->edgeBegin);
+                outPV.push_back(e0[0].move);
+            }
+            break;
+        }
 
         // chance-узел: остановиться ДО makeRandom()
         if (n->chance) break;
@@ -7349,7 +7372,7 @@ static bool ensureExpandedTrain(MCTSTable& T,
 
         Trace empty; empty.reset();
         backprop(root, 1.0f, empty);
-        publishReady(root, rootPos.key, 0, 0, 1, 0);
+        publishTerminalWithMove(T, root, rootPos.key, ml.n ? ml.m[0] : 0);
         rootClaim.release();
         return true;
     }
