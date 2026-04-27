@@ -10545,8 +10545,8 @@ diff+=DIFF(s2[n],s1[n]);
 }
 return diff;
 }
-vector<int> S(int dice,vector<int>& s){
-int i,t;
+vector<int> S(vector<int>& s){
+int i;
 time_point<steady_clock> t1,t2;
 vector<vector<int>> v;
 t1=steady_clock::now()+hours(1);
@@ -10558,8 +10558,7 @@ if(DIFF(v[0],v[1])>=10000){
 t1=t2;
 continue;
 }
-t=(t2-t1).count()/1000000;
-if(dice==0&&t>=100||dice&&t>=0)return v[i];
+if((t2-t1).count()>=100000000)return v[i];
 }
 }
 void LOAD(){
