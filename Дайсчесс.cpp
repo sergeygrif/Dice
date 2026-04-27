@@ -10585,7 +10585,7 @@ if(DIFF(v[0],v[1])>=10000){
 t1=t2;
 continue;
 }
-if((t2-t1).count()>=200000000)return v[i];
+if((t2-t1).count()>=100000000)return v[i];
 }
 }
 void LOAD(){
