@@ -10534,6 +10534,7 @@ POS.ep1[!POS.side]=0;
 POS.ep2=0;
 POS.dice=dice;
 }
+if(POS.dice==0)POS.dice=dice;
 POS.key=computeKey(POS);
 s1=s2;
 b1=b2;
