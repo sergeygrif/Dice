@@ -10445,7 +10445,7 @@ int STATE(vector<int>& s){
 if(s.empty()||s[553+1104*80]==-15324372||s[553+1104*180]!=-15192275||s[928+1104*430]==-15189205)return -1;
 return s[1038+1104*40]==-16443635;
 }
-int FLIP(vector<int>& s){return s[10+1104*1202]==-665935;}
+int FLIP(vector<int>& s){return STATE(s)!=-1&&s[10+1104*1202]==-665935;}
 int SIDE(vector<int>& s){return STATE(s)!=-1&&STATE(s)!=FLIP(s);}
 vector<int> BOARD(vector<int>& s){
 int sq,SQ,x,y,p;
