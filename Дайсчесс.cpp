@@ -10565,11 +10565,13 @@ if(dice==0&&t>=100||dice&&t>=0)return v[i];
 void LOAD(){
 int dice,side,from,to,piece;
 vector<int> s1,s2,b1,b2,way;
+dice=0;
 while(1){
-s2=S(s1);
+s2=S(dice,s1);
 if(STATE(s2)==-1){
+dice=0;
 START(POS);
-END(0,s1,s2,b1,b2);
+END(dice,s1,s2,b1,b2);
 continue;
 }
 b2=BOARD(s2);
