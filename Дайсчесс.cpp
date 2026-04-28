@@ -10590,8 +10590,8 @@ if((t2-t1).count()>=100000000)return v[i];
 void LOAD(){
 int dice,side,from,to,piece;
 vector<int> s1,s2,b1,b2,way;
-for(;;END(dice,s1,s2,b1,b2)){
-s2=S(s1);
+for(dice=0;;END(dice,s1,s2,b1,b2)){
+s2=S(dice,s1);
 if(STATE(s2)==-1){
 START(POS);
 dice=0;
