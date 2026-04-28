@@ -10571,6 +10571,13 @@ diff+=DIFF(s1[n],s2[n]);
 }
 return diff;
 }
+int DIFFBOARD(vector<int>& s1,vector<int>& s2){
+int diff,n;
+if(s1.empty())return INT_MAX;
+diff=0;
+for(n=234048;n<=1452863;n++)diff+=DIFF(s1[n],s2[n]);
+return diff;
+}
 vector<int> S(int dice,vector<int>& s){
 int c,i;
 vector<vector<int>> v;
