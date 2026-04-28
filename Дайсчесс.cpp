@@ -10563,6 +10563,7 @@ b1=b2;
 }
 int DIFF(vector<int>& s1,vector<int>& s2){
 int diff,i,x,y,n;
+if(s1.empty())return INT_MAX:
 diff=0;
 for(i=0;i<3;i++)for(x=0;x<158;x++)for(y=0;y<158;y++){
 n=248+227*i+x+1104*y;
