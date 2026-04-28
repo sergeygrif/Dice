@@ -10561,7 +10561,7 @@ POS.key=computeKey(POS);
 s1=s2;
 b1=b2;
 }
-int DIFF(vector<int>& s1,vector<int>& s2){
+int DIFFDICE(vector<int>& s1,vector<int>& s2){
 int diff,i,x,y,n;
 if(s1.empty())return INT_MAX;
 diff=0;
