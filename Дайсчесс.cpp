@@ -10572,13 +10572,18 @@ diff+=DIFF(s1[n],s2[n]);
 return diff;
 }
 vector<int> S(int dice,vector<int>& s){
-vector<int> n;
-while(1){
-n=S();
-if(DIFF(s,n)>=10000)break;
+int c,i;
+vector<vector<int>> v;
+c=0;
+v={s,{}};
+for(i=1;;i=!i){
+v[i]=S();
+if(DIFF(v[0],v[1])>=10000){
+c=1;
+continue;
 }
-if(dice==0)Sleep(400);else Sleep(200);
-return S();
+if(c)return v[i];
+}
 }
 void LOAD(){
 int dice,side,from,to,piece;
