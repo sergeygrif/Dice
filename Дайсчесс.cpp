@@ -10569,7 +10569,6 @@ for(i=0;i<3;i++)for(x=0;x<158;x++)for(y=0;y<158;y++){
 n=248+227*i+x+1104*y;
 diff+=DIFF(s1[n],s2[n]);
 }
-for(n=234048;n<=1452863;n++)diff+=DIFF(s1[n],s2[n]);
 return diff;
 }
 vector<int> S(vector<int>& s){
