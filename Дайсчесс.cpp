@@ -10579,17 +10579,20 @@ for(n=234048;n<=1452863;n++)diff+=DIFF(s1[n],s2[n]);
 return diff>=10000;
 }
 vector<int> S(int dice,vector<int>& s){
-int c,i;
+int dc,bc,i,d,b;
 vector<vector<int>> v;
-c=0;
 v={s,{}};
+dc=0;
+if(dice)bc=0;
 for(i=1;;i=!i){
 v[i]=S();
-if(DIFF(v[0],v[1])>=10000){
-c=1;
-continue;
+d=DIFFDICE(v[0],v[1]);
+if(d)dc=1;
+if(dice){
+b=DIFFBOARD(v[0],v[1]);
+if(b)bc=1;
 }
-if(c)return v[i];
+if(dice==0&&dc&&d==0||dice&&dc&&bc&&d==0&&b==0)return v[i];
 }
 }
 void LOAD(){
