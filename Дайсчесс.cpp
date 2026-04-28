@@ -10571,16 +10571,6 @@ diff+=DIFF(s1[n],s2[n]);
 }
 return diff;
 }
-int NEW(vector<int>& s1,vector<int>& s2){
-int c,i,n;
-c=0;
-for(i=0;i<3;i++){
-n=326+228*i+1104*147;
-if(s2[n]!=-9429995&&s2[n]!=-13169399)return 0;
-if(s2[n]!=s1[n])c=1;
-}
-return c;
-}
 vector<int> S(vector<int>& s){
 int i;
 time_point<steady_clock> t1,t2;
