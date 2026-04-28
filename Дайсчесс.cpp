@@ -10563,13 +10563,13 @@ b1=b2;
 }
 int DIFFDICE(vector<int>& s1,vector<int>& s2){
 int diff,i,x,y,n;
-if(s1.empty())return INT_MAX;
+if(s1.empty())return 1;
 diff=0;
 for(i=0;i<3;i++)for(x=0;x<158;x++)for(y=0;y<158;y++){
 n=248+228*i+x+1104*y;
 diff+=DIFF(s1[n],s2[n]);
 }
-return diff;
+return diff>=10000;
 }
 int DIFFBOARD(vector<int>& s1,vector<int>& s2){
 int diff,n;
