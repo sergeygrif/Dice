@@ -10495,7 +10495,7 @@ l=0;
 for(i=0;i<3;i++){
 key=0;
 for(x=0;x<158;x++)for(y=0;y<158;y++){
-p=s[248+227*i+x+1104*y];
+p=s[248+228*i+x+1104*y];
 key+=(p==-1)+10000*(p==-16777216)+100000000*(p==-8421505);
 }
 n=NUMBER(key,diceKey);
@@ -10566,7 +10566,7 @@ int diff,i,x,y,n;
 if(s1.empty())return INT_MAX;
 diff=0;
 for(i=0;i<3;i++)for(x=0;x<158;x++)for(y=0;y<158;y++){
-n=248+227*i+x+1104*y;
+n=248+228*i+x+1104*y;
 diff+=DIFF(s1[n],s2[n]);
 }
 return diff;
@@ -10575,7 +10575,7 @@ int NEW(vector<int>& s1,vector<int>& s2){
 int c,i,n;
 c=0;
 for(i=0;i<3;i++){
-n=326+227*i+1104*147;
+n=326+228*i+1104*147;
 if(s2[n]!=-9429995&&s2[n]!=-13169399)return 0;
 if(s2[n]!=s1[n])c=1;
 }
