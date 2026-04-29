@@ -10562,7 +10562,7 @@ int i;
 for(i=0;i<3;i++)if(find(stabKey.begin(),stabKey.end(),s[326+228*i+1104*10])==stabKey.end())return 0;
 return 1;
 }
-vector<int> S(){
+vector<int> NEW(){
 int stab;
 vector<int> s;
 stab=1;
