@@ -10559,6 +10559,7 @@ b1=b2;
 }
 int STAB(vector<int>& s){
 int w,i,n;
+if(s.empty())return 0;
 w=0;
 for(i=0;i<3;i++){
 n=find(stabKey.begin(),stabKey.end(),s[326+228*i+1104*10])-stabKey.begin();
