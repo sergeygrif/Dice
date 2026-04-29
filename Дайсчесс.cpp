@@ -10562,11 +10562,15 @@ if(n<=2)w=1;
 }
 return w;
 }
-void S(int& change,vector<int>& s1,vector<int>& s2){
+void NEW(int& change,vector<int>& s1,vector<int>& s2,vector<int>& b1,vector<int>& b2){
 int stab,side;
+vector<int> b;
 if(STATE(s1)==-1)while(1){
 s2=S();
-if(STATE(s2)!=-1&&STAB(s2))return;
+if(STATE(s2)!=-1&&STAB(s2)){
+b2=BOARD(s2);
+return;
+}
 }
 stab=1;
 side=SIDE(s1);
@@ -10575,6 +10579,10 @@ while(1){
 s2=S();
 if(STATE(s2)==-1)return;
 change+=SIDE(s2)!=side;
+if(stab==0){
+b=BOARD(s2);
+if(WAY(b1,b).size()>=2)b2=b;
+}
 if(stab==0&&STAB(s2)==1)return;
 stab=STAB(s2);
 side=SIDE(s2);
