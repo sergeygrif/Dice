@@ -10516,6 +10516,7 @@ return dice;
 vector<int> WAY(vector<int>& b1,vector<int>& b2){
 int sq;
 vector<int> way;
+if(b1.empty())return {};
 for(sq=0;sq<64;sq++)if(b2[sq]!=b1[sq])way.push_back(sq);
 sort(way.begin(),way.end(),[&](int a,int b){return b2[a]>b2[b];});
 return way;
