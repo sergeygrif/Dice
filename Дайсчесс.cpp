@@ -10460,11 +10460,6 @@ DeleteObject(d);
 return s;
 }
 vector<int> S(){return S(407,1510,550,1865);}
-int DIFF(int a,int b){
-a+=16777216;
-b+=16777216;
-return abs(b%256-a%256)+abs(b/256%256-a/256%256)+abs(b/65536-a/65536);
-}
 int STATE(vector<int>& s){
 if(s.empty()||s[553+1104*80]==-15324372||s[553+1104*180]!=-15192275||s[928+1104*430]==-15189205)return -1;
 return s[1038+1104*40]==-16443635;
@@ -10561,16 +10556,6 @@ POS.dice=dice;
 POS.key=computeKey(POS);
 s1=s2;
 b1=b2;
-}
-int DIFF(vector<int>& s1,vector<int>& s2){
-int diff,i,x,y,n;
-if(s1.empty())return 1;
-diff=0;
-for(i=0;i<3;i++)for(x=0;x<158;x++)for(y=0;y<158;y++){
-n=248+228*i+x+1104*y;
-diff+=DIFF(s1[n],s2[n]);
-}
-return diff>=10000;
 }
 int STAB(vector<int>& s){
 int i;
