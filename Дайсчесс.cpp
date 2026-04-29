@@ -10562,6 +10562,15 @@ int i;
 for(i=0;i<3;i++)if(find(stabKey.begin(),stabKey.end(),s[326+228*i+1104*10])==stabKey.end())return 0;
 return 1;
 }
+vector<int> S(){
+int stab;
+vector<int> s;
+stab=1;
+while(1){
+s=S();
+if(STAB(s)==0)stab=0;else if(stab==0)return s;
+}
+}
 vector<int> S(int dice,vector<int>& s){
 int dc,bc,i,d,b;
 vector<vector<int>> v;
