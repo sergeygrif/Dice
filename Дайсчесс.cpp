@@ -10460,6 +10460,11 @@ DeleteObject(d);
 return s;
 }
 vector<int> S(){return S(407,1510,550,1865);}
+int DIFF(int a,int b){
+a+=16777216;
+b+=16777216;
+return abs(b%256-a%256)+abs(b/256%256-a/256%256)+abs(b/65536-a/65536);
+}
 int STATE(vector<int>& s){
 if(s.empty()||s[928+1104*430]==-15189205)return -1;
 return s[1038+1104*40]==-16443635;
