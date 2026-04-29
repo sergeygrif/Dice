@@ -10563,12 +10563,20 @@ for(i=0;i<3;i++)if(find(stabKey.begin(),stabKey.end(),s[326+228*i+1104*10])==sta
 return 1;
 }
 vector<int> S(vector<int>& s){
-int stab;
+int stab,i;
 vector<int> n;
-stab=s.size()>0;
-while(1){
+vector<vector<int>> v;
+if(STATE(s)==-1)while(1){
 n=S();
-if(STAB(n)==0)stab=0;else if(stab==0)return n;
+if(STATE(n)!=-1&&STAB(n))return n;
+}
+stab=0;
+v={s,{}};
+for(i=1;;i=!i){
+v[i]=S();
+if(STATE(v[i])==-1)return v[i];
+stab+=(STAB(v[!i])==0&&STAB(v[i])==1)-(SIDE(v[i])!=SIDE(v[!i]));
+if(stab==1)return v[i];
 }
 }
 void LOAD(){
