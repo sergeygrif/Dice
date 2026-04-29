@@ -10592,12 +10592,11 @@ void LOAD(){
 int change,side,from,to,piece;
 vector<int> s1,s2,b1,b2,way;
 for(;;END(s1,s2,b1,b2)){
-S(change,s1,s2);
+NEW(change,s1,s2,b1,b2);
 if(STATE(s2)==-1){
 START(POS);
 continue;
 }
-b2=BOARD(s2);
 SET(b2);
 POS.side=SIDE(s2);
 if(STATE(s1)==-1){
