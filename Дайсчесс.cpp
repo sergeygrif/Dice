@@ -10620,42 +10620,6 @@ POS.dice=DICE(s2);
 if(change>=2)POS.ep1[!side]=0;
 }
 }
-void LOAD(){
-int dice,side,from,to,piece;
-vector<int> s1,s2,b1,b2,way;
-for(;;END(dice,s1,s2,b1,b2)){
-s2=S(s1);
-if(STATE(s2)==-1){
-START(POS);
-dice=0;
-continue;
-}
-b2=BOARD(s2);
-SET(b2);
-POS.side=SIDE(s2);
-dice=DICE(s2);
-if(POS.dice==0)continue;
-side=SIDE(s1);
-way=WAY(b1,b2);
-if(way.size()==4){
-POS.castle&=12-9*side;
-POS.dice=newDice[POS.dice][5];
-POS.dice=newDice[POS.dice][3];
-continue;
-}
-if(way.size()==3){
-POS.dice=newDice[POS.dice][0];
-continue;
-}
-from=way[0];
-to=way[1];
-piece=b1[from]%6;
-if(piece==0&&(from^to)==16)POS.ep1[!side]|=bit((from+to)/2);
-if(piece==0&&POS.ep1[side]&epMask[to])POS.ep2|=bit(to);
-POS.castle&=~(MASK[from]|MASK[to]);
-POS.dice=newDice[POS.dice][piece];
-}
-}
 void SEARCH(){
 Position pos;
 float eval;
