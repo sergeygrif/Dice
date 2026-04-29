@@ -10572,6 +10572,11 @@ diff+=DIFF(s1[n],s2[n]);
 }
 return diff>=10000;
 }
+int STAB(vector<int>& s){
+int i;
+for(i=0;i<3;i++)if(find(stabKey.begin(),stabKey.end(),s[326+228*i+1104*10])==stabKey.end())return 0;
+return 1;
+}
 vector<int> S(int dice,vector<int>& s){
 int dc,bc,i,d,b;
 vector<vector<int>> v;
