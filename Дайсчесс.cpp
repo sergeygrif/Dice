@@ -10567,25 +10567,22 @@ if(n<=2)w=1;
 }
 return w;
 }
-vector<int> S(vector<int>& s){
-int stab,side,i;
-vector<int> n;
-vector<vector<int>> v;
-if(STATE(s)==-1)while(1){
-n=S();
-if(STATE(n)!=-1&&STAB(n))return n;
+void S(int& change,vector<int>& s1,vector<int>& s2){
+int stab,side;
+if(STATE(s1)==-1)while(1){
+s2=S();
+if(STATE(s2)!=-1&&STAB(s2))return;
 }
-stab=side=0;
-v={s,{}};
-for(i=1;;i=!i){
-v[i]=S();
-if(STATE(v[i])==-1)return v[i];
-stab+=STAB(v[!i])==0&&STAB(v[i])==1;
-if(SIDE(v[i])!=SIDE(v[!i])){
-side++;
-if(side==1)stab=0;
-}
-if(stab)return v[i];
+stab=1;
+side=SIDE(s1);
+change=0;
+while(1){
+s2=S();
+if(STATE(s2)==-1)return;
+change+=SIDE(s2)!=side;
+if(stab==0&&STAB(s2)==1)return;
+stab=STAB(s2);
+side=SIDE(s2);
 }
 }
 void LOAD(){
