@@ -10562,20 +10562,20 @@ int i;
 for(i=0;i<3;i++)if(find(stabKey.begin(),stabKey.end(),s[326+228*i+1104*10])==stabKey.end())return 0;
 return 1;
 }
-vector<int> NEW(){
+vector<int> S(vector<int>& s){
 int stab;
-vector<int> s;
-stab=1;
+vector<int> n;
+stab=s.size()>0;
 while(1){
-s=S();
-if(STAB(s)==0)stab=0;else if(stab==0)return s;
+n=S();
+if(STAB(n)==0)stab=0;else if(stab==0)return n;
 }
 }
 void LOAD(){
 int dice,side,from,to,piece;
 vector<int> s1,s2,b1,b2,way;
 for(;;END(dice,s1,s2,b1,b2)){
-s2=NEW();
+s2=S(s1);
 if(STATE(s2)==-1){
 START(POS);
 dice=0;
