@@ -10574,8 +10574,8 @@ if(STAB(s)==0)stab=0;else if(stab==0)return s;
 void LOAD(){
 int dice,side,from,to,piece;
 vector<int> s1,s2,b1,b2,way;
-for(dice=0;;END(dice,s1,s2,b1,b2)){
-s2=S(dice,s1);
+for(;;END(dice,s1,s2,b1,b2)){
+s2=NEW();
 if(STATE(s2)==-1){
 START(POS);
 dice=0;
