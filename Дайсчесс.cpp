@@ -10461,7 +10461,7 @@ return s;
 }
 vector<int> S(){return S(407,1510,550,1865);}
 int STATE(vector<int>& s){
-if(s.empty()||s[553+1104*80]==-15324372||s[553+1104*180]!=-15192275||s[928+1104*430]==-15189205)return -1;
+if(s.empty()||s[928+1104*430]==-15189205)return -1;
 return s[1038+1104*40]==-16443635;
 }
 int FLIP(vector<int>& s){return s[10+1104*1202]==-665935;}
