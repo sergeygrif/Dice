@@ -10558,9 +10558,14 @@ s1=s2;
 b1=b2;
 }
 int STAB(vector<int>& s){
-int i;
-for(i=0;i<3;i++)if(find(stabKey.begin(),stabKey.end(),s[326+228*i+1104*10])==stabKey.end())return 0;
-return 1;
+int w,i,n;
+w=0;
+for(i=0;i<3;i++){
+n=find(stabKey.begin(),stabKey.end(),s[326+228*i+1104*10])-stabKey.begin();
+if(n==6)return 0;
+if(n<=2)w=1;
+}
+return w;
 }
 vector<int> S(vector<int>& s){
 int stab,side,i;
