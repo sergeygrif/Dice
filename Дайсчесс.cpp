@@ -10547,12 +10547,7 @@ POS.color[piece/6]|=bit(sq);
 POS.piece[piece%6]|=bit(sq);
 }
 }
-void END(int dice,vector<int>& s1,vector<int>& s2,vector<int>& b1,vector<int>& b2){
-if(SIDE(s2)!=SIDE(s1)||POS.dice==0){
-POS.ep1[!POS.side]=0;
-POS.ep2=0;
-POS.dice=dice;
-}
+void END(vector<int>& s1,vector<int>& s2,vector<int>& b1,vector<int>& b2){
 POS.key=computeKey(POS);
 s1=s2;
 b1=b2;
