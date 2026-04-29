@@ -10571,23 +10571,6 @@ s=S();
 if(STAB(s)==0)stab=0;else if(stab==0)return s;
 }
 }
-vector<int> S(int dice,vector<int>& s){
-int dc,bc,i,d,b;
-vector<vector<int>> v;
-v={s,{}};
-dc=0;
-if(dice)bc=0;
-for(i=1;;i=!i){
-v[i]=S();
-d=DIFFDICE(v[0],v[1]);
-if(d)dc=1;
-if(dice){
-b=DIFFBOARD(v[0],v[1]);
-if(b)bc=1;
-}
-if(dice==0&&dc&&d==0||dice&&dc&&bc&&d==0&&b==0)return v[i];
-}
-}
 void LOAD(){
 int dice,side,from,to,piece;
 vector<int> s1,s2,b1,b2,way;
