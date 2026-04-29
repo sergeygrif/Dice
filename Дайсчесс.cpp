@@ -10576,8 +10576,10 @@ for(i=1;;i=!i){
 v[i]=S();
 if(STATE(v[i])==-1)return v[i];
 stab+=STAB(v[!i])==0&&STAB(v[i])==1;
-side+=SIDE(v[i])!=SIDE(v[!i]);
+if(SIDE(v[i])!=SIDE(v[!i])){
+side++;
 if(side==1)stab=0;
+}
 if(stab)return v[i];
 }
 }
