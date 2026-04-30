@@ -10593,8 +10593,8 @@ s2=v[i];
 roll=STATE(s1)==-1||change;
 b=BOARD(v[i]);
 if(roll||WAY(b1,b).size()>=2)b2=b;
-stab+=STAB(v[!i])==0&&STAB(v[i]);
-if(STATE(v[i])==-1&&STATE(s1)!=-1||stab&&(roll==0||DIFF(v[!i],v[i])==0))return;
+if(STAB(v[i])>STAB(v[!i]))stab=1;
+if(STATE(v[i])==-1&&STATE(s1)!=-1||STATE(v[i])!=-1&&stab&&(roll==0||DIFF(v[!i],v[i])==0))return;
 }
 }
 void LOAD(){
