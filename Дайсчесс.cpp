@@ -10580,18 +10580,21 @@ diff+=DIFF(s1[n],s2[n]);
 return diff>=10000;
 }
 void NEW(int& change,vector<int>& s1,vector<int>& s2,vector<int>& b1,vector<int>& b2){
-int i;
+int i,j,k,roll;
 vector<int> b;
 vector<vector<int>> v;
 change=0;
 b2=b1;
-v={s1,{}};
-for(i=1;;i=!i){
+v={s1,{},{}};
+for(i=1;;i=(i+1)%3){
+j=(i+2)%3;
+k=(i+1)%3;
 v[i]=S();
-change+=SIDE(v[i])!=SIDE(v[!i]);
+change+=SIDE(v[i])!=SIDE(v[j]);
+roll=STATE(s1)==-1||change;
 b=BOARD(v[i]);
-if(WAY(b1,b).size())b2=b;
-if(STATE(v[i])==-1&&STATE(s1)!=-1||STAB(v[!i])==0&&STAB(v[i])&&(STATE(s1)!=-1&&change==0||DIFF(v[0],v[1])==0)){
+if(roll||WAY(b1,b).size()>=2)b2=b;
+if(STATE(v[i])==-1&&STATE(s1)!=-1||roll==0&&STAB(v[j])==0&&STAB(v[i])||roll&&STAB(v[k])==0&&STAB(v[j])&&DIFF(v[j],v[i])==0){
 s2=v[i];
 return;
 }
