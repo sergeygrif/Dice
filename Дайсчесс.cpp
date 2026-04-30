@@ -10590,7 +10590,7 @@ for(i=1;;i=!i){
 v[i]=S();
 change+=SIDE(v[i])!=SIDE(v[!i]);
 b=BOARD(v[i]);
-if(WAY(b1,b).size()>=2)b2=b;
+if(WAY(b1,b).size())b2=b;
 if(STATE(v[i])==-1&&STATE(s1)!=-1||STAB(v[!i])==0&&STAB(v[i])&&(STATE(s1)!=-1&&change==0||DIFF(v[0],v[1])==0)){
 s2=v[i];
 return;
