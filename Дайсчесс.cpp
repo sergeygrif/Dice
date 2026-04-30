@@ -10580,29 +10580,21 @@ diff+=DIFF(s1[n],s2[n]);
 return diff>=10000;
 }
 void NEW(int& change,vector<int>& s1,vector<int>& s2,vector<int>& b1,vector<int>& b2){
-int stab,side;
+int i;
 vector<int> b;
-if(STATE(s1)==-1)while(1){
-s2=S();
-if(STATE(s2)!=-1&&STAB(s2)){
-b2=BOARD(s2);
+vector<vector<int>> v;
+change=0;
+b2=b1;
+v={s1,{}};
+for(i=1;;i=!i){
+v[i]=S();
+change+=SIDE(v[i])!=SIDE(v[!i]);
+b=BOARD(v[i]);
+if(WAY(b1,b).size()>=2)b2=b;
+if(STATE(v[i])==-1&&STATE(s1)!=-1||STAB(v[!i])==0&&STAB(v[i])&&(STATE(s1)!=-1&&change==0||DIFF(v[0],v[1])==0)){
+s2=v[i];
 return;
 }
-}
-stab=1;
-side=SIDE(s1);
-change=0;
-while(1){
-s2=S();
-if(STATE(s2)==-1)return;
-change+=SIDE(s2)!=side;
-if(stab==0){
-b=BOARD(s2);
-if(WAY(b1,b).size()>=2)b2=b;
-}
-if(stab==0&&STAB(s2)==1)return;
-stab=STAB(s2);
-side=SIDE(s2);
 }
 }
 void LOAD(){
