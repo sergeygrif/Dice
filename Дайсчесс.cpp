@@ -1410,7 +1410,7 @@ static AI_FORCEINLINE char pieceAtChar(const Position& pos, int sq) {
 }
 static void printBoardViz(const Position& pos) {
     for (int r = 7; r >= 0; --r) {
-        cout << (r + 1) << " | ";
+        cout <<"| ";
         for (int f = 0; f < 8; ++f) {
             int sq = r * 8 + f;
             uint64_t b = bit(sq);
