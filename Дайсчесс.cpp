@@ -10459,22 +10459,19 @@ DeleteObject(m);
 DeleteObject(d);
 return s;
 }
-vector<int> S(){return S(407,1510,550,1865);}
-int DIFF(int a,int b){
-a+=16777216;
-b+=16777216;
-return abs(b%256-a%256)+abs(b/256%256-a/256%256)+abs(b/65536-a/65536);
+vector<int> S(){
+vector<int> s;
+s=S(407,1510,550,1865);
+if(s[928+1104*430]==-15189205)s={};
+return s;
 }
-int STATE(vector<int>& s){
-if(s.empty()||s[928+1104*430]==-15189205)return -1;
-return s[1038+1104*40]==-16443635;
-}
-int FLIP(vector<int>& s){return s[10+1104*1202]==-665935;}
-int SIDE(vector<int>& s){return STATE(s)!=-1&&STATE(s)!=FLIP(s);}
+int FLIP(vector<int>& s){return s.size()&&s[10+1104*1202]==-665935;}
+int SIDE(vector<int>& s){return s.size()&&s[1038+1104*40]==-16443635!=FLIP(s);}
 vector<int> BOARD(vector<int>& s){
 int sq,SQ,x,y,p;
 long long key;
 vector<int> board;
+if(s.empty())return {};
 for(sq=0;sq<64;sq++){
 if(FLIP(s)==0)SQ=sq^56;else SQ=sq^7;
 key=0;
@@ -10486,50 +10483,28 @@ board.push_back(NUMBER(key,sqKey));
 }
 return board;
 }
-int DICE(vector<int>& s){
-int l,i,x,y,p,n,dice,d;
+vector<int> DICE(vector<int>& s){
+int i,x,y,p;
 long long key;
-uint64_t pawns;
-string t;
-vector<int> v;
-l=0;
+vector<int> dice;
+if(s.empty())return {};
 for(i=0;i<3;i++){
 key=0;
 for(x=0;x<158;x++)for(y=0;y<158;y++){
 p=s[248+228*i+x+1104*y];
 key+=(p==-1)+10000*(p==-16777216)+100000000*(p==-8421505);
 }
-n=NUMBER(key,diceKey);
-v.push_back(n%6);
-if(n<12)l=1;
+dice.push_back(NUMBER(key,diceKey));
 }
-if(l==0)return 0;
-sort(v.begin(),v.end());
-for(i=0;i<3;i++)t+=pieceChar(v[i]);
-dice=diceFenToInt(t);
-pawns=POS.color[POS.side]&POS.piece[0];
-d=6;
-if(pawns)if(POS.side==0)d=clz64(pawns)>>3;else d=ctz64(pawns)>>3;
-for(i=0;i<5;i++)while(dicePiece[dice][i]&&(POS.color[POS.side]&POS.piece[i])==0&&d>dicePiece[dice][0])dice=newDice[dice][i];
 return dice;
 }
 vector<int> WAY(vector<int>& b1,vector<int>& b2){
 int sq;
 vector<int> way;
-if(b1.empty())return {};
+if(b1.empty()||b2.empty())return {};
 for(sq=0;sq<64;sq++)if(b2[sq]!=b1[sq])way.push_back(sq);
 sort(way.begin(),way.end(),[&](int a,int b){return b2[a]>b2[b];});
 return way;
-}
-void START(){
-PATH={bit(1)|bit(2)|bit(3),bit(5)|bit(6),bit(57)|bit(58)|bit(59),bit(61)|bit(62)};
-MASK.fill(0);
-MASK[0]=1;
-MASK[4]=3;
-MASK[7]=2;
-MASK[56]=4;
-MASK[60]=12;
-MASK[63]=8;
 }
 void START(Position& pos){
 pos.color={0,0};
@@ -10542,10 +10517,21 @@ pos.castle=15;
 pos.dice=0;
 pos.key=computeKey(pos);
 }
-void SET(vector<int>& board){
+void START(){
+PATH={bit(1)|bit(2)|bit(3),bit(5)|bit(6),bit(57)|bit(58)|bit(59),bit(61)|bit(62)};
+MASK.fill(0);
+MASK[0]=1;
+MASK[4]=3;
+MASK[7]=2;
+MASK[56]=4;
+MASK[60]=12;
+MASK[63]=8;
+}
+void BOARDSET(vector<int>& board){
 int sq,piece;
 POS.color={0,0};
 POS.piece={0,0,0,0,0,0};
+if(board.empty())return;
 for(sq=0;sq<64;sq++){
 piece=board[sq];
 if(piece==12)continue;
@@ -10553,8 +10539,27 @@ POS.color[piece/6]|=bit(sq);
 POS.piece[piece%6]|=bit(sq);
 }
 }
+void DICESET(vector<int>& s){
+int i,dice,d;
+uint64_t pawns;
+string t;
+vector<int> v;
+if(s.empty()){
+POS.dice=0;
+return;
+}
+v=DICE(s);
+for(i=0;i<3;i++)v[i]%=6;
+sort(v.begin(),v.end());
+for(i=0;i<3;i++)t+=pieceChar(v[i]);
+dice=diceFenToInt(t);
+pawns=POS.color[POS.side]&POS.piece[0];
+d=6;
+if(pawns)if(POS.side==0)d=clz64(pawns)>>3;else d=ctz64(pawns)>>3;
+for(i=0;i<5;i++)while(dicePiece[dice][i]&&(POS.color[POS.side]&POS.piece[i])==0&&d>dicePiece[dice][0])dice=newDice[dice][i];
+POS.dice=dice;
+}
 void END(vector<int>& s1,vector<int>& s2,vector<int>& b1,vector<int>& b2){
-POS.key=computeKey(POS);
 s1=s2;
 b1=b2;
 }
@@ -10569,32 +10574,37 @@ if(n<=2)w=1;
 }
 return w;
 }
-int DIFF(vector<int>& s1,vector<int>& s2){
-int diff,i,x,y,n;
-if(s1.empty())return 1;
-diff=0;
+int DIF(int a,int b){
+a+=16777216;
+b+=16777216;
+return abs(b%256-a%256)+abs(b/256%256-a/256%256)+abs(b/65536-a/65536);
+}
+int DIF(vector<int>& s1,vector<int>& s2){
+int dif,i,x,y,n;
+if(s1.empty()||s2.empty())return 1;
+dif=0;
 for(i=0;i<3;i++)for(x=0;x<158;x++)for(y=0;y<158;y++){
 n=248+228*i+x+1104*y;
-diff+=DIFF(s1[n],s2[n]);
+dif+=DIF(s1[n],s2[n]);
 }
-return diff>=10000;
+return dif>=10000;
 }
 void NEW(int& change,vector<int>& s1,vector<int>& s2,vector<int>& b1,vector<int>& b2){
 int stab,i,roll;
 vector<int> b;
 vector<vector<int>> v;
 change=0;
+roll=s1.empty();
 stab=0;
 v={s1,{}};
 for(i=1;;i=!i){
-v[i]=S();
+s2=v[i]=S();
 change+=SIDE(v[i])!=SIDE(v[!i]);
-s2=v[i];
-roll=STATE(s1)==-1||change;
+roll=roll||change;
+stab+=STAB(v[i])>STAB(v[!i]);
 b=BOARD(v[i]);
 if(roll||WAY(b1,b).size()>=2)b2=b;
-if(STAB(v[i])>STAB(v[!i]))stab=1;
-if(STATE(v[i])==-1&&STATE(s1)!=-1||STATE(v[i])!=-1&&stab&&(roll==0||DIFF(v[!i],v[i])==0))return;
+if(v[i].empty()&&s1.size()||v[i].size()&&stab&&(roll==0&&DICE(v[i])!=DICE(s1)||roll&&DIF(v[!i],v[i])==0))return;
 }
 }
 void LOAD(){
@@ -10602,14 +10612,15 @@ int change,side,from,to,piece;
 vector<int> s1,s2,b1,b2,way;
 for(;;END(s1,s2,b1,b2)){
 NEW(change,s1,s2,b1,b2);
-if(STATE(s2)==-1){
+if(s2.empty()){
 START(POS);
 continue;
 }
-SET(b2);
+BOARDSET(b2);
 POS.side=SIDE(s2);
-if(STATE(s1)==-1){
-POS.dice=DICE(s2);
+if(s1.empty()){
+DICESET(s2);
+POS.key=computeKey(POS);
 continue;
 }
 side=SIDE(s1);
@@ -10631,9 +10642,10 @@ POS.dice=newDice[POS.dice][piece];
 if(change){
 POS.ep1[side]=0;
 POS.ep2=0;
-POS.dice=DICE(s2);
+DICESET(s2);
 }
 if(change>=2)POS.ep1[!side]=0;
+POS.key=computeKey(POS);
 }
 }
 void SEARCH(){
@@ -10676,13 +10688,12 @@ int main() {
             return 1;
         }
 if(fen=="s"){
-START();
 START(POS);
+START();
 thread loadThread(LOAD);
 thread searchThread(SEARCH);
 loadThread.join();
 searchThread.join();
-return 0;
 }
         Position pos;
         std::array<uint64_t, 4> path;
