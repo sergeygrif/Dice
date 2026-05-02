@@ -10570,6 +10570,17 @@ if(s.empty())return {2,2,2};
 for(i=0;i<3;i++)stab.push_back((find(stabKey.begin(),stabKey.end(),s[326+228*i+1104*147])-stabKey.begin())/3);
 return stab;
 }
+int STABFULL(vector<int>& s){
+int w,i;
+vector<int> stab;
+stab=STAB(s);
+w=0;
+for(i=0;i<3;i++){
+if(stab[i]==2)return 0;
+if(stab[i]==0)w=1;
+}
+return w;
+}
 int NEXT(vector<int>& s1,vector<int>& s2){
 int dark,i,dif;
 vector<int> d1,d2;
