@@ -10618,7 +10618,7 @@ roll=roll||change;
 stab+=STAB(v[i])>STAB(v[!i]);
 b=BOARD(v[i]);
 if(roll||WAY(b1,b).size()>=2)b2=b;
-if(v[i].empty()&&s1.size()||v[i].size()&&stab&&(roll==0&&DICE(v[i])!=DICE(s1)||roll&&DIF(v[!i],v[i])==0))return;
+if(v[i].empty()&&s1.size()||v[i].size()&&stab&&(roll==0&&NEXT(s1,v[i])||roll&&DIF(v[!i],v[i])==0))return;
 }
 }
 void LOAD(){
