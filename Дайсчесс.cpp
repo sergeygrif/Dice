@@ -10582,6 +10582,11 @@ if(stab[i]==0)w=1;
 return w;
 }
 int STABFULL(vector<int>& s1,vector<int>& s2){return STABFULL(s2)>STABFULL(s1);}
+int STABMIN(vector<int>& s1,vector<int>& s2){
+int i;
+for(i=0;i<3;i++)if(STAB(s1)[i]==2&&STAB(s2)[i]==1)return 1;
+return 0;
+}
 int NEXT(vector<int>& s1,vector<int>& s2){
 int dark,i,dif;
 vector<int> d1,d2;
