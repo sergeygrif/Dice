@@ -10617,21 +10617,20 @@ dif+=DIF(s1[n],s2[n]);
 return dif>=10000;
 }
 void NEW(int& change,vector<int>& s1,vector<int>& s2,vector<int>& b1,vector<int>& b2){
-int stab,i,roll;
+int stabmin,stabfull,i,roll;
 vector<int> b;
 vector<vector<int>> v;
-change=0;
-roll=s1.empty();
-stab=0;
+stabfull=stabmin=change=0;
 v={s1,{}};
 for(i=1;;i=!i){
 s2=v[i]=S();
 change+=SIDE(v[i])!=SIDE(v[!i]);
-roll=roll||change;
-stab+=STAB(v[i])>STAB(v[!i]);
+stabmin+=STABMIN(v[!i],v[i]);
+stabfull+=STABFULL(v[!i],v[i]);
+roll=s1.empty()||change;
 b=BOARD(v[i]);
 if(roll||WAY(b1,b).size()>=2)b2=b;
-if(v[i].empty()&&s1.size()||v[i].size()&&stab&&(roll==0&&NEXT(s1,v[i])||roll&&DIF(v[!i],v[i])==0))return;
+if(v[i].empty()&&s1.size()||v[i].size()&&(roll==0&&stabmin&&NEXT(s1,v[i])||roll&&stabfull&&DIF(v[!i],v[i])==0))return;
 }
 }
 void LOAD(){
