@@ -10567,7 +10567,7 @@ vector<int> STAB(vector<int>& s){
 int i;
 vector<int> stab;
 if(s.empty())return {2,2,2};
-for(i=0;i<3;i++)stab.push_back((find(stabKey.begin(),stabKey.end(),s[326+228*i+1104*147])-stabKey.begin())/3;
+for(i=0;i<3;i++)stab.push_back((find(stabKey.begin(),stabKey.end(),s[326+228*i+1104*147])-stabKey.begin())/3);
 return stab;
 }
 int NEXT(vector<int>& s1,vector<int>& s2){
