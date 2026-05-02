@@ -10563,16 +10563,12 @@ void END(vector<int>& s1,vector<int>& s2,vector<int>& b1,vector<int>& b2){
 s1=s2;
 b1=b2;
 }
-int STAB(vector<int>& s){
-int w,i,n;
-if(s.empty())return 0;
-w=0;
-for(i=0;i<3;i++){
-n=find(stabKey.begin(),stabKey.end(),s[326+228*i+1104*147])-stabKey.begin();
-if(n==6)return 0;
-if(n<=2)w=1;
-}
-return w;
+vector<int> STAB(vector<int>& s){
+int i;
+vector<int> stab;
+if(s.empty())return {2,2,2};
+for(i=0;i<3;i++)stab.push_back((find(stabKey.begin(),stabKey.end(),s[326+228*i+1104*147])-stabKey.begin())/3;
+return stab;
 }
 int NEXT(vector<int>& s1,vector<int>& s2){
 int dark,i,dif;
