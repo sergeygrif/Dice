@@ -10504,7 +10504,7 @@ int sq;
 vector<int> way;
 if(b1.empty()||b2.empty())return {};
 for(sq=0;sq<64;sq++)if(b2[sq]!=b1[sq])way.push_back(sq);
-sort(way.begin(),way.end(),[&](int a,int b){return b2[a]>b2[b];});
+sort(way.begin(),way.end(),[&](int a,int b){return b2[a]>b2[b]||b2[a]==b2[b]&&FROM(a)>FROM(b);});
 return way;
 }
 void START(Position& pos){
