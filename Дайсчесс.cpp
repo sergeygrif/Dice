@@ -10498,6 +10498,7 @@ dice.push_back(NUMBER(key,diceKey));
 }
 return dice;
 }
+int FROM(int sq){return sq==4||sq>=24&&sq<=39||sq==60;}
 vector<int> WAY(vector<int>& b1,vector<int>& b2){
 int sq;
 vector<int> way;
