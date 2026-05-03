@@ -10587,7 +10587,7 @@ int i;
 for(i=0;i<3;i++)if(STAB(s1)[i]==2&&STAB(s2)[i]==1)return 1;
 return 0;
 }
-int NEXT(vector<int>& s1,vector<int>& s2){
+int DICENEXT(vector<int>& s1,vector<int>& s2){
 int dark,i,dif;
 vector<int> d1,d2;
 if(s1.empty()||s2.empty())return 0;
@@ -10629,7 +10629,7 @@ stabmin+=STABMIN(v[!i],v[i]);
 stabfull+=STABFULL(v[!i],v[i]);
 roll=s1.empty()||change||v[i].empty();
 b=BOARD(v[i]);
-if(roll||NEXT(s1,v[i]))s2=v[i];
+if(roll||DICENEXT(s1,v[i]))s2=v[i];
 if(roll||WAY(b1,b).size()>=2)b2=b;
 if(v[i].empty()&&s1.size()||roll==0&&stabmin||roll&&stabfull&&DIF(v[!i],v[i])==0)return;
 }
