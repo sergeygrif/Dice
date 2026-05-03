@@ -10623,14 +10623,15 @@ vector<vector<int>> v;
 stabfull=stabmin=change=0;
 v={s1,{}};
 for(i=1;;i=!i){
-s2=v[i]=S();
+v[i]=S();
 change+=SIDE(v[i])!=SIDE(v[!i]);
 stabmin+=STABMIN(v[!i],v[i]);
 stabfull+=STABFULL(v[!i],v[i]);
-roll=s1.empty()||change;
+roll=s1.empty()||change||v[i].empty();
 b=BOARD(v[i]);
+if(roll||NEXT(s1,v[i]))s2=v[i];
 if(roll||WAY(b1,b).size()>=2)b2=b;
-if(v[i].empty()&&s1.size()||v[i].size()&&(roll==0&&stabmin&&NEXT(s1,v[i])||roll&&stabfull&&DIF(v[!i],v[i])==0))return;
+if(v[i].empty()&&s1.size()||roll==0&&stabmin||roll&&stabfull&&DIF(v[!i],v[i])==0)return;
 }
 }
 void LOAD(){
