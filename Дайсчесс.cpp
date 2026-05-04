@@ -10645,7 +10645,7 @@ stabfull+=STABFULL(v[!i],v[i]);
 roll=s1.empty()||change||v[i].empty();
 b=BOARD(v[i]);
 if(roll||DICENEXT(s1,v[i]))s2=v[i];
-if(roll||WAY(b1,b).size()>=2)b2=b;
+if(roll||BOARDNEXT(b1,b))b2=b;
 if(v[i].empty()&&s1.size()||roll==0&&stabmin||roll&&stabfull&&DIF(v[!i],v[i])==0)return;
 }
 }
