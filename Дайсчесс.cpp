@@ -10565,10 +10565,13 @@ s1=s2;
 b1=b2;
 }
 vector<int> STAB(vector<int>& s){
-int i;
+int i,n;
 vector<int> stab;
 if(s.empty())return {2,2,2};
-for(i=0;i<3;i++)stab.push_back((find(stabKey.begin(),stabKey.end(),s[326+228*i+1104*147])-stabKey.begin())/3);
+for(i=0;i<3;i++){
+n=find(stabKey.begin(),stabKey.end(),s[326+228*i+1104*147])-stabKey.begin();
+stab.push_back(n/4+(n==7));
+}
 return stab;
 }
 int STABFULL(vector<int>& s){
