@@ -10602,6 +10602,20 @@ if(dif==12)dark=1;
 }
 return dark;
 }
+int BOARDNEXT(vector<int>& b1,vector<int>& b2){
+int side,x,dir,i;
+vector<int> way,key;
+vector<vector<int>> v;
+for(side=0;side<2;side++)for(x=0;x<8;x++)for(dir=-1;dir<=1;dir+=2)if(x+dir>=0&&x+dir<=7)v.push_back({x+32-8*side,6*side,12,x+dir+32-8*side,6*!side,12,x+dir+40-24*side,12,6*side});
+for(side=0;side<2;side++)for(dir=0;dir<2;dir++)v.push_back({4+56*side,5+6*side,12,7*dir+56*side,3+6*side,12,2+4*dir+56*side,12,5+6*side,3+2*dir+56*side,12,3+6*side});
+way=WAY(b1,b2);
+for(i=0;i<way.size();i++){
+key.push_back(way[i]);
+key.push_back(b1[way[i]]);
+key.push_back(b2[way[i]]);
+}
+return key.size()==6||find(v.begin(),v.end(),key)<v.end();
+}
 int DIF(int a,int b){
 a+=16777216;
 b+=16777216;
