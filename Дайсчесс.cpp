@@ -10651,6 +10651,7 @@ void NEW(int& change,vector<int>& s1,vector<int>& s2,vector<int>& b1,vector<int>
 int stabmin,stabfull,i,roll;
 vector<int> b;
 vector<vector<int>> v;
+vector<BOARDSTAT> bs;
 stabfull=stabmin=change=0;
 v={s1,{}};
 for(i=1;;i=!i){
@@ -10660,8 +10661,9 @@ stabmin+=STABMIN(v[!i],v[i]);
 stabfull+=STABFULL(v[!i],v[i]);
 roll=s1.empty()||change||v[i].empty();
 b=BOARD(v[i]);
+ADD(b1,b,bs);
 if(roll||DICENEXT(s1,v[i]))s2=v[i];
-if(roll||BOARDNEXT(b1,b))b2=b;
+if(roll||bs.size()&&b==bs[0].board)b2=b;
 if(v[i].empty()&&s1.size()||roll==0&&stabmin||roll&&stabfull&&DIF(v[!i],v[i])==0)return;
 }
 }
