@@ -10618,7 +10618,7 @@ key.push_back(way[i]);
 key.push_back(b1[way[i]]);
 key.push_back(b2[way[i]]);
 }
-return key.size()==6||find(v.begin(),v.end(),key)<v.end();
+return key.size()==6&&key[2]==12&&(PROMO(key[1],key[3])==0&&key[5]==key[1]||PROMO(key[1],key[3])&&key[5]>=key[1]+1&&key[5]<=key[1]+4)||find(v.begin(),v.end(),key)<v.end();
 }
 int DIF(int a,int b){
 a+=16777216;
