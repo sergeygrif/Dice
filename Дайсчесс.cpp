@@ -10605,6 +10605,7 @@ if(dif==12)dark=1;
 }
 return dark;
 }
+int PROMO(int piece,int sq){return piece==0&&sq/8==7||piece==6&&sq/8==0;}
 int BOARDNEXT(vector<int>& b1,vector<int>& b2){
 int side,x,dir,i;
 vector<int> way,key;
