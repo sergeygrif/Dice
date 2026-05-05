@@ -10593,20 +10593,6 @@ if(stab[i]==0)w=1;
 return w;
 }
 int STABFULL(vector<int>& s1,vector<int>& s2){return STABFULL(s2)>STABFULL(s1);}
-int DICENEXT(vector<int>& s1,vector<int>& s2){
-int dark,i,dif;
-vector<int> d1,d2;
-if(s1.empty()||s2.empty())return 0;
-d1=DICE(s1);
-d2=DICE(s2);
-dark=0;
-for(i=0;i<3;i++){
-dif=d2[i]-d1[i];
-if(dif%12)return 0;
-if(dif==12)dark=1;
-}
-return dark;
-}
 int PROMO(int piece,int sq){return piece==0&&sq/8==7||piece==6&&sq/8==0;}
 int BOARDNEXT(vector<int>& b1,vector<int>& b2){
 int side,x,dir,i;
@@ -10632,6 +10618,20 @@ bs[i].time=clock();
 }
 else bs.push_back({b,1,clock()});
 sort(bs.begin(),bs.end(),[](BOARDSTAT a,BOARDSTAT b){return a.num>b.num||a.num==b.num&&a.time>b.time;});
+}
+int DICENEXT(vector<int>& s1,vector<int>& s2){
+int dark,i,dif;
+vector<int> d1,d2;
+if(s1.empty()||s2.empty())return 0;
+d1=DICE(s1);
+d2=DICE(s2);
+dark=0;
+for(i=0;i<3;i++){
+dif=d2[i]-d1[i];
+if(dif%12)return 0;
+if(dif==12)dark=1;
+}
+return dark;
 }
 int DIF(int a,int b){
 a+=16777216;
