@@ -10575,6 +10575,12 @@ stab.push_back(n/4+(n==7));
 }
 return stab;
 }
+int STABMIN(vector<int>& s1,vector<int>& s2){
+int dark,act,i;
+act=dark=0;
+for(i=0;i<3;i++)if(STAB(s2)[i]!=1)act=1;else if(STAB(s1)[i]==2)dark=1;
+return dark&&act;
+}
 int STABFULL(vector<int>& s){
 int w,i;
 vector<int> stab;
@@ -10587,11 +10593,6 @@ if(stab[i]==0)w=1;
 return w;
 }
 int STABFULL(vector<int>& s1,vector<int>& s2){return STABFULL(s2)>STABFULL(s1);}
-int STABMIN(vector<int>& s1,vector<int>& s2){
-int i;
-for(i=0;i<3;i++)if(STAB(s1)[i]==2&&STAB(s2)[i]==1)return 1;
-return 0;
-}
 int DICENEXT(vector<int>& s1,vector<int>& s2){
 int dark,i,dif;
 vector<int> d1,d2;
