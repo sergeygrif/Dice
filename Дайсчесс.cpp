@@ -10621,6 +10621,17 @@ key.push_back(b2[way[i]]);
 }
 return key.size()==6&&key[2]==12&&(PROMO(key[1],key[3])==0&&key[5]==key[1]||PROMO(key[1],key[3])&&key[5]>=key[1]+1&&key[5]<=key[1]+4)||find(v.begin(),v.end(),key)<v.end();
 }
+void ADD(vector<int>& b1,vector<int>& b,vector<BOARDSTAT>& bs){
+int i;
+if(BOARDNEXT(b1,b)==0)return;
+for(i=0;i<bs.size();i++)if(bs[i].board==b)break;
+if(i<bs.size()){
+bs[i].num++;
+bs[i].time=clock();
+}
+else bs.push_back({b,1,clock()});
+sort(bs.begin(),bs.end(),[](BOARDSTAT a,BOARDSTAT b){return a.num>b.num||a.num==b.num&&a.time>b.time;});
+}
 int DIF(int a,int b){
 a+=16777216;
 b+=16777216;
