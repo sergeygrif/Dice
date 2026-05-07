@@ -1912,7 +1912,7 @@ void makeMove(Position& pos, const array<int, 64>& mask, int move) {
     pos.key ^= ZDice[pos.dice];
 }
 
-void makeRandom(Position& pos, TTNode* node) {
+static void makeRandomWithRolledDice(Position& pos, TTNode* node, int rolledDice) {
     while (pos.ep1[pos.side]) {
         int sq = pop_lsb(pos.ep1[pos.side]);
         pos.key ^= ZEp1[pos.side][sq];
@@ -1927,7 +1927,7 @@ void makeRandom(Position& pos, TTNode* node) {
     uint64_t pawns = pos.color[pos.side] & pos.piece[0];
     int dist = 6;
     pos.key ^= ZDice[pos.dice];
-    pos.dice = Dice[Range(Random)];
+    pos.dice = rolledDice;
     if (pawns) {
         if (pos.side == 0)dist = clz64(pawns) >> 3;   // MSVC-safe
         else dist = ctz64(pawns) >> 3;            // MSVC-safe
@@ -1936,6 +1936,10 @@ void makeRandom(Position& pos, TTNode* node) {
         while (dicePiece[pos.dice][i] && (pos.color[pos.side] & pos.piece[i]) == 0 && dist > dicePiece[pos.dice][0])
             pos.dice = newDice[pos.dice][i];
     pos.key ^= ZDice[pos.dice];
+}
+
+void makeRandom(Position& pos, TTNode* node) {
+    makeRandomWithRolledDice(pos, node, Dice[Range(Random)]);
 }
 
 
@@ -7699,9 +7703,12 @@ static int playOneUniversalMatchGame(
     bool p1IsWhite,
     int maxPlies,
     FindChanceNodeFn&& findChanceNodeForSide,
-    SearchMovesFn&& searchMovesForSide)
+    SearchMovesFn&& searchMovesForSide,
+    const std::vector<int>* mirroredDice = nullptr,
+    std::vector<int>* producedDice = nullptr)
 {
     Position pos = startPos;
+    size_t chanceIdx = 0;
 
     for (int ply = 0; ply < maxPlies; ++ply) {
         MoveList ml;
@@ -7718,7 +7725,15 @@ static int playOneUniversalMatchGame(
 
         if (ml.n == 0) {
             TTNode* n = findChanceNodeForSide(p1Turn, pos);
-            makeRandom(pos, n);
+            if (mirroredDice && chanceIdx < mirroredDice->size()) {
+                makeRandomWithRolledDice(pos, n, (*mirroredDice)[chanceIdx]);
+            }
+            else {
+                const int rolledDice = Dice[Range(Random)];
+                if (producedDice) producedDice->push_back(rolledDice);
+                makeRandomWithRolledDice(pos, n, rolledDice);
+            }
+            ++chanceIdx;
             continue;
         }
 
@@ -7789,13 +7804,14 @@ static MatchStatsGeneric runUniversalMatchEngine(
                     std::array<int, 64> mask;
                     chess960(startPos, path, mask);
 
+                    std::vector<int> firstGameDice;
                     lane.resetForNewGame();
-                    addResult(playOneOnLane(lane, startPos, path, mask, /*p1IsWhite=*/true));
+                    addResult(playOneOnLane(lane, startPos, path, mask, /*p1IsWhite=*/true, nullptr, &firstGameDice));
 
                     if (abortAll.load(std::memory_order_relaxed)) break;
 
                     lane.resetForNewGame();
-                    addResult(playOneOnLane(lane, startPos, path, mask, /*p1IsWhite=*/false));
+                    addResult(playOneOnLane(lane, startPos, path, mask, /*p1IsWhite=*/false, &firstGameDice, nullptr));
 
                     const int dp = donePairs.fetch_add(1, std::memory_order_relaxed) + 1;
 
@@ -7831,8 +7847,9 @@ static MatchStatsGeneric runUniversalMatchEngine(
         chess960(startPos, path, mask);
 
         Lane& lane = *lanes[0];
+        std::vector<int> firstGameDice;
         lane.resetForNewGame();
-        addResult(playOneOnLane(lane, startPos, path, mask, /*p1IsWhite=*/true));
+        addResult(playOneOnLane(lane, startPos, path, mask, /*p1IsWhite=*/true, nullptr, &firstGameDice));
 
         if (progressEveryPairs > 0) {
             MatchStatsGeneric snap;
@@ -7882,7 +7899,9 @@ static int playOneArenaGameOnLane(
     const std::array<int, 64>& mask,
     bool currentIsWhite,
     int simsPerPos,
-    int maxPlies = 256)
+    int maxPlies = 256,
+    const std::vector<int>* mirroredDice = nullptr,
+    std::vector<int>* producedDice = nullptr)
 {
     auto findChanceNode = [&](bool currentTurn, const Position& pos) -> TTNode* {
         return currentTurn
@@ -7911,7 +7930,7 @@ static int playOneArenaGameOnLane(
 
     return playOneUniversalMatchGame(
         startPos, path, mask, currentIsWhite, maxPlies,
-        findChanceNode, searchMoves);
+        findChanceNode, searchMoves, mirroredDice, producedDice);
 }
 
 static double computeLOSPercent(int wins, int losses);
@@ -7956,9 +7975,11 @@ static ArenaStats runArenaMatch(int games, int simsPerPos) {
             const Position& startPos,
             const std::array<uint64_t, 4>& path,
             const std::array<int, 64>& mask,
-            bool p1IsWhite) -> int {
+            bool p1IsWhite,
+            const std::vector<int>* mirroredDice,
+            std::vector<int>* producedDice) -> int {
             return playOneArenaGameOnLane(
-                lane, startPos, path, mask, p1IsWhite, simsPerPos, 256);
+                lane, startPos, path, mask, p1IsWhite, simsPerPos, 256, mirroredDice, producedDice);
         },
         onProgress,
         /*progressEveryPairs=*/50);
@@ -8044,7 +8065,9 @@ static int playOneTuneGameOnLane(
     const std::array<int, 64>& mask,
     bool p1IsWhite,
     int simsPerPos,
-    int maxPlies = 256)
+    int maxPlies = 256,
+    const std::vector<int>* mirroredDice = nullptr,
+    std::vector<int>* producedDice = nullptr)
 {
     auto findChanceNode = [&](bool p1Turn, const Position& pos) -> TTNode* {
         return p1Turn
@@ -8074,7 +8097,7 @@ static int playOneTuneGameOnLane(
 
     return playOneUniversalMatchGame(
         startPos, path, mask, p1IsWhite, maxPlies,
-        findChanceNode, searchMoves);
+        findChanceNode, searchMoves, mirroredDice, producedDice);
 }
 
 struct NetArenaLane {
@@ -8115,7 +8138,9 @@ static int playOneNetArenaGameOnLane(
     const std::array<int, 64>& mask,
     bool n1IsWhite,
     int simsPerPos,
-    int maxPlies = 256)
+    int maxPlies = 256,
+    const std::vector<int>* mirroredDice = nullptr,
+    std::vector<int>* producedDice = nullptr)
 {
     auto findChanceNode = [&](bool n1Turn, const Position& pos) -> TTNode* {
         return n1Turn
@@ -8147,7 +8172,7 @@ static int playOneNetArenaGameOnLane(
 
     return playOneUniversalMatchGame(
         startPos, path, mask, n1IsWhite, maxPlies,
-        findChanceNode, searchMoves);
+        findChanceNode, searchMoves, mirroredDice, producedDice);
 }
 
 void arena(string net1, string net2) {
@@ -8248,7 +8273,9 @@ void arena(string net1, string net2) {
             const Position& startPos,
             const std::array<uint64_t, 4>& path,
             const std::array<int, 64>& mask,
-            bool n1IsWhite) -> int {
+            bool n1IsWhite,
+            const std::vector<int>* mirroredDice,
+            std::vector<int>* producedDice) -> int {
             return playOneNetArenaGameOnLane(
                 lane,
                 n1Srv,
@@ -8262,7 +8289,9 @@ void arena(string net1, string net2) {
                 mask,
                 n1IsWhite,
                 SIMS_PER_POS,
-                MAX_PLIES
+                MAX_PLIES,
+                mirroredDice,
+                producedDice
             );
         },
         onProgress,
@@ -8343,7 +8372,9 @@ void tune(float c_init1, float fpu_reduction1,
             const Position& startPos,
             const std::array<uint64_t, 4>& path,
             const std::array<int, 64>& mask,
-            bool p1IsWhite) -> int {
+            bool p1IsWhite,
+            const std::vector<int>* mirroredDice,
+            std::vector<int>* producedDice) -> int {
             return playOneTuneGameOnLane(
                 lane,
                 sharedSrv,
@@ -8355,7 +8386,9 @@ void tune(float c_init1, float fpu_reduction1,
                 mask,
                 p1IsWhite,
                 SIMS_PER_POS,
-                MAX_PLIES
+                MAX_PLIES,
+                mirroredDice,
+                producedDice
             );
         },
         onProgress,
