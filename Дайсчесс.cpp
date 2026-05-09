@@ -5079,6 +5079,7 @@ static bool runOneSim(MCTSTable& T,
     Position pos = rootPos;
     Trace tr; tr.reset();
     bool isRoot = true;
+    uint32_t decisionDepth = 0;
 
     for (;;) {
         if (AI_UNLIKELY(T.abort.load(std::memory_order_relaxed))) {
@@ -5146,7 +5147,7 @@ static bool runOneSim(MCTSTable& T,
                 backprop(node, 1.0f, tr);
                 publishTerminalWithMove(T, node, pos.key, ml.n ? ml.m[0] : 0);
                 claim.release();
-                if (diag) diag->depth = (uint32_t)tr.n;
+                if (diag) diag->depth = decisionDepth + 1;
                 return true;
             }
 
@@ -5170,14 +5171,14 @@ static bool runOneSim(MCTSTable& T,
             fillPendingPolicyIdx(outPending);
 
             claim.release(); // ownership of expansion cleanup transferred to PendingNN
-            if (diag) diag->depth = (uint32_t)tr.n;
+            if (diag) diag->depth = decisionDepth;
             return true;
         }
 
         // Expanded
         if (node->terminal) {
             backprop(node, 1.0f, tr);
-            if (diag) diag->depth = (uint32_t)tr.n;
+            if (diag) diag->depth = decisionDepth + 1;
             return true;
         }
 
@@ -5191,7 +5192,7 @@ static bool runOneSim(MCTSTable& T,
             else {
                 float vLeaf = nodeQ(*node);
                 backprop(node, vLeaf, tr);
-                if (diag) diag->depth = (uint32_t)tr.n;
+                if (diag) diag->depth = decisionDepth;
                 return true;
             }
         }
@@ -5210,6 +5211,7 @@ static bool runOneSim(MCTSTable& T,
         applyVirtualLoss(step);
 
         makeMove(pos, mask, e->move);
+        ++decisionDepth;
         isRoot = false;
     }
 }
@@ -5278,6 +5280,7 @@ void mctsBatchedMT(Position& rootPos,
     std::array<int, 64>& mask,
     double timeSec,
     float& outEvalWhite,
+    float& outAvgDepth,
     std::vector<moveState>& outRootMoves,
     std::vector<int>& outPVBeforeRoll,
     int write,
@@ -5290,6 +5293,7 @@ void mctsBatchedMT(Position& rootPos,
 
     if (term) {
         outEvalWhite = 1 - rootPos.side;
+        outAvgDepth = 1.0f;
         outRootMoves.clear();
         outRootMoves.push_back({ ml.m[0], outEvalWhite, 0 });
         outPVBeforeRoll.push_back(ml.m[0]);
@@ -5308,6 +5312,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
     TTNode* rootNode = T.getNode(rootPos.key);
     if (!rootNode) {
         outEvalWhite = 0.5f;
+        outAvgDepth = 0.0f;
         outRootMoves.clear();
         outPVBeforeRoll.clear();
         return;
@@ -5317,6 +5322,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
 
     if (T.abort.load(std::memory_order_acquire)) {
         outEvalWhite = 0.5f;
+        outAvgDepth = 0.0f;
         outRootMoves.clear();
         outPVBeforeRoll.clear();
         return;
@@ -5338,7 +5344,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
     std::atomic<bool> stop{ false };
     AtomicStopGuard stopGuard(stop);
 
-    std::atomic<uint64_t> simOK{ 0 }, simFail{ 0 }, nnExp{ 0 };
+    std::atomic<uint64_t> simOK{ 0 }, simFail{ 0 }, nnExp{ 0 }, depthSum{ 0 };
 
     auto worker = [&](unsigned tid) {
         uint32_t jitterBase = (uint32_t)(0x9E3779B9u * (tid + 1));
@@ -5372,10 +5378,11 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
 
                 bool needNN = false;
 
+                SimDiag sd{};
                 bool ok = runOneSim(T, rootPos, path, mask,
                     localPending, needNN,
                     jitterBase + (uint32_t)k * 1337u,
-                    kDefaultSearchParams);
+                    kDefaultSearchParams, &sd);
 
                 if (!ok) {
                     simFail.fetch_add(1, std::memory_order_relaxed);
@@ -5385,6 +5392,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
 
                 didUsefulWork = true;
                 simOK.fetch_add(1, std::memory_order_relaxed);
+                depthSum.fetch_add(sd.depth, std::memory_order_relaxed);
 
                 if (needNN) {
                     nnExp.fetch_add(1, std::memory_order_relaxed);
@@ -5431,6 +5439,9 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
     auto emitSearchSnapshot = [&]() {
         float qRootNow = nodeQ(*rootNode);
         float mctsEvalWhiteNow = (rootPos.side == 0) ? qRootNow : (1.0f - qRootNow);
+        const uint64_t simsNow = simOK.load(std::memory_order_relaxed);
+        const uint64_t depthNow = depthSum.load(std::memory_order_relaxed);
+        const double avgDepthNow = simsNow ? (double)depthNow / (double)simsNow : 0.0;
 
         std::vector<moveState> rootMovesNow;
         uint8_t exNow = rootNode->expanded.load(std::memory_order_acquire);
@@ -5462,6 +5473,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
 
         clearConsoleFull();
         std::cout << std::fixed << std::setprecision(6);
+        std::cout << "depth=" << avgDepthNow << '\n';
         std::cout << "eval=" << mctsEvalWhiteNow << '\n';
         for (size_t i = 0; i < pvNow.size(); ++i) {
             if (i) std::cout << ' ';
@@ -5513,6 +5525,11 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
 
     float qRoot = nodeQ(*rootNode);
     outEvalWhite = (rootPos.side == 0) ? qRoot : (1.0f - qRoot);
+    {
+        const uint64_t simsNow = simOK.load(std::memory_order_relaxed);
+        const uint64_t depthNow = depthSum.load(std::memory_order_relaxed);
+        outAvgDepth = simsNow ? (float)((double)depthNow / (double)simsNow) : 0.0f;
+    }
 
     outRootMoves.clear();
     uint8_t ex = rootNode->expanded.load(std::memory_order_acquire);
@@ -10745,13 +10762,14 @@ POS.key=computeKey(POS);
 void SEARCH(){
 Position pos;
 float eval;
+float depth;
 vector<moveState> moves;
 vector<int> pv;
 START(pos);
 while(1){
 while(POS.key==pos.key||POS.dice==0)Sleep(1);
 pos=POS;
-mctsBatchedMT(pos,PATH,MASK,3600,eval,moves,pv,1,1);
+mctsBatchedMT(pos,PATH,MASK,3600,eval,depth,moves,pv,1,1);
 }
 }
 int main() {
@@ -10804,9 +10822,10 @@ searchThread.join();
 
 
         float mctsEvalWhite = 0.5f;
+        float mctsAvgDepth = 0.0f;
         std::vector<int> pvBeforeRoll;
         std::vector<moveState> rootMoves;
-        mctsBatchedMT(pos, path, mask, 10.0, mctsEvalWhite, rootMoves, pvBeforeRoll, 0, 0);
+        mctsBatchedMT(pos, path, mask, 10.0, mctsEvalWhite, mctsAvgDepth, rootMoves, pvBeforeRoll, 0, 0);
 
         float v = 0.5f;
         std::vector<float> pol((size_t)POLICY_SIZE, 0.0f);
