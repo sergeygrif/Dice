@@ -9978,7 +9978,7 @@ static void runParallelSelfPlayBlock(
                         std::cerr << "[selfplay] game_ctx=" << i
                             << " aborted: oomCode="
                             << sp.T.oomCode.load(std::memory_order_relaxed)
-                            << " (not enough memory for 
+                            << " (not enough memory for "
                             << oomWhat(sp.T.oomCode.load(std::memory_order_relaxed))
                             << ") -> reset table\n";
                         sp.resetForNewGame();
