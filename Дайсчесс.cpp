@@ -10826,12 +10826,13 @@ searchThread.join();
         float mctsAvgDepth = 0.0f;
         std::vector<int> pvBeforeRoll;
         std::vector<moveState> rootMoves;
-        mctsBatchedMT(pos, path, mask, 10.0, mctsEvalWhite, mctsAvgDepth, rootMoves, pvBeforeRoll, 0, 0);
+        mctsBatchedMT(pos, path, mask, 10.0, mctsEvalWhite, mctsAvgDepth, rootMoves, pvBeforeRoll, 1, 0);
 
         float v = 0.5f;
         std::vector<float> pol((size_t)POLICY_SIZE, 0.0f);
 
         g_trt.inferBatch(&pos, 1, &v, pol.data());
+        clearConsoleFull();
         std::cout << std::fixed << std::setprecision(2);
         std::cout << "depth=" << mctsAvgDepth << std::endl;
         std::cout << std::fixed << std::setprecision(6);
