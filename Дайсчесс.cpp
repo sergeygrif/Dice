@@ -3763,6 +3763,23 @@ struct MCTSTable {
     }
 };
 
+
+static AI_FORCEINLINE const char* oomWhat(uint32_t oomCode) {
+    switch (oomCode) {
+    case 1u: return "узел";
+    case 2u: return "ребро";
+    default: return "неизвестно";
+    }
+}
+
+static AI_FORCEINLINE void logSearchOOM(const MCTSTable& T, const char* where) {
+    const uint32_t code = T.oomCode.load(std::memory_order_relaxed);
+    if (code == 0u) return;
+    std::cerr << "[search] " << where
+              << ": не хватило памяти под " << oomWhat(code)
+              << " (oomCode=" << code << ")\n";
+}
+
 static AI_FORCEINLINE float nodeQ(const TTNode& n) {
     uint32_t v = n.visits.load(std::memory_order_acquire);
     if (!v) return 0.5f;
@@ -5074,7 +5091,10 @@ static bool runOneSim(MCTSTable& T,
 
     outNeedNN = false;
 
-    if (AI_UNLIKELY(T.abort.load(std::memory_order_relaxed))) return false;
+    if (AI_UNLIKELY(T.abort.load(std::memory_order_relaxed))) {
+        logSearchOOM(T, "runSingleSimulation: early abort");
+        return false;
+    }
 
     Position pos = rootPos;
     Trace tr; tr.reset();
@@ -5084,6 +5104,7 @@ static bool runOneSim(MCTSTable& T,
     for (;;) {
         if (AI_UNLIKELY(T.abort.load(std::memory_order_relaxed))) {
             rollbackVirtualLoss(tr);
+            logSearchOOM(T, "runSingleSimulation: abort during descent");
             return false;
         }
 
@@ -5321,6 +5342,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
     ensureRootExpanded(T, rootPos, path, mask, ml, term);
 
     if (T.abort.load(std::memory_order_acquire)) {
+        logSearchOOM(T, "searchRootMove: after root expansion");
         outEvalWhite = 0.5f;
         outAvgDepth = 0.0f;
         outRootMoves.clear();
@@ -9956,7 +9978,9 @@ static void runParallelSelfPlayBlock(
                         std::cerr << "[selfplay] game_ctx=" << i
                             << " aborted: oomCode="
                             << sp.T.oomCode.load(std::memory_order_relaxed)
-                            << " -> reset table\n";
+                            << " (не хватило памяти под "
+                            << oomWhat(sp.T.oomCode.load(std::memory_order_relaxed))
+                            << ") -> reset table\n";
                         sp.resetForNewGame();
                     }
                 }
