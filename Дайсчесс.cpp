@@ -5472,8 +5472,9 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         extractBestPVUntilChance(T, rootPos, mask, pvNow, 256);
 
         clearConsoleFull();
-        std::cout << std::fixed << std::setprecision(6);
+        std::cout << std::fixed << std::setprecision(2);
         std::cout << "depth=" << avgDepthNow << '\n';
+        std::cout << std::fixed << std::setprecision(6);
         std::cout << "eval=" << mctsEvalWhiteNow << '\n';
         for (size_t i = 0; i < pvNow.size(); ++i) {
             if (i) std::cout << ' ';
@@ -10831,7 +10832,9 @@ searchThread.join();
         std::vector<float> pol((size_t)POLICY_SIZE, 0.0f);
 
         g_trt.inferBatch(&pos, 1, &v, pol.data());
-
+        std::cout << std::fixed << std::setprecision(2);
+        std::cout << "depth=" << mctsAvgDepth << std::endl;
+        std::cout << std::fixed << std::setprecision(6);
         std::cout << "eval=" << v << std::endl;
 
         for (size_t i = 0; i < pvBeforeRoll.size(); ++i) {
@@ -10841,7 +10844,7 @@ searchThread.join();
         std::cout << "\n";
 
 
-        std::cout << std::fixed << std::setprecision(6);
+        
 
         for (const auto& ms : rootMoves) {
             int d = (int)std::to_string(ms.visits).size();
