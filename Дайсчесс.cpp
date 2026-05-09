@@ -1953,8 +1953,8 @@ static AI_FORCEINLINE uint32_t mix32From64(uint64_t x) {
 }
 
 // 216 = 2^3 * 3^3
-// Чтобы (base + step * k) обходил все residue-классы, step должен быть взаимно прост с 216,
-// т.е. НЕ делиться ни на 2, ни на 3.
+// So that (base + step * k) iterates through all residue classes, step must be coprime with 216,
+// i.e., it must NOT be divisible by 2 or 3.
 static AI_FORCEINLINE uint32_t normalizeStepMod216(uint32_t s) {
     s %= 216u;
     if (s == 0u) s = 1u;
@@ -1977,7 +1977,7 @@ static AI_FORCEINLINE uint32_t deterministicDiceStep216(uint64_t key) {
 }
 
 void makeRandomDeterministic(Position& pos, TTNode* node) {
-    // fallback: если node нет, используем старое случайное поведение
+    // fallback: if there is no node, use the old random behavior
     if (!node) {
         makeRandom(pos, node);
         return;
@@ -2106,10 +2106,10 @@ static constexpr int POLICY_P = 73;
 static constexpr double AI_BN_EPS = 1e-5;
 
 // SE (affine)
-static constexpr int SE_CHANNELS = 16;   // для C=128 обычно 8..16; 16 сильнее
+static constexpr int SE_CHANNELS = 16;   // for C=128, typically 8..16; 16 is stronger
 
 // Heads
-static constexpr int HEAD_POLICY_C = 32; // 32 для 10x128 — стандартный хороший выбор
+static constexpr int HEAD_POLICY_C = 32; // 32 for 10x128 — a standard good choice
 static constexpr int HEAD_VALUE_C = 32;
 static constexpr int HEAD_VALUE_FC = 256;
 static constexpr int POLICY_SIZE = 8 * 8 * POLICY_P; // 4672
@@ -3153,7 +3153,7 @@ struct TrtRunner {
                 total,
                 stream);
 
-            // по желанию на время отладки:
+            // optional during debugging:
             CUDA_CHECK(cudaGetLastError());
         }
 
@@ -3456,13 +3456,13 @@ static AI_FORCEINLINE void backoffWait(int& spins) {
     cpuRelax();
     ++spins;
 
-    // ВАЖНО: никаких sleep_for(microseconds) — на многих ОС это вырождается в ~1ms.
-    // Yield делаем редко, чтобы не терять throughput.
+    // IMPORTANT: no sleep_for(microseconds) — on many OSes this degrades to ~1ms.
+    // Yield rarely so we do not lose throughput.
     if (spins == 256 || spins == 1024 || spins == 4096) {
         std::this_thread::yield();
     }
     if (spins > 16384) {
-        // если очень долго — начинаем yield чаще, но всё равно без сна
+        // if it takes too long, start yielding more often, but still without sleeping
         std::this_thread::yield();
     }
 }
@@ -3750,7 +3750,7 @@ struct MCTSTable {
 
             if (mt == wantTag) {
                 if (AI_LIKELY(s.node.key == key)) return &s.node;
-                // rare tag collision -> probe дальше
+                // rare tag collision -> probe further
             }
 
             if (mt == TAG_EMPTY32) return nullptr;
@@ -3766,9 +3766,9 @@ struct MCTSTable {
 
 static AI_FORCEINLINE const char* oomWhat(uint32_t oomCode) {
     switch (oomCode) {
-    case 1u: return "узел";
-    case 2u: return "ребро";
-    default: return "неизвестно";
+    case 1u: return "node";
+    case 2u: return "edge";
+    default: return "unknown";
     }
 }
 
@@ -3776,7 +3776,7 @@ static AI_FORCEINLINE void logSearchOOM(const MCTSTable& T, const char* where) {
     const uint32_t code = T.oomCode.load(std::memory_order_relaxed);
     if (code == 0u) return;
     std::cerr << "[search] " << where
-              << ": не хватило памяти под " << oomWhat(code)
+              << ": not enough memory for " << oomWhat(code)
               << " (oomCode=" << code << ")\n";
 }
 
@@ -3794,7 +3794,7 @@ static AI_FORCEINLINE float edgeQ(const TTEdge& e) {
     return clamp01((float)(s / (double)v));
 }
 
-// Выбор PV: сначала max visits, затем max Q, затем max prior.
+// PV selection: first max visits, then max Q, then max prior.
 static AI_FORCEINLINE int selectBestPVEdge(const TTNode& n, const TTEdge* e0) {
     int bestI = 0;
     uint32_t bestV = 0;
@@ -3876,9 +3876,9 @@ static AI_FORCEINLINE int selectPUCT(const TTNode& n,
 static constexpr int MCTS_MAX_DEPTH = 256;
 
 // Classic virtual loss
-static constexpr uint32_t VLOSS_N = 1;     // обычно 1; 2-3 имеет смысл только при очень многих потоках
-static constexpr float    VLOSS_VALUE = 0.0f; // value в шкале [0..1]; 0.0 = "loss for side-to-move"
-static constexpr bool     VLOSS_BUMP_NODE_VISITS = false; // опционально
+static constexpr uint32_t VLOSS_N = 1;     // usually 1; 2-3 only makes sense with a very large number of threads
+static constexpr float    VLOSS_VALUE = 0.0f; // value on the [0..1] scale; 0.0 = "loss for side-to-move"
+static constexpr bool     VLOSS_BUMP_NODE_VISITS = false; // optional
 
 struct TraceStep {
     TTNode* node = nullptr;
@@ -4120,8 +4120,8 @@ static AI_FORCEINLINE float pendingPolicyLogitFromFullCHW(
     const uint16_t k = p.policyIdx[(size_t)i];
 
     if (AI_UNLIKELY(k == INVALID_POLICY_IDX || (unsigned)k >= (unsigned)POLICY_SIZE)) {
-        // Должно быть невозможно, но если mapping сломался —
-        // даём почти -inf, чтобы softmax дал ~0.
+        // This should be impossible, but if mapping breaks —
+        // assign almost -inf so softmax gives ~0.
         return -1e30f;
     }
 
@@ -4146,16 +4146,16 @@ static AI_FORCEINLINE void applyVirtualLoss(TraceStep& s) {
 
     if (VLOSS_BUMP_NODE_VISITS && s.node) {
         s.node->visits.fetch_add(VLOSS_N, std::memory_order_relaxed);
-        // valueSum узла НЕ трогаем (классика)
+        // do NOT touch node valueSum (classic approach)
     }
 
     if (s.edge) {
         s.edge->visits.fetch_add(VLOSS_N, std::memory_order_relaxed);
-        // “loss” в [0..1] шкале => добавляем W как будто вернулся VLOSS_VALUE
+        // “loss” on [0..1] scale => add W as if VLOSS_VALUE returned
         if (VLOSS_VALUE != 0.0f) {
             atomicAddDouble(s.edge->valueSum, (double)VLOSS_VALUE * (double)VLOSS_N);
         }
-        // если VLOSS_VALUE=0.0f, valueSum можно не трогать вообще
+        // if VLOSS_VALUE=0.0f, valueSum can be left untouched
     }
 }
 
@@ -5280,7 +5280,7 @@ static void extractBestPVUntilChance(MCTSTable& T,
             break;
         }
 
-        // chance-узел: остановиться ДО makeRandom()
+        // chance node: stop BEFORE makeRandom()
         if (n->chance) break;
 
         if (n->edgeCount == 0) break;
@@ -5583,7 +5583,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         }
     }
 
-    // NEW: вытаскиваем первую линию до броска кубиков
+    // NEW: extract the first line before dice roll
     extractBestPVUntilChance(T, rootPos, mask, outPVBeforeRoll, 256);
 
     (void)simOK; (void)simFail; (void)nnExp;
@@ -5591,10 +5591,10 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
 }
 
 // ===================== TRAINING PATCH BEGIN (FINAL) =====================
-// (продолжение будет в сообщении 2/2)
+// (continuation will be in message 2/2)
 // ===================== TRAINING PATCH BEGIN (FINAL) =====================
-// ВСТАВЬ ЭТО ВМЕСТО ТВОЕГО ТЕКУЩЕГО `static void init()` И `int main()`
-// (т.е. удалить/заменить всё от `static void init()` до конца файла).
+// INSERT THIS INSTEAD OF YOUR CURRENT `static void init()` AND `int main()`
+// (i.e., delete/replace everything from `static void init()` to the end of file).
 
 
 
@@ -5765,7 +5765,7 @@ struct NetImpl final : torch::nn::Module {
         v = v.contiguous().view({ v.size(0), HEAD_VALUE_C * 64 });
         v = torch::relu(valFC1->forward(v));
 
-        // Получаем сырые логиты
+        // Get raw logits
         v = valFC2->forward(v);
 
 
@@ -5835,10 +5835,10 @@ struct ReplayBuffer {
     size_t head = 0;
     size_t size = 0;
 
-    // Степень "свежести" данных (Prioritized Replay Lite).
-    // 1.0  = полностью равномерный выбор (как было).
-    // 0.75 = легкий приоритет свежим играм (золотая середина для AlphaZero).
-    // 0.5  = сильный перекос в сторону только что сыгранных партий.
+    // Degree of data "freshness" (Prioritized Replay Lite).
+    // 1.0  = fully uniform sampling (as before).
+    // 0.75 = slight priority to fresh games (a sweet spot for AlphaZero).
+    // 0.5  = strong skew toward just-played games.
     double recent_bias = 0.85;
 
     std::mutex m;
@@ -5912,11 +5912,11 @@ struct ReplayBuffer {
 };
 
 // ------------------------------------------------------------
-// TRT refit из libtorch модели + пересоздание Context + CUDA Graph
+// TRT refit from libtorch model + Context rebuild + CUDA Graph
 // ------------------------------------------------------------
 
-static std::mutex g_trtMutex;     // защищаем TRT enqueue/refit/serialize
-static std::mutex g_modelMutex;   // защищаем чтение/запись весов модели и optimizer step
+static std::mutex g_trtMutex;     // protects TRT enqueue/refit/serialize
+static std::mutex g_modelMutex;   // protects model weight read/write and optimizer step
 static TrtRunner g_trt_old;
 static bool g_trtOldReady = false;
 static std::mutex g_trtOldMutex;
@@ -5944,7 +5944,7 @@ static std::vector<float> tensorToHostVecF32(const torch::Tensor& tIn) {
     return v;
 }
 
-// Pretty-print missing refit weights (IMPORTANT: иначе refit может "молча" быть частичным).
+// Pretty-print missing refit weights (IMPORTANT: otherwise refit may be silently partial).
 static void trtDumpMissingRefitWeights(nvinfer1::IRefitter& ref) {
     using namespace nvinfer1;
 
@@ -6034,7 +6034,7 @@ static bool trtRecreateContextAndRebindAndGraph(TrtRunner& trt) {
 // - Keep all host vectors alive until refitCudaEngine() finishes.
 // =============================================================
 
-// RAII: временно перевести модель в eval() на время refit и вернуть режим обратно.
+// RAII: temporarily switch model to eval() during refit and restore mode afterward.
 struct ScopedModelEval {
     Net& model;
     bool wasTraining = false;
@@ -6054,11 +6054,11 @@ static bool trtRefitFromTorchModel(TrtRunner& trt, Net& model) {
 
     if (!trt.engine || !trt.ctx) return false;
 
-    // IMPORTANT: refit делаем из eval(), чтобы BN running stats не менялись.
+    // IMPORTANT: perform refit from eval() so BN running stats do not change.
     ScopedModelEval evalGuard(model);
     torch::NoGradGuard ng;
 
-    // Если модель на CUDA — можно синхронизироваться (опционально, но безопасно).
+    // If the model is on CUDA — synchronize if needed (optional but safe).
     try {
         auto params = model->parameters(); // std::vector<at::Tensor>
         if (!params.empty()) {
@@ -6072,7 +6072,7 @@ static bool trtRefitFromTorchModel(TrtRunner& trt, Net& model) {
     if (!ref) return false;
 
     // Keep host vectors alive (TensorRT reads weights during refitCudaEngine()).
-    // std::deque гарантирует стабильность адресов элементов.
+    // std::deque guarantees stable element addresses.
     std::deque<std::vector<float>> keep;
 
     auto pushKeep = [&](std::vector<float>&& v) -> nvinfer1::Weights {
@@ -6267,7 +6267,7 @@ static bool trtSavePlanToDisk(TrtRunner& trt, const std::string& planFile) {
 
 
 // ------------------------------------------------------------
-// Inference server для обучения (CV вместо busy-wait), + g_trtMutex
+// Inference server for training (CV instead of busy-wait), + g_trtMutex
 // ------------------------------------------------------------
 static std::atomic<int> g_inferInFlight{ 0 };
 static std::atomic<uint64_t> g_inferBatchCount{ 0 };
@@ -6743,7 +6743,7 @@ struct SharedInferenceServerTrain final : UnifiedInferenceServerTrain {
     }
 };
 // ------------------------------------------------------------
-// SearchPool: постоянные MCTS-воркеры (НЕ пересоздаём потоки на каждый search)
+// SearchPool: persistent MCTS workers (do NOT recreate threads for each search)
 // ------------------------------------------------------------
 static AI_FORCEINLINE bool tryClaimSimBudget(std::atomic<int>& simsLeft) {
     int cur = simsLeft.load(std::memory_order_relaxed);
@@ -7003,9 +7003,9 @@ struct SearchPool {
     void failFast(const std::string& reason, MCTSTable* tt = nullptr) {
         requestFailFastNoThrow(reason, tt);
 
-        // failFast() должен бросать только из управляющего потока.
-        // Если кто-то случайно вызовет его из worker thread, просто не бросаем:
-        // worker должен завершиться, а управляющий поток увидит fatal и сам бросит.
+        // failFast() should throw only from the control thread.
+        // If someone accidentally calls it from a worker thread, just do not throw:
+        // worker should finish, and the control thread will see fatal and throw itself.
         if (isPoolThreadId(std::this_thread::get_id())) {
             return;
         }
@@ -7355,7 +7355,7 @@ private:
 
 // ------------------------------------------------------------
 // Search fixed number of simulations (sims) with tree reuse
-// Dirichlet noise применяется ТОЛЬКО временно на root (не портит priors в TT навсегда)
+// Dirichlet noise is applied ONLY temporarily at root (does not permanently corrupt priors in TT)
 // ------------------------------------------------------------
 
 // Expand root (or any node keyed by rootPos) exactly once for training-selfplay.
@@ -7373,7 +7373,7 @@ static bool ensureExpandedTrain(MCTSTable& T,
     TTNode* root = T.getNode(rootPos.key);
     if (!root) return false;
 
-    // Надёжно дожидаемся/захватываем expansion root-а.
+    // Reliably wait for / acquire root expansion.
     for (;;) {
         uint8_t ex = root->expanded.load(std::memory_order_acquire);
 
@@ -7386,17 +7386,17 @@ static bool ensureExpandedTrain(MCTSTable& T,
                 T.abort.store(true, std::memory_order_release);
                 return false;
             }
-            continue; // перечитать состояние root
+            continue; // reread root state
         }
 
         uint8_t expected = 0;
         if (root->expanded.compare_exchange_strong(expected, 2,
             std::memory_order_acq_rel,
             std::memory_order_relaxed)) {
-            break; // мы захватили expansion
+            break; // we acquired expansion
         }
 
-        // кто-то успел изменить expanded — пробуем снова
+        // someone changed expanded first — try again
     }
 
     ExpansionClaimGuard rootClaim(root);
@@ -7554,7 +7554,7 @@ static int pickMoveFromVisits(const std::vector<moveState>& mv, float temperatur
     return mv.back().move;
 }
 
-// policy target — SPARSE (idx/prob), idx в CHW: k=pl*64+sq
+// policy target — SPARSE (idx/prob), idx in CHW: k=pl*64+sq
 static void buildSparsePolicyTargetCHW(const Position& pos,
     const std::vector<moveState>& mv,
     uint16_t& outN,
@@ -7595,7 +7595,7 @@ static void buildSparsePolicyTargetCHW(const Position& pos,
     }
 }
 
-// временно (на один search) зашумливаем root priors и потом откатываем назад
+// temporarily (for one search) perturb root priors, then roll back
 static void runFixedSims(MCTSTable& T,
     SearchPool& pool,
     ITrainInferenceServer& srv,
@@ -7616,7 +7616,7 @@ static void runFixedSims(MCTSTable& T,
     pool.runSims(T, srv, rootPos, path, mask, sims, params);
 }
 // ------------------------------------------------------------
-// Self-play: переиспользуем один MCTSTable + один InferenceServerTrain + SearchPool
+// Self-play: reuse one MCTSTable + one InferenceServerTrain + SearchPool
 // ------------------------------------------------------------
 
 static AI_FORCEINLINE void resetMCTSTableForNewGame(MCTSTable& T) {
@@ -7981,8 +7981,8 @@ static ArenaStats runArenaMatch(int games, int simsPerPos) {
 
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
 
-    // В arena каждая lane = 2 SelfPlayContext, у каждого свой server + pool.
-    // Поэтому держим threadsPerSide небольшим.
+    // In arena, each lane = 2 SelfPlayContext, each with its own server + pool.
+    // Therefore keep threadsPerSide small.
     const unsigned threadsPerSide = (hw >= 24 ? 2u : 1u);
     const unsigned wantedLanes = (unsigned)std::max(1, (games + 1) / 2);
     const unsigned lanesByFormula = (hw > 4u) ? ((hw - 4u) / 2u) : 1u;
@@ -8360,7 +8360,7 @@ void tune(float c_init1, float fpu_reduction1,
 
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
 
-    // Tune lane легче arena: только 2 GameContext, shared NN server один на всех.
+    // Tune lane is lighter than arena: only 2 GameContext, one shared NN server for all.
     const unsigned threadsPerSide = (hw >= 16 ? 2u : 1u);
     const unsigned wantedLanes = (unsigned)std::max(1, (TOTAL_GAMES + 1) / 2);
     const unsigned lanesByFormula = (hw > 4u) ? ((hw - 4u) / 2u) : 1u;
@@ -8576,7 +8576,7 @@ static void selfPlayOneGame960(GameContext& sp,
     }
     else return;
 
-    // Взвешенная цель по q с учетом количества chance-переходов между samples.
+    // Weighted q target accounting for number of chance transitions between samples.
     buildChanceWeightedTargets(game, sideAtSample, chanceToNext, zWhite);
 
     rb.pushMany(game);
@@ -8584,7 +8584,7 @@ static void selfPlayOneGame960(GameContext& sp,
 }
 
 // ------------------------------------------------------------
-// Trainer thread: sparse policy loss через gather(logp, idx)
+// Trainer thread: sparse policy loss via gather(logp, idx)
 // + pin_memory/non_blocking, + grad clipping, + NaN guard
 // ------------------------------------------------------------
 
@@ -9660,7 +9660,7 @@ static void initAllOrExit(Net& model,
         g_nnBatch = TRT_MAX_BATCH;
     }
 
-    // Первичный refit
+    // Initial refit
     {
         std::scoped_lock lk(g_modelMutex, g_trtMutex);
         torch::NoGradGuard ng;
@@ -9978,7 +9978,7 @@ static void runParallelSelfPlayBlock(
                         std::cerr << "[selfplay] game_ctx=" << i
                             << " aborted: oomCode="
                             << sp.T.oomCode.load(std::memory_order_relaxed)
-                            << " (не хватило памяти под "
+                            << " (not enough memory for 
                             << oomWhat(sp.T.oomCode.load(std::memory_order_relaxed))
                             << ") -> reset table\n";
                         sp.resetForNewGame();
@@ -10045,7 +10045,7 @@ void Training(int targetGames) {
     static constexpr size_t REPLAY_CAP = 1000000;
     ReplayBuffer rb(REPLAY_CAP);
 
-    // Trainer: инициализируем с нулевого шага, затем пытаемся восстановить optimizer
+    // Trainer: initialize from step zero, then try to restore optimizer
     Trainer trainer;
 
     trainer.init(model, emaModel);
@@ -10053,7 +10053,7 @@ void Training(int targetGames) {
     if (loadOptimizerState(optFile, trainer)) {
         std::cerr << "optimizer state restored.\n";
 
-        // После restore optimizer ещё раз принудительно выставим LR по scheduler'у
+        // After optimizer restore, force-set LR again according to scheduler
         trainer.current_lr = -1.0;
         trainer.updateLR(true);
     }
@@ -10075,9 +10075,9 @@ void Training(int targetGames) {
 
     const unsigned hwSP = std::max(1u, std::thread::hardware_concurrency());
 
-    // Для training держим ровно 1 search-thread на игру.
-    // Тогда лучший throughput обычно даёт больше параллельных игр,
-    // но без безумного раздувания числа GameContext.
+    // For training, keep exactly 1 search thread per game.
+    // Then best throughput usually comes from more parallel games,
+    // but without insane expansion of GameContext count.
     const unsigned SEARCH_THREADS_PER_GAME = 1u;
 
 const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
@@ -10244,8 +10244,8 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
         }
 
         while (games >= nextArenaAt) {
-            // Полностью ставим основной self-play на паузу на время арены:
-            // убираем лишние worker threads / inference server activity.
+            // Fully pause main self-play during arena:
+            // remove extra worker threads / inference server activity.
             if (spRunning) {
                 safeRefitBarrierShared(sharedSrv);
                 for (auto& g : gamesCtx) {
@@ -10256,7 +10256,7 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
 
             bool arenaOk = true;
 
-            // current TRT должен точно соответствовать текущему EMA model
+            // current TRT must exactly match the current EMA model
             if (!syncCurrentRunnerFromModel(emaModel)) {
                 std::cerr << "[arena] failed to sync current TRT from EMA model.\n";
                 arenaOk = false;
@@ -10279,7 +10279,7 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
                     << ar.curWins << "/" << ar.oldWins
                     << "  score=" << ar.currentScore() << "\n";
 
-                // promotion rule: если current > old, old := current
+                // promotion rule: if current > old, old := current
                 if (ar.currentScore() > 0.5) {
                     if (snapshotCurrentIntoOld(emaModel, oldModel, planFile)) {
                         std::cout << "[arena] promoted current EMA -> old snapshot in memory\n";
@@ -10296,7 +10296,7 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
                 std::cerr << "[arena] skipped due to setup failure.\n";
             }
 
-            // ВАЖНО: всегда поднимаем основной self-play обратно после арены.
+            // IMPORTANT: always resume main self-play after arena.
             for (auto& g : gamesCtx) {
                 if (g) g->start(SEARCH_THREADS_PER_GAME);
             }
@@ -10304,7 +10304,7 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
             prevSearchStats = snapshotAllSearchStats(gamesCtx);
             statWindowStart = std::chrono::steady_clock::now();
 
-            // Даже если arena setup failed, не зацикливаемся на том же пороге.
+            // Even if arena setup failed, do not get stuck on the same threshold.
             nextArenaAt += 100000;
 
             if (!arenaOk) {
@@ -10456,7 +10456,7 @@ float b=stof(fmtFixed(getAverageInferBatchSize(), 2));
         g_trt.shutdown();
         g_trtReady = false;
         if (::remove(planFile.c_str()) != 0) {
-            // не фатально: файла могло не быть
+            // not fatal: file may not have existed
         }
     }
 
