@@ -7988,12 +7988,12 @@ static ArenaStats runArenaMatch(int games, int simsPerPos) {
     }
 
     auto onProgress = [&](int playedGames, const MatchStatsGeneric& s) {
-        if ((playedGames % 100) == 0) {
+        if ((playedGames % 2) == 0 && (playedGames % 100) == 0) {
             const double los = computeLOSPercent(s.p1Wins, s.p2Wins);
-            std::cout << "[arena] games " << playedGames << "/" << games
-                << "  W/L = " << s.p1Wins << "/" << s.p2Wins
-                << "  score=" << s.p1Score()
-                << "  LOS=" << std::fixed << std::setprecision(2) << los << "%\n";
+            std::cout << "[arena] games=" << playedGames
+                << " W/L=" << s.p1Wins << "/" << s.p2Wins
+                << " score=" << std::fixed << std::setprecision(4) << s.p1Score()
+                << " LOS=" << std::setprecision(2) << los << "%\n";
         }
     };
 
@@ -8054,7 +8054,7 @@ static void printTuneProgress(int played, int wins1, int losses1) {
     std::cout
         << "[tune] games=" << played
         << " W/L=" << wins1 << "/" << losses1
-        << " score1=" << std::fixed << std::setprecision(4) << score1
+        << " score=" << std::fixed << std::setprecision(4) << score1
         << " LOS=" << std::setprecision(2) << los << "%\n";
 }
 
@@ -8290,7 +8290,7 @@ void arena(string net1, string net2) {
         << " threads_per_side=" << threadsPerSide << "\n";
 
     auto onProgress = [&](int playedGames, const MatchStatsGeneric& s) {
-        if ((playedGames % 100) == 0) {
+        if ((playedGames % 2) == 0 && (playedGames % 100) == 0) {
             printTuneProgress(playedGames, s.p1Wins, s.p2Wins);
         }
     };
@@ -8389,7 +8389,7 @@ void tune(float c_init1, float fpu_reduction1,
         << " threads_per_side=" << threadsPerSide << "\n";
 
     auto onProgress = [&](int playedGames, const MatchStatsGeneric& s) {
-        if ((playedGames % 100) == 0) {
+        if ((playedGames % 2) == 0 && (playedGames % 100) == 0) {
             printTuneProgress(playedGames, s.p1Wins, s.p2Wins);
         }
     };
@@ -10264,9 +10264,11 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
 
                 ArenaStats ar = runArenaMatch(/*games=*/2000, /*simsPerPos=*/800);
 
-                std::cout << "[arena] done: W/L = "
+                const double arenaLos = computeLOSPercent(ar.curWins, ar.oldWins);
+                std::cout << "[arena] games=2000 W/L="
                     << ar.curWins << "/" << ar.oldWins
-                    << "  score=" << ar.currentScore() << "\n";
+                    << " score=" << std::fixed << std::setprecision(4) << ar.currentScore()
+                    << " LOS=" << std::setprecision(2) << arenaLos << "%\n";
 
                 // promotion rule: if current > old, old := current
                 if (ar.currentScore() > 0.5) {
