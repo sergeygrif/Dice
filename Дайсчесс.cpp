@@ -306,17 +306,6 @@ static AI_FORCEINLINE void atomicAddDouble(std::atomic<double>& a, double add) {
         // old updated on failure
     }
 }
-static AI_FORCEINLINE bool tryIncrementVisits(std::atomic<uint32_t>& visits) {
-    uint32_t old = visits.load(std::memory_order_relaxed);
-    for (;;) {
-        if (old == UINT32_MAX) return false;
-        if (visits.compare_exchange_weak(old, old + 1,
-            std::memory_order_release,
-            std::memory_order_relaxed)) {
-            return true;
-        }
-    }
-}
 struct TTEdge {
     std::atomic<double> valueSum{ 0.0 };
     std::atomic<uint32_t> visits{ 0 };
@@ -345,10 +334,9 @@ struct TTEdge {
         return valueSum.load(std::memory_order_relaxed);
     }
 
-    AI_FORCEINLINE bool addVisitAndValue(float v) {
-        if (!tryIncrementVisits(visits)) return false;
+    AI_FORCEINLINE void addVisitAndValue(float v) {
         atomicAddDouble(valueSum, (double)v);
-        return true;
+        visits.fetch_add(1, std::memory_order_release);
     }
 };
 
@@ -372,10 +360,9 @@ struct TTNode {
     AI_FORCEINLINE double sum() const {
         return valueSum.load(std::memory_order_relaxed);
     }
-    AI_FORCEINLINE bool addVisitAndValue(float v) {
-        if (!tryIncrementVisits(visits)) return false;
+    AI_FORCEINLINE void addVisitAndValue(float v) {
         atomicAddDouble(valueSum, (double)v);
-        return true;
+        visits.fetch_add(1, std::memory_order_release);
     }
     AI_FORCEINLINE void publish(uint64_t k, uint32_t begin, uint8_t count,
         int term, int isChance) {
@@ -4309,18 +4296,17 @@ static AI_FORCEINLINE void abortPendingNNInferFailure(
     completePendingNNJob(p);
 }
 
-static AI_FORCEINLINE bool backprop(TTNode* leaf, float v, Trace& tr) {
+static AI_FORCEINLINE void backprop(TTNode* leaf, float v, Trace& tr) {
     rollbackVirtualLoss(tr);
 
-    if (!leaf->addVisitAndValue(v)) return false;
+    leaf->addVisitAndValue(v);
 
     for (int i = tr.n - 1; i >= 0; --i) {
         TraceStep& s = tr.st[i];
         if (s.flip) v = 1.0f - v;
-        if (s.edge && !s.edge->addVisitAndValue(v)) return false;
-        if (!s.node->addVisitAndValue(v)) return false;
+        if (s.edge) s.edge->addVisitAndValue(v);
+        s.node->addVisitAndValue(v);
     }
-    return true;
 }
 
 static constexpr float ROOT_DIR_EPS = 0.25f;
@@ -4581,7 +4567,7 @@ static void expandLeafWithOutputs(MCTSTable& T,
         p.leaf->terminal = 0;
         p.leaf->chance = 0;
 
-        if (!backprop(p.leaf, v, p.trace)) { T.abort.store(true, std::memory_order_release); return; }
+        backprop(p.leaf, v, p.trace);
         publishReady(p.leaf, p.pos.key, 0, 0, 0, 0);
         return;
     }
@@ -4616,7 +4602,7 @@ static void expandLeafWithOutputs(MCTSTable& T,
         p.leaf->terminal = 0;
         p.leaf->chance = 0;
 
-        if (!backprop(p.leaf, v, p.trace)) { T.abort.store(true, std::memory_order_release); return; }
+        backprop(p.leaf, v, p.trace);
         publishReady(p.leaf, p.pos.key, 0, 0, 0, 0);
         return;
     }
@@ -4637,7 +4623,7 @@ static void expandLeafWithOutputs(MCTSTable& T,
     p.leaf->terminal = 0;
     p.leaf->chance = 0;
 
-    if (!backprop(p.leaf, v, p.trace)) { T.abort.store(true, std::memory_order_release); return; }
+    backprop(p.leaf, v, p.trace);
     publishReady(p.leaf, p.pos.key, begin, (uint8_t)cntU, 0, 0);
 }
 
@@ -4659,7 +4645,7 @@ static void expandLeafWithGatheredLogits(MCTSTable& T,
         p.leaf->terminal = 0;
         p.leaf->chance = 0;
 
-        if (!backprop(p.leaf, v, p.trace)) { T.abort.store(true, std::memory_order_release); return; }
+        backprop(p.leaf, v, p.trace);
         publishReady(p.leaf, p.pos.key, 0, 0, 0, 0);
         return;
     }
@@ -4694,7 +4680,7 @@ static void expandLeafWithGatheredLogits(MCTSTable& T,
         p.leaf->terminal = 0;
         p.leaf->chance = 0;
 
-        if (!backprop(p.leaf, v, p.trace)) { T.abort.store(true, std::memory_order_release); return; }
+        backprop(p.leaf, v, p.trace);
         publishReady(p.leaf, p.pos.key, 0, 0, 0, 0);
         return;
     }
@@ -4715,7 +4701,7 @@ static void expandLeafWithGatheredLogits(MCTSTable& T,
     p.leaf->terminal = 0;
     p.leaf->chance = 0;
 
-    if (!backprop(p.leaf, v, p.trace)) { T.abort.store(true, std::memory_order_release); return; }
+    backprop(p.leaf, v, p.trace);
     publishReady(p.leaf, p.pos.key, begin, (uint8_t)cntU, 0, 0);
 }
 
@@ -5027,7 +5013,7 @@ static void ensureRootExpanded(MCTSTable& T,
         root->chance = 0;
 
         Trace empty; empty.reset();
-        if (!backprop(root, 1.0f, empty)) { T.abort.store(true, std::memory_order_release); return false; }
+        backprop(root, 1.0f, empty);
         publishTerminalWithMove(T, root, rootPos.key, ml.n ? ml.m[0] : 0);
         rootClaim.release();
         return;
@@ -5169,7 +5155,7 @@ static bool runOneSim(MCTSTable& T,
                 node->terminal = 1;
                 node->chance = 0;
 
-                if (!backprop(node, 1.0f, tr)) { T.abort.store(true, std::memory_order_release); return false; }
+                backprop(node, 1.0f, tr);
                 publishTerminalWithMove(T, node, pos.key, ml.n ? ml.m[0] : 0);
                 claim.release();
                 if (diag) diag->depth = decisionDepth + 1;
@@ -5202,7 +5188,7 @@ static bool runOneSim(MCTSTable& T,
 
         // Expanded
         if (node->terminal) {
-            if (!backprop(node, 1.0f, tr)) { T.abort.store(true, std::memory_order_release); return false; }
+            backprop(node, 1.0f, tr);
             if (diag) diag->depth = decisionDepth + 1;
             return true;
         }
@@ -5216,7 +5202,7 @@ static bool runOneSim(MCTSTable& T,
             }
             else {
                 float vLeaf = nodeQ(*node);
-                if (!backprop(node, vLeaf, tr)) { T.abort.store(true, std::memory_order_release); return false; }
+                backprop(node, vLeaf, tr);
                 if (diag) diag->depth = decisionDepth;
                 return true;
             }
@@ -7418,7 +7404,7 @@ static bool ensureExpandedTrain(MCTSTable& T,
         root->chance = 0;
 
         Trace empty; empty.reset();
-        if (!backprop(root, 1.0f, empty)) { T.abort.store(true, std::memory_order_release); return false; }
+        backprop(root, 1.0f, empty);
         publishTerminalWithMove(T, root, rootPos.key, ml.n ? ml.m[0] : 0);
         rootClaim.release();
         return true;
