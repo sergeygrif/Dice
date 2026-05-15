@@ -285,7 +285,7 @@ struct MoveList {
 struct moveState {
     int   move;
     float eval;
-    uint32_t visits;
+    int   visits;
     float prior;
 };
 
@@ -334,14 +334,9 @@ struct TTEdge {
         return valueSum.load(std::memory_order_relaxed);
     }
 
-    AI_FORCEINLINE bool addVisitAndValue(float v) {
-        const uint32_t old = visits.fetch_add(1, std::memory_order_release);
-        if (AI_UNLIKELY(old == UINT32_MAX)) {
-            visits.store(UINT32_MAX, std::memory_order_relaxed);
-            return false;
-        }
+    AI_FORCEINLINE void addVisitAndValue(float v) {
         atomicAddDouble(valueSum, (double)v);
-        return true;
+        visits.fetch_add(1, std::memory_order_release);
     }
 };
 
@@ -365,14 +360,9 @@ struct TTNode {
     AI_FORCEINLINE double sum() const {
         return valueSum.load(std::memory_order_relaxed);
     }
-    AI_FORCEINLINE bool addVisitAndValue(float v) {
-        const uint32_t old = visits.fetch_add(1, std::memory_order_release);
-        if (AI_UNLIKELY(old == UINT32_MAX)) {
-            visits.store(UINT32_MAX, std::memory_order_relaxed);
-            return false;
-        }
+    AI_FORCEINLINE void addVisitAndValue(float v) {
         atomicAddDouble(valueSum, (double)v);
-        return true;
+        visits.fetch_add(1, std::memory_order_release);
     }
     AI_FORCEINLINE void publish(uint64_t k, uint32_t begin, uint8_t count,
         int term, int isChance) {
@@ -4143,25 +4133,15 @@ static AI_FORCEINLINE void fillPendingPolicyIdx(PendingNN& p) {
     }
 }
 
-static AI_FORCEINLINE bool applyVirtualLoss(TraceStep& s) {
-    if (!s.vloss) return true;
+static AI_FORCEINLINE void applyVirtualLoss(TraceStep& s) {
+    if (!s.vloss) return;
 
     if (VLOSS_BUMP_NODE_VISITS && s.node) {
-        const uint32_t nodeVisits = s.node->visits.load(std::memory_order_relaxed);
-        if (AI_UNLIKELY(nodeVisits > (UINT32_MAX - VLOSS_N))) {
-            s.vloss = false;
-            return false;
-        }
         s.node->visits.fetch_add(VLOSS_N, std::memory_order_relaxed);
         // do NOT touch node valueSum (classic approach)
     }
 
     if (s.edge) {
-        const uint32_t edgeVisits = s.edge->visits.load(std::memory_order_relaxed);
-        if (AI_UNLIKELY(edgeVisits > (UINT32_MAX - VLOSS_N))) {
-            s.vloss = false;
-            return false;
-        }
         s.edge->visits.fetch_add(VLOSS_N, std::memory_order_relaxed);
         // “loss” on [0..1] scale => add W as if VLOSS_VALUE returned
         if (VLOSS_VALUE != 0.0f) {
@@ -4169,7 +4149,6 @@ static AI_FORCEINLINE bool applyVirtualLoss(TraceStep& s) {
         }
         // if VLOSS_VALUE=0.0f, valueSum can be left untouched
     }
-    return true;
 }
 
 static AI_FORCEINLINE void rollbackVirtualLoss(Trace& tr) {
@@ -4317,25 +4296,16 @@ static AI_FORCEINLINE void abortPendingNNInferFailure(
     completePendingNNJob(p);
 }
 
-static AI_FORCEINLINE void backprop(MCTSTable& T, TTNode* leaf, float v, Trace& tr) {
+static AI_FORCEINLINE void backprop(TTNode* leaf, float v, Trace& tr) {
     rollbackVirtualLoss(tr);
 
-    if (AI_UNLIKELY(!leaf->addVisitAndValue(v))) {
-        T.abort.store(true, std::memory_order_release);
-        return;
-    }
+    leaf->addVisitAndValue(v);
 
     for (int i = tr.n - 1; i >= 0; --i) {
         TraceStep& s = tr.st[i];
         if (s.flip) v = 1.0f - v;
-        if (s.edge && AI_UNLIKELY(!s.edge->addVisitAndValue(v))) {
-            T.abort.store(true, std::memory_order_release);
-            return;
-        }
-        if (AI_UNLIKELY(!s.node->addVisitAndValue(v))) {
-            T.abort.store(true, std::memory_order_release);
-            return;
-        }
+        if (s.edge) s.edge->addVisitAndValue(v);
+        s.node->addVisitAndValue(v);
     }
 }
 
@@ -4597,7 +4567,7 @@ static void expandLeafWithOutputs(MCTSTable& T,
         p.leaf->terminal = 0;
         p.leaf->chance = 0;
 
-        backprop(T, p.leaf, v, p.trace);
+        backprop(p.leaf, v, p.trace);
         publishReady(p.leaf, p.pos.key, 0, 0, 0, 0);
         return;
     }
@@ -4632,7 +4602,7 @@ static void expandLeafWithOutputs(MCTSTable& T,
         p.leaf->terminal = 0;
         p.leaf->chance = 0;
 
-        backprop(T, p.leaf, v, p.trace);
+        backprop(p.leaf, v, p.trace);
         publishReady(p.leaf, p.pos.key, 0, 0, 0, 0);
         return;
     }
@@ -4653,7 +4623,7 @@ static void expandLeafWithOutputs(MCTSTable& T,
     p.leaf->terminal = 0;
     p.leaf->chance = 0;
 
-    backprop(T, p.leaf, v, p.trace);
+    backprop(p.leaf, v, p.trace);
     publishReady(p.leaf, p.pos.key, begin, (uint8_t)cntU, 0, 0);
 }
 
@@ -4675,7 +4645,7 @@ static void expandLeafWithGatheredLogits(MCTSTable& T,
         p.leaf->terminal = 0;
         p.leaf->chance = 0;
 
-        backprop(T, p.leaf, v, p.trace);
+        backprop(p.leaf, v, p.trace);
         publishReady(p.leaf, p.pos.key, 0, 0, 0, 0);
         return;
     }
@@ -4710,7 +4680,7 @@ static void expandLeafWithGatheredLogits(MCTSTable& T,
         p.leaf->terminal = 0;
         p.leaf->chance = 0;
 
-        backprop(T, p.leaf, v, p.trace);
+        backprop(p.leaf, v, p.trace);
         publishReady(p.leaf, p.pos.key, 0, 0, 0, 0);
         return;
     }
@@ -4731,7 +4701,7 @@ static void expandLeafWithGatheredLogits(MCTSTable& T,
     p.leaf->terminal = 0;
     p.leaf->chance = 0;
 
-    backprop(T, p.leaf, v, p.trace);
+    backprop(p.leaf, v, p.trace);
     publishReady(p.leaf, p.pos.key, begin, (uint8_t)cntU, 0, 0);
 }
 
@@ -5043,7 +5013,7 @@ static void ensureRootExpanded(MCTSTable& T,
         root->chance = 0;
 
         Trace empty; empty.reset();
-        backprop(T, root, 1.0f, empty);
+        backprop(root, 1.0f, empty);
         publishTerminalWithMove(T, root, rootPos.key, ml.n ? ml.m[0] : 0);
         rootClaim.release();
         return;
@@ -5185,7 +5155,7 @@ static bool runOneSim(MCTSTable& T,
                 node->terminal = 1;
                 node->chance = 0;
 
-                backprop(T, node, 1.0f, tr);
+                backprop(node, 1.0f, tr);
                 publishTerminalWithMove(T, node, pos.key, ml.n ? ml.m[0] : 0);
                 claim.release();
                 if (diag) diag->depth = decisionDepth + 1;
@@ -5218,7 +5188,7 @@ static bool runOneSim(MCTSTable& T,
 
         // Expanded
         if (node->terminal) {
-            backprop(T, node, 1.0f, tr);
+            backprop(node, 1.0f, tr);
             if (diag) diag->depth = decisionDepth + 1;
             return true;
         }
@@ -5232,7 +5202,7 @@ static bool runOneSim(MCTSTable& T,
             }
             else {
                 float vLeaf = nodeQ(*node);
-                backprop(T, node, vLeaf, tr);
+                backprop(node, vLeaf, tr);
                 if (diag) diag->depth = decisionDepth;
                 return true;
             }
@@ -5249,11 +5219,7 @@ static bool runOneSim(MCTSTable& T,
 
         // Classic virtual loss (mark the selected edge as "in flight")
         TraceStep& step = tr.push(node, e, /*flip=*/false, /*vloss=*/true);
-        if (AI_UNLIKELY(!applyVirtualLoss(step))) {
-            T.abort.store(true, std::memory_order_relaxed);
-            rollbackVirtualLoss(tr);
-            return false;
-        }
+        applyVirtualLoss(step);
 
         makeMove(pos, mask, e->move);
         ++decisionDepth;
@@ -5349,8 +5315,8 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         return;
     }
 
-    const size_t nodePow2 = 1ull << 26;
-    const size_t edgeCap = 1ull << 29;
+    const size_t nodePow2 = 1ull << 25;
+    const size_t edgeCap = 1ull << 28;
 
     MCTSTable T(nodePow2, edgeCap);
 
@@ -5499,7 +5465,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
                 float p = e.prior();
                 float ev = -1.0f;
                 if (v) ev = clamp01(e.sum() / (float)v);
-                rootMovesNow.push_back(moveState{ e.move, ev, v, p });
+                rootMovesNow.push_back(moveState{ e.move, ev, (int)v, p });
             }
             std::sort(rootMovesNow.begin(), rootMovesNow.end(),
                 [](const moveState& a, const moveState& b) {
@@ -5590,7 +5556,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             float ev = -1.0f;
             if (v) ev = clamp01(e.sum() / (float)v);
 
-            outRootMoves.push_back(moveState{ e.move, ev, v, p });
+            outRootMoves.push_back(moveState{ e.move, ev, (int)v, p });
         }
 
         std::sort(outRootMoves.begin(), outRootMoves.end(),
@@ -7438,7 +7404,7 @@ static bool ensureExpandedTrain(MCTSTable& T,
         root->chance = 0;
 
         Trace empty; empty.reset();
-        backprop(T, root, 1.0f, empty);
+        backprop(root, 1.0f, empty);
         publishTerminalWithMove(T, root, rootPos.key, ml.n ? ml.m[0] : 0);
         rootClaim.release();
         return true;
@@ -7539,7 +7505,7 @@ static void collectRootMoves(MCTSTable& T,
         float ev = -1.0f;
         if (v) ev = clamp01((float)(e.sum() / (double)v));
 
-        outMoves.push_back(moveState{ e.move, ev, v, e.prior() });
+        outMoves.push_back(moveState{ e.move, ev, (int)v, e.prior() });
     }
 
     std::sort(outMoves.begin(), outMoves.end(),
@@ -7558,7 +7524,7 @@ static int pickMoveFromVisits(const std::vector<moveState>& mv, float temperatur
 
     double sum = 0.0;
     for (size_t i = 0; i < mv.size(); ++i) {
-        const double v = (double)mv[i].visits;
+        const double v = (double)std::max(0, mv[i].visits);
         sum += std::pow(v + 1e-9, invTemp);
     }
 
@@ -7569,7 +7535,7 @@ static int pickMoveFromVisits(const std::vector<moveState>& mv, float temperatur
 
     double acc = 0.0;
     for (size_t i = 0; i < mv.size(); ++i) {
-        const double v = (double)mv[i].visits;
+        const double v = (double)std::max(0, mv[i].visits);
         acc += std::pow(v + 1e-9, invTemp);
         if (r <= acc) return mv[i].move;
     }
@@ -7593,7 +7559,7 @@ static void buildSparsePolicyTargetCHW(const Position& pos,
 
     double sum = 0.0;
     for (int i = 0; i < n; ++i) {
-        sum += (double)mv[(size_t)i].visits;
+        sum += (double)std::max(0, mv[(size_t)i].visits);
     }
 
     outN = (uint16_t)n;
@@ -7611,7 +7577,7 @@ static void buildSparsePolicyTargetCHW(const Position& pos,
     const float inv = (float)(1.0 / sum);
     for (int i = 0; i < n; ++i) {
         int k = policyIndexCHWCanonical(mv[(size_t)i].move, pos);
-        float p = (float)mv[(size_t)i].visits * inv;
+        float p = (float)std::max(0, mv[(size_t)i].visits) * inv;
 
         outIdx[(size_t)i] = (uint16_t)k;
         outProbQ[(size_t)i] = quantizeProbU16(p);
