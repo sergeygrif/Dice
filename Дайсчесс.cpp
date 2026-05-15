@@ -5334,8 +5334,8 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         return;
     }
 
-    const size_t nodePow2 = 1ull << 25;
-    const size_t edgeCap = 1ull << 28;
+    const size_t nodePow2 = 1ull << 26;
+    const size_t edgeCap = 1ull << 29;
 
     MCTSTable T(nodePow2, edgeCap);
 
