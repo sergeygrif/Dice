@@ -4143,15 +4143,25 @@ static AI_FORCEINLINE void fillPendingPolicyIdx(PendingNN& p) {
     }
 }
 
-static AI_FORCEINLINE void applyVirtualLoss(TraceStep& s) {
-    if (!s.vloss) return;
+static AI_FORCEINLINE bool applyVirtualLoss(TraceStep& s) {
+    if (!s.vloss) return true;
 
     if (VLOSS_BUMP_NODE_VISITS && s.node) {
+        const uint32_t nodeVisits = s.node->visits.load(std::memory_order_relaxed);
+        if (AI_UNLIKELY(nodeVisits > (UINT32_MAX - VLOSS_N))) {
+            s.vloss = false;
+            return false;
+        }
         s.node->visits.fetch_add(VLOSS_N, std::memory_order_relaxed);
         // do NOT touch node valueSum (classic approach)
     }
 
     if (s.edge) {
+        const uint32_t edgeVisits = s.edge->visits.load(std::memory_order_relaxed);
+        if (AI_UNLIKELY(edgeVisits > (UINT32_MAX - VLOSS_N))) {
+            s.vloss = false;
+            return false;
+        }
         s.edge->visits.fetch_add(VLOSS_N, std::memory_order_relaxed);
         // “loss” on [0..1] scale => add W as if VLOSS_VALUE returned
         if (VLOSS_VALUE != 0.0f) {
@@ -4159,6 +4169,7 @@ static AI_FORCEINLINE void applyVirtualLoss(TraceStep& s) {
         }
         // if VLOSS_VALUE=0.0f, valueSum can be left untouched
     }
+    return true;
 }
 
 static AI_FORCEINLINE void rollbackVirtualLoss(Trace& tr) {
@@ -5238,7 +5249,11 @@ static bool runOneSim(MCTSTable& T,
 
         // Classic virtual loss (mark the selected edge as "in flight")
         TraceStep& step = tr.push(node, e, /*flip=*/false, /*vloss=*/true);
-        applyVirtualLoss(step);
+        if (AI_UNLIKELY(!applyVirtualLoss(step))) {
+            T.abort.store(true, std::memory_order_relaxed);
+            rollbackVirtualLoss(tr);
+            return false;
+        }
 
         makeMove(pos, mask, e->move);
         ++decisionDepth;
