@@ -285,7 +285,7 @@ struct MoveList {
 struct moveState {
     int   move;
     float eval;
-    int   visits;
+    uint32_t visits;
     float prior;
 };
 
@@ -5484,7 +5484,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
                 float p = e.prior();
                 float ev = -1.0f;
                 if (v) ev = clamp01(e.sum() / (float)v);
-                rootMovesNow.push_back(moveState{ e.move, ev, (int)v, p });
+                rootMovesNow.push_back(moveState{ e.move, ev, v, p });
             }
             std::sort(rootMovesNow.begin(), rootMovesNow.end(),
                 [](const moveState& a, const moveState& b) {
@@ -5575,7 +5575,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             float ev = -1.0f;
             if (v) ev = clamp01(e.sum() / (float)v);
 
-            outRootMoves.push_back(moveState{ e.move, ev, (int)v, p });
+            outRootMoves.push_back(moveState{ e.move, ev, v, p });
         }
 
         std::sort(outRootMoves.begin(), outRootMoves.end(),
@@ -7524,7 +7524,7 @@ static void collectRootMoves(MCTSTable& T,
         float ev = -1.0f;
         if (v) ev = clamp01((float)(e.sum() / (double)v));
 
-        outMoves.push_back(moveState{ e.move, ev, (int)v, e.prior() });
+        outMoves.push_back(moveState{ e.move, ev, v, e.prior() });
     }
 
     std::sort(outMoves.begin(), outMoves.end(),
@@ -7543,7 +7543,7 @@ static int pickMoveFromVisits(const std::vector<moveState>& mv, float temperatur
 
     double sum = 0.0;
     for (size_t i = 0; i < mv.size(); ++i) {
-        const double v = (double)std::max(0, mv[i].visits);
+        const double v = (double)mv[i].visits;
         sum += std::pow(v + 1e-9, invTemp);
     }
 
@@ -7554,7 +7554,7 @@ static int pickMoveFromVisits(const std::vector<moveState>& mv, float temperatur
 
     double acc = 0.0;
     for (size_t i = 0; i < mv.size(); ++i) {
-        const double v = (double)std::max(0, mv[i].visits);
+        const double v = (double)mv[i].visits;
         acc += std::pow(v + 1e-9, invTemp);
         if (r <= acc) return mv[i].move;
     }
@@ -7578,7 +7578,7 @@ static void buildSparsePolicyTargetCHW(const Position& pos,
 
     double sum = 0.0;
     for (int i = 0; i < n; ++i) {
-        sum += (double)std::max(0, mv[(size_t)i].visits);
+        sum += (double)mv[(size_t)i].visits;
     }
 
     outN = (uint16_t)n;
@@ -7596,7 +7596,7 @@ static void buildSparsePolicyTargetCHW(const Position& pos,
     const float inv = (float)(1.0 / sum);
     for (int i = 0; i < n; ++i) {
         int k = policyIndexCHWCanonical(mv[(size_t)i].move, pos);
-        float p = (float)std::max(0, mv[(size_t)i].visits) * inv;
+        float p = (float)mv[(size_t)i].visits * inv;
 
         outIdx[(size_t)i] = (uint16_t)k;
         outProbQ[(size_t)i] = quantizeProbU16(p);
