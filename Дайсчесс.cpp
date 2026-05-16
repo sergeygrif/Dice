@@ -4133,8 +4133,46 @@ static AI_FORCEINLINE void fillPendingPolicyIdx(PendingNN& p) {
     }
 }
 
-static AI_FORCEINLINE void applyVirtualLoss(TraceStep& s) {
-    if (!s.vloss) return;
+static AI_FORCEINLINE bool tryAddVisitsNoOverflow(std::atomic<uint32_t>& visits, uint32_t delta) {
+    uint32_t old = visits.load(std::memory_order_relaxed);
+    for (;;) {
+        if (AI_UNLIKELY(old > (std::numeric_limits<uint32_t>::max() - delta))) {
+            return false;
+        }
+        if (visits.compare_exchange_weak(old, old + delta,
+            std::memory_order_release,
+            std::memory_order_relaxed)) {
+            return true;
+        }
+    }
+}
+
+static AI_FORCEINLINE bool tryAddVisitAndValueNoOverflow(TTNode* node, float v) {
+    if (!node) return true;
+    if (!tryAddVisitsNoOverflow(node->visits, 1)) return false;
+    atomicAddDouble(node->valueSum, (double)v);
+    return true;
+}
+
+static AI_FORCEINLINE bool tryAddVisitAndValueNoOverflow(TTEdge* edge, float v) {
+    if (!edge) return true;
+    if (!tryAddVisitsNoOverflow(edge->visits, 1)) return false;
+    atomicAddDouble(edge->valueSum, (double)v);
+    return true;
+}
+
+static AI_FORCEINLINE bool applyVirtualLoss(TraceStep& s) {
+    if (!s.vloss) return true;
+
+    if (VLOSS_BUMP_NODE_VISITS && s.node) {
+        const uint32_t nv = s.node->visits.load(std::memory_order_relaxed);
+        if (AI_UNLIKELY(nv > (std::numeric_limits<uint32_t>::max() - VLOSS_N))) return false;
+    }
+
+    if (s.edge) {
+        const uint32_t ev = s.edge->visits.load(std::memory_order_relaxed);
+        if (AI_UNLIKELY(ev > (std::numeric_limits<uint32_t>::max() - VLOSS_N))) return false;
+    }
 
     if (VLOSS_BUMP_NODE_VISITS && s.node) {
         s.node->visits.fetch_add(VLOSS_N, std::memory_order_relaxed);
@@ -4149,6 +4187,8 @@ static AI_FORCEINLINE void applyVirtualLoss(TraceStep& s) {
         }
         // if VLOSS_VALUE=0.0f, valueSum can be left untouched
     }
+
+    return true;
 }
 
 static AI_FORCEINLINE void rollbackVirtualLoss(Trace& tr) {
@@ -4296,16 +4336,22 @@ static AI_FORCEINLINE void abortPendingNNInferFailure(
     completePendingNNJob(p);
 }
 
-static AI_FORCEINLINE void backprop(TTNode* leaf, float v, Trace& tr) {
+static AI_FORCEINLINE void backprop(TTNode* leaf, float v, Trace& tr, MCTSTable* ownerT = nullptr) {
     rollbackVirtualLoss(tr);
 
-    leaf->addVisitAndValue(v);
+    if (AI_UNLIKELY(!tryAddVisitAndValueNoOverflow(leaf, v))) {
+        if (ownerT) ownerT->abort.store(true, std::memory_order_release);
+    }
 
     for (int i = tr.n - 1; i >= 0; --i) {
         TraceStep& s = tr.st[i];
         if (s.flip) v = 1.0f - v;
-        if (s.edge) s.edge->addVisitAndValue(v);
-        s.node->addVisitAndValue(v);
+        if (s.edge && AI_UNLIKELY(!tryAddVisitAndValueNoOverflow(s.edge, v))) {
+            if (ownerT) ownerT->abort.store(true, std::memory_order_release);
+        }
+        if (AI_UNLIKELY(!tryAddVisitAndValueNoOverflow(s.node, v))) {
+            if (ownerT) ownerT->abort.store(true, std::memory_order_release);
+        }
     }
 }
 
@@ -4567,7 +4613,7 @@ static void expandLeafWithOutputs(MCTSTable& T,
         p.leaf->terminal = 0;
         p.leaf->chance = 0;
 
-        backprop(p.leaf, v, p.trace);
+        backprop(p.leaf, v, p.trace, &T);
         publishReady(p.leaf, p.pos.key, 0, 0, 0, 0);
         return;
     }
@@ -4602,7 +4648,7 @@ static void expandLeafWithOutputs(MCTSTable& T,
         p.leaf->terminal = 0;
         p.leaf->chance = 0;
 
-        backprop(p.leaf, v, p.trace);
+        backprop(p.leaf, v, p.trace, &T);
         publishReady(p.leaf, p.pos.key, 0, 0, 0, 0);
         return;
     }
@@ -4623,7 +4669,7 @@ static void expandLeafWithOutputs(MCTSTable& T,
     p.leaf->terminal = 0;
     p.leaf->chance = 0;
 
-    backprop(p.leaf, v, p.trace);
+    backprop(p.leaf, v, p.trace, &T);
     publishReady(p.leaf, p.pos.key, begin, (uint8_t)cntU, 0, 0);
 }
 
@@ -4645,7 +4691,7 @@ static void expandLeafWithGatheredLogits(MCTSTable& T,
         p.leaf->terminal = 0;
         p.leaf->chance = 0;
 
-        backprop(p.leaf, v, p.trace);
+        backprop(p.leaf, v, p.trace, &T);
         publishReady(p.leaf, p.pos.key, 0, 0, 0, 0);
         return;
     }
@@ -4680,7 +4726,7 @@ static void expandLeafWithGatheredLogits(MCTSTable& T,
         p.leaf->terminal = 0;
         p.leaf->chance = 0;
 
-        backprop(p.leaf, v, p.trace);
+        backprop(p.leaf, v, p.trace, &T);
         publishReady(p.leaf, p.pos.key, 0, 0, 0, 0);
         return;
     }
@@ -4701,7 +4747,7 @@ static void expandLeafWithGatheredLogits(MCTSTable& T,
     p.leaf->terminal = 0;
     p.leaf->chance = 0;
 
-    backprop(p.leaf, v, p.trace);
+    backprop(p.leaf, v, p.trace, &T);
     publishReady(p.leaf, p.pos.key, begin, (uint8_t)cntU, 0, 0);
 }
 
@@ -5155,7 +5201,7 @@ static bool runOneSim(MCTSTable& T,
                 node->terminal = 1;
                 node->chance = 0;
 
-                backprop(node, 1.0f, tr);
+                backprop(node, 1.0f, tr, &T);
                 publishTerminalWithMove(T, node, pos.key, ml.n ? ml.m[0] : 0);
                 claim.release();
                 if (diag) diag->depth = decisionDepth + 1;
@@ -5188,7 +5234,7 @@ static bool runOneSim(MCTSTable& T,
 
         // Expanded
         if (node->terminal) {
-            backprop(node, 1.0f, tr);
+            backprop(node, 1.0f, tr, &T);
             if (diag) diag->depth = decisionDepth + 1;
             return true;
         }
@@ -5202,7 +5248,7 @@ static bool runOneSim(MCTSTable& T,
             }
             else {
                 float vLeaf = nodeQ(*node);
-                backprop(node, vLeaf, tr);
+                backprop(node, vLeaf, tr, &T);
                 if (diag) diag->depth = decisionDepth;
                 return true;
             }
@@ -5219,7 +5265,11 @@ static bool runOneSim(MCTSTable& T,
 
         // Classic virtual loss (mark the selected edge as "in flight")
         TraceStep& step = tr.push(node, e, /*flip=*/false, /*vloss=*/true);
-        applyVirtualLoss(step);
+        if (AI_UNLIKELY(!applyVirtualLoss(step))) {
+            step.vloss = false;
+            T.abort.store(true, std::memory_order_release);
+            return false;
+        }
 
         makeMove(pos, mask, e->move);
         ++decisionDepth;
