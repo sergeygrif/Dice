@@ -4317,17 +4317,18 @@ static AI_FORCEINLINE void abortPendingNNInferFailure(
 }
 
 static AI_FORCEINLINE bool backprop(TTNode* leaf, float v, Trace& tr) {
+    bool r=true;
     rollbackVirtualLoss(tr);
 
-    if (!leaf->addVisitAndValue(v)) return false;
+    if (!leaf->addVisitAndValue(v))r=false;
 
     for (int i = tr.n - 1; i >= 0; --i) {
         TraceStep& s = tr.st[i];
         if (s.flip) v = 1.0f - v;
-        if (s.edge && !s.edge->addVisitAndValue(v)) return false;
-        if (!s.node->addVisitAndValue(v)) return false;
+        if (s.edge && !s.edge->addVisitAndValue(v))r=false;
+        if (!s.node->addVisitAndValue(v))r=false;
     }
-    return true;
+    return r;
 }
 
 static constexpr float ROOT_DIR_EPS = 0.25f;
