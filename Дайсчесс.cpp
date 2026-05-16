@@ -4150,7 +4150,10 @@ static AI_FORCEINLINE bool applyVirtualLoss(TraceStep& s) {
     if (!s.vloss) return true;
     bool nodeApplied = false;
     if (VLOSS_BUMP_NODE_VISITS && s.node) {
-        if (!atomicTryAddVisits(s.node->visits, VLOSS_N)) return false;
+        if (!atomicTryAddVisits(s.node->visits, VLOSS_N)){
+            s.vloss=false;
+            return false;
+        }
         nodeApplied = true;
         // do NOT touch node valueSum (classic approach)
     }
@@ -4160,6 +4163,7 @@ static AI_FORCEINLINE bool applyVirtualLoss(TraceStep& s) {
             if (nodeApplied) {
                 s.node->visits.fetch_sub(VLOSS_N, std::memory_order_relaxed);
             }
+            s.vloss=false;
             return false;
         }
         // “loss” on [0..1] scale => add W as if VLOSS_VALUE returned
