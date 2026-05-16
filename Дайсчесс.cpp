@@ -306,17 +306,6 @@ static AI_FORCEINLINE void atomicAddDouble(std::atomic<double>& a, double add) {
         // old updated on failure
     }
 }
-static AI_FORCEINLINE bool atomicTryAddVisits(std::atomic<uint32_t>& a, uint32_t add) {
-    uint32_t old = a.load(std::memory_order_relaxed);
-    for (;;) {
-        if (old > (std::numeric_limits<uint32_t>::max() - add)) return false;
-        if (a.compare_exchange_weak(old, old + add,
-            std::memory_order_release,
-            std::memory_order_relaxed)) {
-            return true;
-        }
-    }
-}
 struct TTEdge {
     std::atomic<double> valueSum{ 0.0 };
     std::atomic<uint32_t> visits{ 0 };
@@ -345,10 +334,9 @@ struct TTEdge {
         return valueSum.load(std::memory_order_relaxed);
     }
 
-    AI_FORCEINLINE bool addVisitAndValue(float v) {
-        if (!atomicTryAddVisits(visits, 1)) return false;
+    AI_FORCEINLINE void addVisitAndValue(float v) {
         atomicAddDouble(valueSum, (double)v);
-        return true;
+        visits.fetch_add(1, std::memory_order_release);
     }
 };
 
@@ -372,10 +360,9 @@ struct TTNode {
     AI_FORCEINLINE double sum() const {
         return valueSum.load(std::memory_order_relaxed);
     }
-    AI_FORCEINLINE bool addVisitAndValue(float v) {
-        if (!atomicTryAddVisits(visits, 1)) return false;
+    AI_FORCEINLINE void addVisitAndValue(float v) {
         atomicAddDouble(valueSum, (double)v);
-        return true;
+        visits.fetch_add(1, std::memory_order_release);
     }
     AI_FORCEINLINE void publish(uint64_t k, uint32_t begin, uint8_t count,
         int term, int isChance) {
@@ -4146,33 +4133,22 @@ static AI_FORCEINLINE void fillPendingPolicyIdx(PendingNN& p) {
     }
 }
 
-static AI_FORCEINLINE bool applyVirtualLoss(TraceStep& s) {
-    if (!s.vloss) return true;
-    bool nodeApplied = false;
+static AI_FORCEINLINE void applyVirtualLoss(TraceStep& s) {
+    if (!s.vloss) return;
+
     if (VLOSS_BUMP_NODE_VISITS && s.node) {
-        if (!atomicTryAddVisits(s.node->visits, VLOSS_N)){
-            s.vloss=false;
-            return false;
-        }
-        nodeApplied = true;
+        s.node->visits.fetch_add(VLOSS_N, std::memory_order_relaxed);
         // do NOT touch node valueSum (classic approach)
     }
 
     if (s.edge) {
-        if (!atomicTryAddVisits(s.edge->visits, VLOSS_N)) {
-            if (nodeApplied) {
-                s.node->visits.fetch_sub(VLOSS_N, std::memory_order_relaxed);
-            }
-            s.vloss=false;
-            return false;
-        }
+        s.edge->visits.fetch_add(VLOSS_N, std::memory_order_relaxed);
         // “loss” on [0..1] scale => add W as if VLOSS_VALUE returned
         if (VLOSS_VALUE != 0.0f) {
             atomicAddDouble(s.edge->valueSum, (double)VLOSS_VALUE * (double)VLOSS_N);
         }
         // if VLOSS_VALUE=0.0f, valueSum can be left untouched
     }
-    return true;
 }
 
 static AI_FORCEINLINE void rollbackVirtualLoss(Trace& tr) {
@@ -4320,19 +4296,17 @@ static AI_FORCEINLINE void abortPendingNNInferFailure(
     completePendingNNJob(p);
 }
 
-static AI_FORCEINLINE bool backprop(TTNode* leaf, float v, Trace& tr) {
-    bool r=true;
+static AI_FORCEINLINE void backprop(TTNode* leaf, float v, Trace& tr) {
     rollbackVirtualLoss(tr);
 
-    if (!leaf->addVisitAndValue(v))r=false;
+    leaf->addVisitAndValue(v);
 
     for (int i = tr.n - 1; i >= 0; --i) {
         TraceStep& s = tr.st[i];
         if (s.flip) v = 1.0f - v;
-        if (s.edge && !s.edge->addVisitAndValue(v))r=false;
-        if (!s.node->addVisitAndValue(v))r=false;
+        if (s.edge) s.edge->addVisitAndValue(v);
+        s.node->addVisitAndValue(v);
     }
-    return r;
 }
 
 static constexpr float ROOT_DIR_EPS = 0.25f;
@@ -5181,10 +5155,7 @@ static bool runOneSim(MCTSTable& T,
                 node->terminal = 1;
                 node->chance = 0;
 
-                if (!backprop(node, 1.0f, tr)) {
-                    T.abort.store(true, std::memory_order_release);
-                    return false;
-                }
+                backprop(node, 1.0f, tr);
                 publishTerminalWithMove(T, node, pos.key, ml.n ? ml.m[0] : 0);
                 claim.release();
                 if (diag) diag->depth = decisionDepth + 1;
@@ -5217,10 +5188,7 @@ static bool runOneSim(MCTSTable& T,
 
         // Expanded
         if (node->terminal) {
-            if (!backprop(node, 1.0f, tr)) {
-                T.abort.store(true, std::memory_order_release);
-                return false;
-            }
+            backprop(node, 1.0f, tr);
             if (diag) diag->depth = decisionDepth + 1;
             return true;
         }
@@ -5234,10 +5202,7 @@ static bool runOneSim(MCTSTable& T,
             }
             else {
                 float vLeaf = nodeQ(*node);
-                if (!backprop(node, vLeaf, tr)) {
-                    T.abort.store(true, std::memory_order_release);
-                    return false;
-                }
+                backprop(node, vLeaf, tr);
                 if (diag) diag->depth = decisionDepth;
                 return true;
             }
@@ -5254,11 +5219,7 @@ static bool runOneSim(MCTSTable& T,
 
         // Classic virtual loss (mark the selected edge as "in flight")
         TraceStep& step = tr.push(node, e, /*flip=*/false, /*vloss=*/true);
-        if (!applyVirtualLoss(step)) {
-            T.abort.store(true, std::memory_order_release);
-            rollbackVirtualLoss(tr);
-            return false;
-        }
+        applyVirtualLoss(step);
 
         makeMove(pos, mask, e->move);
         ++decisionDepth;
