@@ -10582,7 +10582,7 @@ s=S(407,1510,550,1865);
 if(s[928+1104*430]==-15189205)s={};
 return s;
 }
-int FLIP(vector<int>& s){return s.size()&&s[10+1104*1202]==-665935;}
+int FLIP(vector<int>& s){return s.size()&&s[8+1104*1200]==-665935;}
 int SIDE(vector<int>& s){return s.size()&&s[1038+1104*40]==-16443635!=FLIP(s);}
 vector<int> BOARD(vector<int>& s){
 int sq,SQ,x,y,p;
