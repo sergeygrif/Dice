@@ -10807,7 +10807,7 @@ POS.castle&=12-9*side;
 POS.dice=newDice[POS.dice][5];
 POS.dice=newDice[POS.dice][3];
 }
-else if(way.size()==3)POS.dice=newDice[POS.dice][0];else{
+else if(way.size()==3)POS.dice=newDice[POS.dice][0];else if(way.size()==2){
 from=way[0];
 to=way[1];
 piece=b1[from]%6;
