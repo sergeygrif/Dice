@@ -5396,7 +5396,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
     InferenceServerStopGuard nnServerGuard(nnServer);
 
     const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-    const unsigned threads = std::max(1u, hw / 2);
+    const unsigned threads = 1;
 
     const auto t0 = std::chrono::steady_clock::now();
     const auto tEnd = t0 + std::chrono::duration<double>(timeSec);
