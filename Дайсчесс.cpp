@@ -287,6 +287,7 @@ struct moveState {
     float eval;
     uint32_t visits;
     float prior;
+    uint64_t key = 0;
 };
 
 
@@ -5333,6 +5334,30 @@ static void extractBestPVUntilChance(MCTSTable& T,
         makeMove(pos, mask, m);
     }
 }
+
+static uint64_t extractPVFinalKeyAfterRootMove(MCTSTable& T,
+    const Position& rootPos,
+    const std::array<int, 64>& mask,
+    int rootMove,
+    int maxDepth = 256) {
+    Position pos = rootPos;
+    makeMove(pos, mask, rootMove);
+
+    for (int depth = 1; depth < maxDepth; ++depth) {
+        TTNode* n = T.findNodeNoInsert(pos.key);
+        if (!n) break;
+
+        uint8_t ex = n->expanded.load(std::memory_order_acquire);
+        if (ex != 1) break;
+        if (n->terminal || n->chance || n->edgeCount == 0) break;
+
+        TTEdge* e0 = T.edgePtr(n->edgeBegin);
+        int bi = selectBestPVEdge(*n, e0);
+        makeMove(pos, mask, e0[bi].move);
+    }
+
+    return pos.key;
+}
 Position POS;
 array<uint64_t,4> PATH;
 array<int,64> MASK;
@@ -5515,7 +5540,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
                 float p = e.prior();
                 float ev = -1.0f;
                 if (v) ev = clamp01(e.sum() / (float)v);
-                rootMovesNow.push_back(moveState{ e.move, ev, v, p });
+                rootMovesNow.push_back(moveState{ e.move, ev, v, p, 0 });
             }
             std::sort(rootMovesNow.begin(), rootMovesNow.end(),
                 [](const moveState& a, const moveState& b) {
@@ -5532,24 +5557,33 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         std::vector<int> pvNow;
         extractBestPVUntilChance(T, rootPos, mask, pvNow, 256);
 
+        for (auto& ms : rootMovesNow) {
+            ms.key = extractPVFinalKeyAfterRootMove(T, rootPos, mask, ms.move, 256);
+        }
+
         auto formatDif = [&](const std::vector<moveState>& moves, const std::vector<int>& pvLine, int sideToMove) {
             if (moves.size() < 2 || pvLine.empty()) return std::string("dif=0");
             const int bestMove = pvLine[0];
             bool foundBest = false;
             float bestEvalSide = 0.0f;
-            float maxOtherSide = -1.0f;
+            uint64_t bestKey = 0;
             auto toSideEval = [&](float evalWhite) {
                 return (sideToMove == 0) ? evalWhite : (1.0f - evalWhite);
             };
             for (const auto& ms : moves) {
                 if (ms.eval < 0.0f) continue;
-                const float se = toSideEval(ms.eval);
                 if (ms.move == bestMove && !foundBest) {
                     foundBest = true;
-                    bestEvalSide = se;
-                } else {
-                    if (se > maxOtherSide) maxOtherSide = se;
+                    bestEvalSide = toSideEval(ms.eval);
+                    bestKey = ms.key;
                 }
+            }
+            float maxOtherSide = -1.0f;
+            for (const auto& ms : moves) {
+                if (ms.eval < 0.0f) continue;
+                if (ms.key == bestKey) continue;
+                const float se = toSideEval(ms.eval);
+                if (se > maxOtherSide) maxOtherSide = se;
             }
             if (!foundBest || maxOtherSide < 0.0f) return std::string("dif=0");
             const double dif = 100.0 * (double(bestEvalSide) - double(maxOtherSide));
@@ -5635,7 +5669,10 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             float ev = -1.0f;
             if (v) ev = clamp01(e.sum() / (float)v);
 
-            outRootMoves.push_back(moveState{ e.move, ev, v, p });
+            outRootMoves.push_back(moveState{ e.move, ev, v, p, 0 });
+        }
+        for (auto& ms : outRootMoves) {
+            ms.key = extractPVFinalKeyAfterRootMove(T, rootPos, mask, ms.move, 256);
         }
 
         std::sort(outRootMoves.begin(), outRootMoves.end(),
@@ -7584,7 +7621,7 @@ static void collectRootMoves(MCTSTable& T,
         float ev = -1.0f;
         if (v) ev = clamp01((float)(e.sum() / (double)v));
 
-        outMoves.push_back(moveState{ e.move, ev, v, e.prior() });
+        outMoves.push_back(moveState{ e.move, ev, v, e.prior(), 0 });
     }
 
     std::sort(outMoves.begin(), outMoves.end(),
@@ -10926,19 +10963,24 @@ searchThread.join();
             const int bestMove = pvLine[0];
             bool foundBest = false;
             float bestEvalSide = 0.0f;
-            float maxOtherSide = -1.0f;
+            uint64_t bestKey = 0;
             auto toSideEval = [&](float evalWhite) {
                 return (sideToMove == 0) ? evalWhite : (1.0f - evalWhite);
             };
             for (const auto& ms : moves) {
                 if (ms.eval < 0.0f) continue;
-                const float se = toSideEval(ms.eval);
                 if (ms.move == bestMove && !foundBest) {
                     foundBest = true;
-                    bestEvalSide = se;
-                } else {
-                    if (se > maxOtherSide) maxOtherSide = se;
+                    bestEvalSide = toSideEval(ms.eval);
+                    bestKey = ms.key;
                 }
+            }
+            float maxOtherSide = -1.0f;
+            for (const auto& ms : moves) {
+                if (ms.eval < 0.0f) continue;
+                if (ms.key == bestKey) continue;
+                const float se = toSideEval(ms.eval);
+                if (se > maxOtherSide) maxOtherSide = se;
             }
             if (!foundBest || maxOtherSide < 0.0f) return std::string("dif=0");
             const double dif = 100.0 * (double(bestEvalSide) - double(maxOtherSide));
