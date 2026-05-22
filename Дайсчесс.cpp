@@ -5585,10 +5585,10 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             if (i) std::cout << ' ';
             std::cout << moveToStr(pvNow[i]);
         }
-        if (!rootMovesNow.empty()) {
+        
             const double dif = computeDifForRootMoves(rootMovesNow);
             std::cout << " dif=" << std::showpos << std::fixed << std::setprecision(2) << dif << std::noshowpos;
-        }
+        
         std::cout << '\n';
         for (const auto& ms : rootMovesNow) {
             int d = (int)std::to_string(ms.visits).size();
@@ -10955,10 +10955,10 @@ searchThread.join();
             if (i) std::cout << ' ';
             std::cout << moveToStr(pvBeforeRoll[i]);
         }
-        if (!rootMoves.empty()) {
+        
             const double dif = computeDifForRootMoves(rootMoves);
             std::cout << " dif=" << std::showpos << std::fixed << std::setprecision(2) << dif << std::noshowpos;
-        }
+        
         std::cout << "\n";
 
 
