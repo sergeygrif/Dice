@@ -5600,6 +5600,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
                 makeMove(p, mask, ms.move);
                 ms.pvKey = terminalAwareKeyAfterPV(T, p, path, mask);
                 extractBestPVUntilChance(T, p, mask, ms.pv, 256);
+                ms.pv.insert(ms.pv.begin(), ms.move);
             }
         }
 
@@ -5703,6 +5704,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             makeMove(p, mask, ms.move);
             ms.pvKey = terminalAwareKeyAfterPV(T, p, path, mask);
             extractBestPVUntilChance(T, p, mask, ms.pv, 256);
+            ms.pv.insert(ms.pv.begin(), ms.move);
         }
     }
 
