@@ -5357,15 +5357,18 @@ static uint64_t terminalAwareKeyAfterPV(MCTSTable& T,
     }
     return pos.key;
 }
-static double computeDifForRootMoves(const std::vector<moveState>& rootMoves) {
+static double computeDifForRootMoves(const std::vector<moveState>& rootMoves, int side) {
     if (rootMoves.empty() || rootMoves[0].pvKey == 0ull) return 100.0;
     const uint64_t bestKey = rootMoves[0].pvKey;
-    const double bestEval = rootMoves[0].eval;
+    auto toSidePerspective = [side](double eval) {
+        return (side == 0) ? eval : (1.0 - eval);
+    };
+    const double bestEval = toSidePerspective(rootMoves[0].eval);
     double altMax = -1e9;
     bool hasAlt = false;
     for (const auto& ms : rootMoves) {
         if (ms.pvKey != bestKey) {
-            altMax = std::max(altMax, (double)ms.eval);
+            altMax = std::max(altMax, toSidePerspective((double)ms.eval));
             hasAlt = true;
         }
     }
@@ -5586,7 +5589,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             std::cout << moveToStr(pvNow[i]);
         }
         
-            const double dif = computeDifForRootMoves(rootMovesNow);
+            const double dif = computeDifForRootMoves(rootMovesNow, rootPos.side);
             cout<<endl<<"dif="<<showpos<<setprecision(2)<<dif<<noshowpos<<setprecision(6);
         
         std::cout << '\n';
@@ -10956,7 +10959,7 @@ searchThread.join();
             std::cout << moveToStr(pvBeforeRoll[i]);
         }
         
-            const double dif = computeDifForRootMoves(rootMoves);
+            const double dif = computeDifForRootMoves(rootMoves, pos.side);
             cout<<endl<<"dif="<<showpos<<setprecision(2)<<dif<<noshowpos<<setprecision(6);
         
         std::cout << "\n";
