@@ -287,6 +287,7 @@ struct moveState {
     float eval;
     uint32_t visits;
     float prior;
+    uint64_t pvKey;
 };
 
 
@@ -5356,7 +5357,7 @@ void mctsBatchedMT(Position& rootPos,
         outEvalWhite = 1 - rootPos.side;
         outAvgDepth = 1.0f;
         outRootMoves.clear();
-        outRootMoves.push_back({ ml.m[0], outEvalWhite, 0 });
+        outRootMoves.push_back({ ml.m[0], outEvalWhite, 0, 0.0f, 0ull });
         outPVBeforeRoll.push_back(ml.m[0]);
         if (write == 1) {
             clearConsoleFull();
@@ -5515,7 +5516,12 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
                 float p = e.prior();
                 float ev = -1.0f;
                 if (v) ev = clamp01(e.sum() / (float)v);
-                rootMovesNow.push_back(moveState{ e.move, ev, v, p });
+                Position pvEnd = rootPos;
+                makeMove(pvEnd, mask, e.move);
+                std::vector<int> tailPv;
+                extractBestPVUntilChance(T, pvEnd, mask, tailPv, 256);
+                for (int pm : tailPv) makeMove(pvEnd, mask, pm);
+                rootMovesNow.push_back(moveState{ e.move, ev, v, p, pvEnd.key });
             }
             std::sort(rootMovesNow.begin(), rootMovesNow.end(),
                 [](const moveState& a, const moveState& b) {
@@ -5532,31 +5538,23 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         std::vector<int> pvNow;
         extractBestPVUntilChance(T, rootPos, mask, pvNow, 256);
 
-        auto formatDif = [&](const std::vector<moveState>& moves, const std::vector<int>& pvLine, int sideToMove) {
-            if (moves.size() < 2 || pvLine.empty()) return std::string("dif=0");
-            const int bestMove = pvLine[0];
-            bool foundBest = false;
-            float bestEvalSide = 0.0f;
-            float maxOtherSide = -1.0f;
-            auto toSideEval = [&](float evalWhite) {
-                return (sideToMove == 0) ? evalWhite : (1.0f - evalWhite);
-            };
-            for (const auto& ms : moves) {
-                if (ms.eval < 0.0f) continue;
-                const float se = toSideEval(ms.eval);
-                if (ms.move == bestMove && !foundBest) {
-                    foundBest = true;
-                    bestEvalSide = se;
-                } else {
-                    if (se > maxOtherSide) maxOtherSide = se;
+        auto formatDif = [&](const std::vector<moveState>& moves, int sideToMove) {
+            if (moves.size() < 2) return std::string("dif=0");
+            auto toSideEval = [&](float evalWhite) { return (sideToMove == 0) ? evalWhite : (1.0f - evalWhite); };
+            bool found = false;
+            double bestDif = 0.0;
+            for (size_t i = 0; i < moves.size(); ++i) {
+                if (moves[i].eval < 0.0f) continue;
+                for (size_t j = i + 1; j < moves.size(); ++j) {
+                    if (moves[j].eval < 0.0f) continue;
+                    if (moves[i].pvKey == moves[j].pvKey) continue;
+                    const double d = std::fabs(double(toSideEval(moves[i].eval)) - double(toSideEval(moves[j].eval)));
+                    if (!found || d > bestDif) { found = true; bestDif = d; }
                 }
             }
-            if (!foundBest || maxOtherSide < 0.0f) return std::string("dif=0");
-            const double dif = 100.0 * (double(bestEvalSide) - double(maxOtherSide));
+            if (!found) return std::string("dif=0");
             std::ostringstream oss;
-            oss << "dif=";
-            if (dif >= 0.0) oss << '+';
-            oss << std::fixed << std::setprecision(2) << dif;
+            oss << "dif=" << std::fixed << std::setprecision(2) << (100.0 * bestDif);
             return oss.str();
         };
 
@@ -5570,7 +5568,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             std::cout << moveToStr(pvNow[i]);
         }
         std::cout << '\n';
-        std::cout << formatDif(rootMovesNow, pvNow, rootPos.side) << '\n';
+        std::cout << formatDif(rootMovesNow, rootPos.side) << '\n';
         for (const auto& ms : rootMovesNow) {
             int d = (int)std::to_string(ms.visits).size();
             int spacesBeforePrior = 1 + (to_string(rootMovesNow[0].visits).size() - d);
@@ -5635,7 +5633,12 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             float ev = -1.0f;
             if (v) ev = clamp01(e.sum() / (float)v);
 
-            outRootMoves.push_back(moveState{ e.move, ev, v, p });
+            Position pvEnd = rootPos;
+            makeMove(pvEnd, mask, e.move);
+            std::vector<int> tailPv;
+            extractBestPVUntilChance(T, pvEnd, mask, tailPv, 256);
+            for (int pm : tailPv) makeMove(pvEnd, mask, pm);
+            outRootMoves.push_back(moveState{ e.move, ev, v, p, pvEnd.key });
         }
 
         std::sort(outRootMoves.begin(), outRootMoves.end(),
@@ -7584,7 +7587,7 @@ static void collectRootMoves(MCTSTable& T,
         float ev = -1.0f;
         if (v) ev = clamp01((float)(e.sum() / (double)v));
 
-        outMoves.push_back(moveState{ e.move, ev, v, e.prior() });
+        outMoves.push_back(moveState{ e.move, ev, v, e.prior(), 0ull });
     }
 
     std::sort(outMoves.begin(), outMoves.end(),
@@ -10921,31 +10924,23 @@ searchThread.join();
         std::vector<int> pvBeforeRoll;
         std::vector<moveState> rootMoves;
         mctsBatchedMT(pos, path, mask, 60.0, mctsEvalWhite, mctsAvgDepth, rootMoves, pvBeforeRoll, 1, 0);
-        auto formatDif = [&](const std::vector<moveState>& moves, const std::vector<int>& pvLine, int sideToMove) {
-            if (moves.size() < 2 || pvLine.empty()) return std::string("dif=0");
-            const int bestMove = pvLine[0];
-            bool foundBest = false;
-            float bestEvalSide = 0.0f;
-            float maxOtherSide = -1.0f;
-            auto toSideEval = [&](float evalWhite) {
-                return (sideToMove == 0) ? evalWhite : (1.0f - evalWhite);
-            };
-            for (const auto& ms : moves) {
-                if (ms.eval < 0.0f) continue;
-                const float se = toSideEval(ms.eval);
-                if (ms.move == bestMove && !foundBest) {
-                    foundBest = true;
-                    bestEvalSide = se;
-                } else {
-                    if (se > maxOtherSide) maxOtherSide = se;
+        auto formatDif = [&](const std::vector<moveState>& moves, int sideToMove) {
+            if (moves.size() < 2) return std::string("dif=0");
+            auto toSideEval = [&](float evalWhite) { return (sideToMove == 0) ? evalWhite : (1.0f - evalWhite); };
+            bool found = false;
+            double bestDif = 0.0;
+            for (size_t i = 0; i < moves.size(); ++i) {
+                if (moves[i].eval < 0.0f) continue;
+                for (size_t j = i + 1; j < moves.size(); ++j) {
+                    if (moves[j].eval < 0.0f) continue;
+                    if (moves[i].pvKey == moves[j].pvKey) continue;
+                    const double d = std::fabs(double(toSideEval(moves[i].eval)) - double(toSideEval(moves[j].eval)));
+                    if (!found || d > bestDif) { found = true; bestDif = d; }
                 }
             }
-            if (!foundBest || maxOtherSide < 0.0f) return std::string("dif=0");
-            const double dif = 100.0 * (double(bestEvalSide) - double(maxOtherSide));
+            if (!found) return std::string("dif=0");
             std::ostringstream oss;
-            oss << "dif=";
-            if (dif >= 0.0) oss << '+';
-            oss << std::fixed << std::setprecision(2) << dif;
+            oss << "dif=" << std::fixed << std::setprecision(2) << (100.0 * bestDif);
             return oss.str();
         };
         clearConsoleFull();
@@ -10959,7 +10954,7 @@ searchThread.join();
             std::cout << moveToStr(pvBeforeRoll[i]);
         }
         std::cout << "\n";
-        std::cout << formatDif(rootMoves, pvBeforeRoll, pos.side) << "\n";
+        std::cout << formatDif(rootMoves, pos.side) << "\n";
 
 
         
