@@ -5393,7 +5393,7 @@ static double computeDifForRootMoves(const std::vector<moveState>& rootMoves, in
         genLegal(probe, path, mask, ml, term);
         if (term) key = 0ull;
 
-        if(ms.pvKey!=bestKey&&(!legal||key!=ms.pvKey)){
+        if(ms.visits&&ms.pvKey!=bestKey&&(!legal||key!=ms.pvKey)){
             altMax = std::max(altMax, toSidePerspective((double)ms.eval));
             hasAlt = true;
         }
