@@ -5532,6 +5532,34 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         std::vector<int> pvNow;
         extractBestPVUntilChance(T, rootPos, mask, pvNow, 256);
 
+        auto formatDif = [&](const std::vector<moveState>& moves, const std::vector<int>& pvLine, int sideToMove) {
+            if (moves.size() < 2 || pvLine.empty()) return std::string("dif=0");
+            const int bestMove = pvLine[0];
+            bool foundBest = false;
+            float bestEvalSide = 0.0f;
+            float maxOtherSide = -1.0f;
+            auto toSideEval = [&](float evalWhite) {
+                return (sideToMove == 0) ? evalWhite : (1.0f - evalWhite);
+            };
+            for (const auto& ms : moves) {
+                if (ms.eval < 0.0f) continue;
+                const float se = toSideEval(ms.eval);
+                if (ms.move == bestMove && !foundBest) {
+                    foundBest = true;
+                    bestEvalSide = se;
+                } else {
+                    if (se > maxOtherSide) maxOtherSide = se;
+                }
+            }
+            if (!foundBest || maxOtherSide < 0.0f) return std::string("dif=0");
+            const double dif = 100.0 * (double(bestEvalSide) - double(maxOtherSide));
+            std::ostringstream oss;
+            oss << "dif=";
+            if (dif >= 0.0) oss << '+';
+            oss << std::fixed << std::setprecision(2) << dif;
+            return oss.str();
+        };
+
         clearConsoleFull();
         std::cout << std::fixed << std::setprecision(2);
         std::cout << "depth=" << avgDepthNow << '\n';
@@ -5542,6 +5570,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             std::cout << moveToStr(pvNow[i]);
         }
         std::cout << '\n';
+        std::cout << formatDif(rootMovesNow, pvNow, rootPos.side) << '\n';
         for (const auto& ms : rootMovesNow) {
             int d = (int)std::to_string(ms.visits).size();
             int spacesBeforePrior = 1 + (to_string(rootMovesNow[0].visits).size() - d);
@@ -10892,6 +10921,33 @@ searchThread.join();
         std::vector<int> pvBeforeRoll;
         std::vector<moveState> rootMoves;
         mctsBatchedMT(pos, path, mask, 60.0, mctsEvalWhite, mctsAvgDepth, rootMoves, pvBeforeRoll, 1, 0);
+        auto formatDif = [&](const std::vector<moveState>& moves, const std::vector<int>& pvLine, int sideToMove) {
+            if (moves.size() < 2 || pvLine.empty()) return std::string("dif=0");
+            const int bestMove = pvLine[0];
+            bool foundBest = false;
+            float bestEvalSide = 0.0f;
+            float maxOtherSide = -1.0f;
+            auto toSideEval = [&](float evalWhite) {
+                return (sideToMove == 0) ? evalWhite : (1.0f - evalWhite);
+            };
+            for (const auto& ms : moves) {
+                if (ms.eval < 0.0f) continue;
+                const float se = toSideEval(ms.eval);
+                if (ms.move == bestMove && !foundBest) {
+                    foundBest = true;
+                    bestEvalSide = se;
+                } else {
+                    if (se > maxOtherSide) maxOtherSide = se;
+                }
+            }
+            if (!foundBest || maxOtherSide < 0.0f) return std::string("dif=0");
+            const double dif = 100.0 * (double(bestEvalSide) - double(maxOtherSide));
+            std::ostringstream oss;
+            oss << "dif=";
+            if (dif >= 0.0) oss << '+';
+            oss << std::fixed << std::setprecision(2) << dif;
+            return oss.str();
+        };
         clearConsoleFull();
         std::cout << std::fixed << std::setprecision(2);
         std::cout << "depth=" << mctsAvgDepth << std::endl;
@@ -10903,6 +10959,7 @@ searchThread.join();
             std::cout << moveToStr(pvBeforeRoll[i]);
         }
         std::cout << "\n";
+        std::cout << formatDif(rootMoves, pvBeforeRoll, pos.side) << "\n";
 
 
         
