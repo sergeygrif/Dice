@@ -5587,7 +5587,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         }
         
             const double dif = computeDifForRootMoves(rootMovesNow);
-            std::cout << " dif=" << std::showpos << std::fixed << std::setprecision(2) << dif << std::noshowpos;
+            cout<<endl<<"dif="<<showpos<<setprecision(2)<<dif<<noshowpos<<setprecision(6);
         
         std::cout << '\n';
         for (const auto& ms : rootMovesNow) {
@@ -10957,7 +10957,7 @@ searchThread.join();
         }
         
             const double dif = computeDifForRootMoves(rootMoves);
-            std::cout << " dif=" << std::showpos << std::fixed << std::setprecision(2) << dif << std::noshowpos;
+            cout<<endl<<"dif="<<showpos<<setprecision(2)<<dif<<noshowpos<<setprecision(6);
         
         std::cout << "\n";
 
