@@ -5335,6 +5335,31 @@ static void extractBestPVUntilChance(MCTSTable& T,
     }
 }
 
+
+static bool pvLineFromRootMoveHitsTerminal(MCTSTable& T,
+    const Position& rootPos,
+    const std::array<int, 64>& mask,
+    int rootMove,
+    int maxDepth = 256) {
+    Position pos = rootPos;
+    makeMove(pos, mask, rootMove);
+
+    for (int depth = 1; depth < maxDepth; ++depth) {
+        TTNode* n = T.findNodeNoInsert(pos.key);
+        if (!n) return false;
+
+        uint8_t ex = n->expanded.load(std::memory_order_acquire);
+        if (ex != 1) return false;
+        if (n->terminal) return true;
+        if (n->chance || n->edgeCount == 0) return false;
+
+        TTEdge* e0 = T.edgePtr(n->edgeBegin);
+        int bi = selectBestPVEdge(*n, e0);
+        makeMove(pos, mask, e0[bi].move);
+    }
+
+    return false;
+}
 static uint64_t extractPVFinalKeyAfterRootMove(MCTSTable& T,
     const Position& rootPos,
     const std::array<int, 64>& mask,
@@ -5564,6 +5589,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         auto formatDif = [&](const std::vector<moveState>& moves, const std::vector<int>& pvLine, int sideToMove) {
             if (moves.size() < 2 || pvLine.empty()) return std::string("dif=0");
             const int bestMove = pvLine[0];
+            if (pvLineFromRootMoveHitsTerminal(T, rootPos, mask, bestMove, 256)) return std::string("dif=0");
             bool foundBest = false;
             float bestEvalSide = 0.0f;
             uint64_t bestKey = 0;
@@ -10962,6 +10988,7 @@ searchThread.join();
         auto formatDif = [&](const std::vector<moveState>& moves, const std::vector<int>& pvLine, int sideToMove) {
             if (moves.size() < 2 || pvLine.empty()) return std::string("dif=0");
             const int bestMove = pvLine[0];
+            if (pvLineFromRootMoveHitsTerminal(TABLE, pos, mask, bestMove, 256)) return std::string("dif=0");
             bool foundBest = false;
             float bestEvalSide = 0.0f;
             uint64_t bestKey = 0;
