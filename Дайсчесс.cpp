@@ -5333,6 +5333,32 @@ static void extractBestPVUntilChance(MCTSTable& T,
         makeMove(pos, mask, m);
     }
 }
+
+static void extractMovePVUntilChance(MCTSTable& T,
+    const Position& rootPos,
+    const std::array<int, 64>& mask,
+    int rootMove,
+    std::vector<int>& outPV,
+    int maxDepth = 256) {
+    outPV.clear();
+    outPV.push_back(rootMove);
+
+    Position pos = rootPos;
+    makeMove(pos, mask, rootMove);
+
+    std::vector<int> tail;
+    extractBestPVUntilChance(T, pos, mask, tail, std::max(0, maxDepth - 1));
+    outPV.insert(outPV.end(), tail.begin(), tail.end());
+}
+
+static std::string pvSignature(const std::vector<int>& pv) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < pv.size(); ++i) {
+        if (i) oss << ' ';
+        oss << moveToStr(pv[i]);
+    }
+    return oss.str();
+}
 Position POS;
 array<uint64_t,4> PATH;
 array<int,64> MASK;
@@ -5538,16 +5564,37 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             bool foundBest = false;
             float bestEvalSide = 0.0f;
             float maxOtherSide = -1.0f;
+            std::string bestPVSignature;
+            bool bestPVKnown = false;
+            std::unordered_map<int, std::string> movePV;
+            movePV.reserve(moves.size());
+            for (const auto& ms : moves) {
+                std::vector<int> pvForMove;
+                extractMovePVUntilChance(T, rootPos, mask, ms.move, pvForMove, 256);
+                movePV.emplace(ms.move, pvSignature(pvForMove));
+            }
             auto toSideEval = [&](float evalWhite) {
                 return (sideToMove == 0) ? evalWhite : (1.0f - evalWhite);
             };
             for (const auto& ms : moves) {
                 if (ms.eval < 0.0f) continue;
                 const float se = toSideEval(ms.eval);
+                auto itPV = movePV.find(ms.move);
+                if (itPV == movePV.end()) continue;
                 if (ms.move == bestMove && !foundBest) {
                     foundBest = true;
                     bestEvalSide = se;
-                } else {
+                    bestPVSignature = itPV->second;
+                    bestPVKnown = true;
+                }
+            }
+            if (!foundBest || !bestPVKnown) return std::string("dif=0");
+            for (const auto& ms : moves) {
+                if (ms.eval < 0.0f || ms.move == bestMove) continue;
+                auto itPV = movePV.find(ms.move);
+                if (itPV == movePV.end()) continue;
+                if (itPV->second != bestPVSignature) {
+                    const float se = toSideEval(ms.eval);
                     if (se > maxOtherSide) maxOtherSide = se;
                 }
             }
