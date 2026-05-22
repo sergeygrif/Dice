@@ -5587,10 +5587,11 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             }
             if (!foundBest || maxOtherSide < 0.0f) return std::string("dif=0");
             const double dif = 100.0 * (double(bestEvalSide) - double(maxOtherSide));
+            const double displayDif = (std::abs(dif) < 0.005) ? 0.0 : dif;
             std::ostringstream oss;
             oss << "dif=";
-            if (dif >= 0.0) oss << '+';
-            oss << std::fixed << std::setprecision(2) << dif;
+            if (displayDif >= 0.0) oss << '+';
+            oss << std::fixed << std::setprecision(2) << displayDif;
             return oss.str();
         };
 
@@ -10984,10 +10985,11 @@ searchThread.join();
             }
             if (!foundBest || maxOtherSide < 0.0f) return std::string("dif=0");
             const double dif = 100.0 * (double(bestEvalSide) - double(maxOtherSide));
+            const double displayDif = (std::abs(dif) < 0.005) ? 0.0 : dif;
             std::ostringstream oss;
             oss << "dif=";
-            if (dif >= 0.0) oss << '+';
-            oss << std::fixed << std::setprecision(2) << dif;
+            if (displayDif >= 0.0) oss << '+';
+            oss << std::fixed << std::setprecision(2) << displayDif;
             return oss.str();
         };
         clearConsoleFull();
