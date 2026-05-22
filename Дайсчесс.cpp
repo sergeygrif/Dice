@@ -287,6 +287,7 @@ struct moveState {
     float eval;
     uint32_t visits;
     float prior;
+    uint64_t pvKey;
 };
 
 
@@ -5333,6 +5334,44 @@ static void extractBestPVUntilChance(MCTSTable& T,
         makeMove(pos, mask, m);
     }
 }
+static uint64_t terminalAwareKeyAfterPV(MCTSTable& T,
+    Position pos,
+    const std::array<uint64_t, 4>& path,
+    const std::array<int, 64>& mask) {
+    for (int depth = 0; depth < 256; ++depth) {
+        MoveList ml;
+        int term = 0;
+        Position probe = pos;
+        genLegal(probe, path, mask, ml, term);
+        if (term) return 0ull;
+
+        TTNode* n = T.findNodeNoInsert(pos.key);
+        if (!n) return pos.key;
+        uint8_t ex = n->expanded.load(std::memory_order_acquire);
+        if (ex != 1 || n->chance || n->edgeCount == 0) return pos.key;
+        if (n->terminal) return 0ull;
+
+        TTEdge* e0 = T.edgePtr(n->edgeBegin);
+        int bi = selectBestPVEdge(*n, e0);
+        makeMove(pos, mask, e0[bi].move);
+    }
+    return pos.key;
+}
+static double computeDifForRootMoves(const std::vector<moveState>& rootMoves) {
+    if (rootMoves.empty() || rootMoves[0].pvKey == 0ull) return 100.0;
+    const uint64_t bestKey = rootMoves[0].pvKey;
+    const double bestEval = rootMoves[0].eval;
+    double altMax = -1e9;
+    bool hasAlt = false;
+    for (const auto& ms : rootMoves) {
+        if (ms.pvKey != bestKey) {
+            altMax = std::max(altMax, (double)ms.eval);
+            hasAlt = true;
+        }
+    }
+    if (!hasAlt) return 100.0;
+    return 100.0 * (bestEval - altMax);
+}
 Position POS;
 array<uint64_t,4> PATH;
 array<int,64> MASK;
@@ -5356,7 +5395,7 @@ void mctsBatchedMT(Position& rootPos,
         outEvalWhite = 1 - rootPos.side;
         outAvgDepth = 1.0f;
         outRootMoves.clear();
-        outRootMoves.push_back({ ml.m[0], outEvalWhite, 0 });
+        outRootMoves.push_back({ ml.m[0], outEvalWhite, 0, 0.0f, 0ull });
         outPVBeforeRoll.push_back(ml.m[0]);
         if (write == 1) {
             clearConsoleFull();
@@ -5515,7 +5554,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
                 float p = e.prior();
                 float ev = -1.0f;
                 if (v) ev = clamp01(e.sum() / (float)v);
-                rootMovesNow.push_back(moveState{ e.move, ev, v, p });
+                rootMovesNow.push_back(moveState{ e.move, ev, v, p, 0ull });
             }
             std::sort(rootMovesNow.begin(), rootMovesNow.end(),
                 [](const moveState& a, const moveState& b) {
@@ -5526,6 +5565,11 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
                 for (auto& ms : rootMovesNow) {
                     if (ms.eval >= 0.0f) ms.eval = 1.0f - ms.eval;
                 }
+            }
+            for (auto& ms : rootMovesNow) {
+                Position p = rootPos;
+                makeMove(p, mask, ms.move);
+                ms.pvKey = terminalAwareKeyAfterPV(T, p, path, mask);
             }
         }
 
@@ -5540,6 +5584,10 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         for (size_t i = 0; i < pvNow.size(); ++i) {
             if (i) std::cout << ' ';
             std::cout << moveToStr(pvNow[i]);
+        }
+        if (!rootMovesNow.empty()) {
+            const double dif = computeDifForRootMoves(rootMovesNow);
+            std::cout << " dif=" << std::showpos << std::fixed << std::setprecision(2) << dif << std::noshowpos;
         }
         std::cout << '\n';
         for (const auto& ms : rootMovesNow) {
@@ -5606,7 +5654,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             float ev = -1.0f;
             if (v) ev = clamp01(e.sum() / (float)v);
 
-            outRootMoves.push_back(moveState{ e.move, ev, v, p });
+            outRootMoves.push_back(moveState{ e.move, ev, v, p, 0ull });
         }
 
         std::sort(outRootMoves.begin(), outRootMoves.end(),
@@ -5619,6 +5667,11 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             for (auto& ms : outRootMoves) {
                 if (ms.eval >= 0.0f) ms.eval = 1.0f - ms.eval;
             }
+        }
+        for (auto& ms : outRootMoves) {
+            Position p = rootPos;
+            makeMove(p, mask, ms.move);
+            ms.pvKey = terminalAwareKeyAfterPV(T, p, path, mask);
         }
     }
 
@@ -7555,7 +7608,7 @@ static void collectRootMoves(MCTSTable& T,
         float ev = -1.0f;
         if (v) ev = clamp01((float)(e.sum() / (double)v));
 
-        outMoves.push_back(moveState{ e.move, ev, v, e.prior() });
+        outMoves.push_back(moveState{ e.move, ev, v, e.prior(), 0ull });
     }
 
     std::sort(outMoves.begin(), outMoves.end(),
@@ -10901,6 +10954,10 @@ searchThread.join();
         for (size_t i = 0; i < pvBeforeRoll.size(); ++i) {
             if (i) std::cout << ' ';
             std::cout << moveToStr(pvBeforeRoll[i]);
+        }
+        if (!rootMoves.empty()) {
+            const double dif = computeDifForRootMoves(rootMoves);
+            std::cout << " dif=" << std::showpos << std::fixed << std::setprecision(2) << dif << std::noshowpos;
         }
         std::cout << "\n";
 
