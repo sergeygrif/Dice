@@ -3824,7 +3824,7 @@ static AI_FORCEINLINE float cpuctFromVisits(
     uint32_t parentVisits,
     bool isRoot,
     const SearchParams& sp) {
-    float c = sp.c_init + std::log(((float)parentVisits + sp.c_base + 1.0f) / sp.c_base);
+    float c = sp.c_init;
     if (isRoot) c *= 1.10f;
     return c;
 }
