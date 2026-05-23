@@ -5378,7 +5378,11 @@ static uint64_t terminalAwareKeyAfterLine(Position pos,
     if (term) return 0ull;
     return pos.key;
 }
-static double computeDifForRootMoves(const std::vector<moveState>& rootMoves, int side) {
+static double computeDifForRootMoves(const std::vector<moveState>& rootMoves,
+    int side,
+    const Position& rootPos,
+    const std::array<uint64_t, 4>& path,
+    const std::array<int, 64>& mask) {
     if (rootMoves.empty() || rootMoves[0].pvKey == 0ull) return 100.0;
     const uint64_t bestKey = rootMoves[0].pvKey;
     auto toSidePerspective = [side](double eval) {
