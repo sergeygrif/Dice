@@ -5361,6 +5361,7 @@ static double computeDifForRootMoves(const std::vector<moveState>& rootMoves, in
     if (rootMoves.empty() || rootMoves[0].pvKey == 0ull) return 100.0;
     const uint64_t bestKey = rootMoves[0].pvKey;
     auto toSidePerspective = [side](double eval) {
+        if(eval==-1)return 0;
         return (side == 0) ? eval : (1.0 - eval);
     };
     const double bestEval = toSidePerspective(rootMoves[0].eval);
