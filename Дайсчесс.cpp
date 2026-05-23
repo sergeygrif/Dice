@@ -5393,7 +5393,13 @@ static double computeDifForRootMoves(const std::vector<moveState>& rootMoves,
     double altMax = -1e9;
     bool hasAlt = false;
     for (const auto& ms : rootMoves) {
-        if (ms.pvKey != bestKey) {
+        std::vector<int> line;
+        line.push_back(rootMoves[0].move);
+        for (int m : ms.pv) {
+            if (m != rootMoves[0].move) line.push_back(m);
+        }
+        const uint64_t key = terminalAwareKeyAfterLine(rootPos, path, mask, line);
+        if (ms.pvKey != bestKey && key != ms.pvKey) {
             altMax = std::max(altMax, toSidePerspective((double)ms.eval));
             hasAlt = true;
         }
