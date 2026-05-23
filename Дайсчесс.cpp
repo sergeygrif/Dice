@@ -288,7 +288,6 @@ struct moveState {
     uint32_t visits;
     float prior;
     uint64_t pvKey;
-    std::vector<int> pv;
 };
 
 
@@ -3825,7 +3824,7 @@ static AI_FORCEINLINE float cpuctFromVisits(
     uint32_t parentVisits,
     bool isRoot,
     const SearchParams& sp) {
-    float c = sp.c_init;
+    float c = sp.c_init + std::log(((float)parentVisits + sp.c_base + 1.0f) / sp.c_base);
     if (isRoot) c *= 1.10f;
     return c;
 }
@@ -5358,11 +5357,9 @@ static uint64_t terminalAwareKeyAfterPV(MCTSTable& T,
     }
     return pos.key;
 }
-static double computeDifForRootMoves(const std::vector<moveState>& rootMoves, int side, const Position& rootPos,
-    const std::array<uint64_t, 4>& path, const std::array<int, 64>& mask) {
+static double computeDifForRootMoves(const std::vector<moveState>& rootMoves, int side) {
     if (rootMoves.empty() || rootMoves[0].pvKey == 0ull) return 100.0;
     const uint64_t bestKey = rootMoves[0].pvKey;
-    const int bestMove = rootMoves[0].move;
     auto toSidePerspective = [side](double eval) {
         return (side == 0) ? eval : (1.0 - eval);
     };
@@ -5370,30 +5367,7 @@ static double computeDifForRootMoves(const std::vector<moveState>& rootMoves, in
     double altMax = -1e9;
     bool hasAlt = false;
     for (const auto& ms : rootMoves) {
-        Position p = rootPos;
-        makeMove(p, mask, bestMove);
-        bool legal = true;
-        for (int m : ms.pv) {
-            if (m == bestMove) continue;
-            MoveList ml;
-            int term = 0;
-            Position probe = p;
-            genLegal(probe, path, mask, ml, term);
-            bool found = false;
-            for (int i = 0; i < ml.n; ++i) {
-                if (ml.m[i] == m) { found = true; break; }
-            }
-            if (!found) { legal = false; break; }
-            makeMove(p, mask, m);
-        }
-        uint64_t key = p.key;
-        MoveList ml;
-        int term = 0;
-        Position probe = p;
-        genLegal(probe, path, mask, ml, term);
-        if (term) key = 0ull;
-
-        if(ms.visits&&ms.pvKey!=bestKey&&(!legal||key!=ms.pvKey)){
+        if (ms.pvKey != bestKey) {
             altMax = std::max(altMax, toSidePerspective((double)ms.eval));
             hasAlt = true;
         }
@@ -5424,7 +5398,7 @@ void mctsBatchedMT(Position& rootPos,
         outEvalWhite = 1 - rootPos.side;
         outAvgDepth = 1.0f;
         outRootMoves.clear();
-        outRootMoves.push_back({ ml.m[0], outEvalWhite, 0, 0.0f, 0ull, {} });
+        outRootMoves.push_back({ ml.m[0], outEvalWhite, 0, 0.0f, 0ull });
         outPVBeforeRoll.push_back(ml.m[0]);
         if (write == 1) {
             clearConsoleFull();
@@ -5583,7 +5557,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
                 float p = e.prior();
                 float ev = -1.0f;
                 if (v) ev = clamp01(e.sum() / (float)v);
-                rootMovesNow.push_back(moveState{ e.move, ev, v, p, 0ull, {} });
+                rootMovesNow.push_back(moveState{ e.move, ev, v, p, 0ull });
             }
             std::sort(rootMovesNow.begin(), rootMovesNow.end(),
                 [](const moveState& a, const moveState& b) {
@@ -5599,8 +5573,6 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
                 Position p = rootPos;
                 makeMove(p, mask, ms.move);
                 ms.pvKey = terminalAwareKeyAfterPV(T, p, path, mask);
-                extractBestPVUntilChance(T, p, mask, ms.pv, 256);
-                ms.pv.insert(ms.pv.begin(), ms.move);
             }
         }
 
@@ -5617,7 +5589,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             std::cout << moveToStr(pvNow[i]);
         }
         
-            const double dif = computeDifForRootMoves(rootMovesNow, rootPos.side, rootPos, path, mask);
+            const double dif = computeDifForRootMoves(rootMovesNow, rootPos.side);
             cout<<endl<<"dif="<<showpos<<setprecision(2)<<dif<<noshowpos<<setprecision(6);
         
         std::cout << '\n';
@@ -5685,7 +5657,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             float ev = -1.0f;
             if (v) ev = clamp01(e.sum() / (float)v);
 
-            outRootMoves.push_back(moveState{ e.move, ev, v, p, 0ull, {} });
+            outRootMoves.push_back(moveState{ e.move, ev, v, p, 0ull });
         }
 
         std::sort(outRootMoves.begin(), outRootMoves.end(),
@@ -5703,8 +5675,6 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             Position p = rootPos;
             makeMove(p, mask, ms.move);
             ms.pvKey = terminalAwareKeyAfterPV(T, p, path, mask);
-            extractBestPVUntilChance(T, p, mask, ms.pv, 256);
-            ms.pv.insert(ms.pv.begin(), ms.move);
         }
     }
 
@@ -7641,7 +7611,7 @@ static void collectRootMoves(MCTSTable& T,
         float ev = -1.0f;
         if (v) ev = clamp01((float)(e.sum() / (double)v));
 
-        outMoves.push_back(moveState{ e.move, ev, v, e.prior(), 0ull, {} });
+        outMoves.push_back(moveState{ e.move, ev, v, e.prior(), 0ull });
     }
 
     std::sort(outMoves.begin(), outMoves.end(),
@@ -10989,7 +10959,7 @@ searchThread.join();
             std::cout << moveToStr(pvBeforeRoll[i]);
         }
         
-            const double dif = computeDifForRootMoves(rootMoves, pos.side, pos, path, mask);
+            const double dif = computeDifForRootMoves(rootMoves, pos.side);
             cout<<endl<<"dif="<<showpos<<setprecision(2)<<dif<<noshowpos<<setprecision(6);
         
         std::cout << "\n";
