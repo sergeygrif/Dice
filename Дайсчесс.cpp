@@ -5358,6 +5358,26 @@ static uint64_t terminalAwareKeyAfterPV(MCTSTable& T,
     }
     return pos.key;
 }
+static uint64_t terminalAwareKeyAfterLine(Position pos,
+    const std::array<uint64_t, 4>& path,
+    const std::array<int, 64>& mask,
+    const std::vector<int>& line) {
+    for (int m : line) {
+        MoveList ml;
+        int term = 0;
+        Position probe = pos;
+        genLegal(probe, path, mask, ml, term);
+        if (term) return 0ull;
+        makeMove(pos, mask, m);
+    }
+
+    MoveList ml;
+    int term = 0;
+    Position probe = pos;
+    genLegal(probe, path, mask, ml, term);
+    if (term) return 0ull;
+    return pos.key;
+}
 static double computeDifForRootMoves(const std::vector<moveState>& rootMoves, int side) {
     if (rootMoves.empty() || rootMoves[0].pvKey == 0ull) return 100.0;
     const uint64_t bestKey = rootMoves[0].pvKey;
