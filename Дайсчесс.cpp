@@ -5623,7 +5623,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             std::cout << moveToStr(pvNow[i]);
         }
         
-            const double dif = computeDifForRootMoves(rootMovesNow, rootPos.side);
+            const double dif = computeDifForRootMoves(rootMovesNow, rootPos.side, rootPos, path, mask);
             cout<<endl<<"dif="<<showpos<<setprecision(2)<<dif<<noshowpos<<setprecision(6);
         
         std::cout << '\n';
@@ -10995,7 +10995,7 @@ searchThread.join();
             std::cout << moveToStr(pvBeforeRoll[i]);
         }
         
-            const double dif = computeDifForRootMoves(rootMoves, pos.side);
+            const double dif = computeDifForRootMoves(rootMoves, pos.side, pos, path, mask);
             cout<<endl<<"dif="<<showpos<<setprecision(2)<<dif<<noshowpos<<setprecision(6);
         
         std::cout << "\n";
