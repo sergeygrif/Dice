@@ -5378,22 +5378,6 @@ static uint64_t terminalAwareKeyAfterLine(Position pos,
     if (term) return 0ull;
     return pos.key;
 }
-static int Alternative(const moveState& ms1, const moveState& ms2,
-    const Position& rootPos,
-    const std::array<uint64_t, 4>& path,
-    const std::array<int, 64>& mask) {
-    
-    if (ms1.pvKey == ms2.pvKey) return 0;
-
-    std::vector<int> line;
-    line.push_back(ms2.move);
-    for (int m : ms1.pv) {
-        if (m != ms2.move) line.push_back(m);
-    }
-    
-    const uint64_t key = terminalAwareKeyAfterLine(rootPos, path, mask, line);
-    return key != ms1.pvKey;
-}
 static double computeDifForRootMoves(const std::vector<moveState>& rootMoves,
     int side,
     const Position& rootPos,
