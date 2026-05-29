@@ -5394,34 +5394,35 @@ static int Alternative(const moveState& cur, const moveState& alt,
     for (int m : alt.pv)if (m != cur.move) line.push_back(m);
     return terminalAwareKeyAfterLine(T,rootPos, mask, line) != alt.pvKey;
 }
-    static double computeDifForRootMoves(const std::vector<moveState>& rootMoves,
+static double computeDifForRootMoves(vector<moveState>& rootMoves,
+    MCTSTable& T,
     int side,
     const Position& rootPos,
-    const std::array<uint64_t, 4>& path,
     const std::array<int, 64>& mask) {
-    if (rootMoves.empty() || rootMoves[0].pvKey == 0ull) return 100.0;
-    const uint64_t bestKey = rootMoves[0].pvKey;
     auto toSidePerspective = [side](double eval) {
-        if(eval==-1)return 0.0;
         return (side == 0) ? eval : (1.0 - eval);
-    };
-    const double bestEval = toSidePerspective(rootMoves[0].eval);
-    double altMax = -1e9;
-    bool hasAlt = false;
-    for (const auto& ms : rootMoves) {
-        std::vector<int> line;
-        line.push_back(rootMoves[0].move);
-        for (int m : ms.pv) {
-            if (m != rootMoves[0].move) line.push_back(m);
+    }; 
+    if (rootMoves.empty()) return 100.0;
+    for (auto& ms : rootMoves) {
+        ms.dif = 100.0;
+        if(ms.pvKey==0||rootMoves[0].visits==0)continue;
+        if (ms.visits == 0) {
+            ms.dif = -100.0;
+            continue;
         }
-        const uint64_t key = terminalAwareKeyAfterLine(rootPos, path, mask, line);
-        if (ms.pvKey != bestKey && key != ms.pvKey) {
-            altMax = std::max(altMax, toSidePerspective((double)ms.eval));
-            hasAlt = true;
+        for (auto& alt : rootMoves) if (Alternative(ms, alt, T, rootPos, mask) && alt.visits) {
+            if (alt.pvKey==0||&alt == &rootMoves[0]) {
+                ms.dif = -100.0;
+                break;
+            }
+            double diff_val = 100.0 * (toSidePerspective(ms.eval) - toSidePerspective(alt.eval));
+            ms.dif = std::min(ms.dif, diff_val);
         }
     }
-    if (!hasAlt) return 100.0;
-    return 100.0 * (bestEval - altMax);
+    std::stable_sort(rootMoves.begin(), rootMoves.end(), [](const moveState& a, const moveState& b) {
+        return a.dif > b.dif;
+    });
+    return rootMoves[0].dif;
 }
 Position POS;
 array<uint64_t,4> PATH;
