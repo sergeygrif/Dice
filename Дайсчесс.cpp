@@ -289,7 +289,6 @@ struct moveState {
     float prior;
     uint64_t pvKey;
     std::vector<int> pv;
-    double dif;
 };
 
 
@@ -5379,17 +5378,7 @@ static uint64_t terminalAwareKeyAfterLine(Position pos,
     if (term) return 0ull;
     return pos.key;
 }
-static int Alternative(const moveState& cur, const moveState& alt,
-    const Position& rootPos,
-    const std::array<uint64_t, 4>& path,
-    const std::array<int, 64>& mask) {
-    if (alt.pvKey == cur.pvKey) return 0;
-    vector<int> line;
-    line.push_back(cur.move);
-    for (int m : alt.pv)if (m != cur.move) line.push_back(m);
-    return terminalAwareKeyAfterLine(rootPos, path, mask, line) != alt.pvKey;
-}
-    static double computeDifForRootMoves(const std::vector<moveState>& rootMoves,
+static double computeDifForRootMoves(const std::vector<moveState>& rootMoves,
     int side,
     const Position& rootPos,
     const std::array<uint64_t, 4>& path,
