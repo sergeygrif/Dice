@@ -5358,24 +5358,30 @@ static uint64_t terminalAwareKeyAfterPV(MCTSTable& T,
     }
     return pos.key;
 }
-static uint64_t terminalAwareKeyAfterLine(Position pos,
-    const std::array<uint64_t, 4>& path,
+static uint64_t terminalAwareKeyAfterLine(
+    MCTSTable& T, 
+    Position pos,
     const std::array<int, 64>& mask,
     const std::vector<int>& line) {
+    uint64_t lastValidKey=pos.key;
     for (int m : line) {
-        MoveList ml;
-        int term = 0;
-        Position probe = pos;
-        genLegal(probe, path, mask, ml, term);
-        if (term) return 0ull;
+        TTNode* n = T.findNodeNoInsert(pos.key);
+        if (!n || n->expanded.load(std::memory_order_acquire) != 1)return lastValidKey;
+        if (n->terminal) return 0ull;
+        if (n->chance) return pos.key;
+        bool found = false;
+        TTEdge* e0 = T.edgePtr(n->edgeBegin);
+        for (int i = 0; i < n->edgeCount; ++i)if (e0[i].move == m) {
+                found = true;
+                break;
+            }
+        if (!found)return pos.key;
+        lastValidKey = pos.key;
         makeMove(pos, mask, m);
     }
-
-    MoveList ml;
-    int term = 0;
-    Position probe = pos;
-    genLegal(probe, path, mask, ml, term);
-    if (term) return 0ull;
+    TTNode* n = T.findNodeNoInsert(pos.key);
+    if (!n || n->expanded.load(std::memory_order_acquire) != 1)return lastValidKey;
+    if (n->terminal)return 0ull;
     return pos.key;
 }
 static double computeDifForRootMoves(const std::vector<moveState>& rootMoves,
