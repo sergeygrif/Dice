@@ -5358,42 +5358,27 @@ static uint64_t terminalAwareKeyAfterPV(MCTSTable& T,
     }
     return pos.key;
 }
-static uint64_t terminalAwareKeyAfterLine(
-    MCTSTable& T, 
-    Position pos,
+static uint64_t terminalAwareKeyAfterLine(Position pos,
+    const std::array<uint64_t, 4>& path,
     const std::array<int, 64>& mask,
     const std::vector<int>& line) {
-    uint64_t lastValidKey;
     for (int m : line) {
-        TTNode* n = T.findNodeNoInsert(pos.key);
-        if (!n || n->expanded.load(std::memory_order_acquire) != 1)return lastValidKey;
-        if (n->terminal) return 0ull;
-        bool found = false;
-        TTEdge* e0 = T.edgePtr(n->edgeBegin);
-        for (int i = 0; i < n->edgeCount; ++i)if (e0[i].move == m) {
-                found = true;
-                break;
-            }
-        if (!found)return pos.key;
-        lastValidKey = pos.key;
+        MoveList ml;
+        int term = 0;
+        Position probe = pos;
+        genLegal(probe, path, mask, ml, term);
+        if (term) return 0ull;
         makeMove(pos, mask, m);
     }
-    TTNode* n = T.findNodeNoInsert(pos.key);
-    if (!n || n->expanded.load(std::memory_order_acquire) != 1)return lastValidKey;
-    if (n->terminal)return 0ull;
+
+    MoveList ml;
+    int term = 0;
+    Position probe = pos;
+    genLegal(probe, path, mask, ml, term);
+    if (term) return 0ull;
     return pos.key;
 }
-static int Alternative(const moveState& cur, const moveState& alt,
-    MCTSTable& T,
-    const Position& rootPos,
-    const std::array<int, 64>& mask) {
-    if (alt.pvKey == cur.pvKey) return 0;
-    vector<int> line;
-    line.push_back(cur.move);
-    for (int m : alt.pv)if (m != cur.move) line.push_back(m);
-    return terminalAwareKeyAfterLine(T,rootPos, mask, line) != alt.pvKey;
-}
-    static double computeDifForRootMoves(const std::vector<moveState>& rootMoves,
+static double computeDifForRootMoves(const std::vector<moveState>& rootMoves,
     int side,
     const Position& rootPos,
     const std::array<uint64_t, 4>& path,
