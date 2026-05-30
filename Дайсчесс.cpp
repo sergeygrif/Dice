@@ -5298,6 +5298,104 @@ static std::string moveToStr(int move) {
     if (pc) s.push_back(pc);
     return s;
 }
+void extractBestPVUntilChance(MCTSTable& T,Position& rootPos,array<int,64>& mask,vector<int>& outPV,uint64_t& key){
+outPV.clear();
+Position pos=rootPos;
+while(1){
+TTNode* n=T.findNodeNoInsert(pos.key);
+if(!n||n->expanded.load(memory_order_acquire)!=1||n->edgeCount==0){
+key=pos.key;
+return;
+}
+TTEdge* e0=T.edgePtr(n->edgeBegin);
+if(n->terminal){
+outPV.push_back(e0[0].move);
+key=0;
+return;
+}
+int m=e0[selectBestPVEdge(*n,e0)].move;
+outPV.push_back(m);
+makeMove(pos,mask,m);
+}
+}
+uint64_t terminalAwareKeyAfterLine(MCTSTable& T,Position& rootPos,array<int,64>& mask,vector<int>& line){
+Position pos=rootPos;
+for(int m:line){
+TTNode* n=T.findNodeNoInsert(pos.key);
+if(!n||n->expanded.load(memory_order_acquire)!=1)return pos.key;
+if(n->terminal)return 0;
+bool found=false;
+TTEdge* e0=T.edgePtr(n->edgeBegin);
+for(int i=0;i<n->edgeCount;i++)if(e0[i].move==m){
+found=true;
+break;
+}
+if(!found)return pos.key;
+makeMove(pos,mask,m);
+}
+TTNode* n=T.findNodeNoInsert(pos.key);
+if(!n||n->expanded.load(memory_order_acquire)!=1||!n->terminal)return pos.key;
+return 0;
+}
+int Alternative(moveState& cur,moveState& alt,MCTSTable& T,Position& rootPos,array<int,64>& mask){
+if(alt.pvKey==cur.pvKey)return 0;
+vector<int> line;
+line.push_back(cur.move);
+for(int m:alt.pv)if(m!=cur.move)line.push_back(m);
+return terminalAwareKeyAfterLine(T,rootPos,mask,line)!=alt.pvKey;
+}
+double computeDifForRootMoves(vector<moveState>& rootMoves,MCTSTable& T,Position& rootPos,array<int,64>& mask){
+auto toSidePerspective=[&rootPos](double eval){return rootPos.side==0?eval:1-eval;};
+if(rootMoves.empty())return 100;
+for(moveState& ms:rootMoves){
+ms.dif=100;
+if(ms.pvKey==0||rootMoves[0].visits==0)continue;
+if(ms.visits==0){
+ms.dif=-100;
+continue;
+}
+for(moveState& alt:rootMoves)if(Alternative(ms,alt,T,rootPos,mask)&&alt.visits){
+if(alt.pvKey==0||&alt==&rootMoves[0]){
+ms.dif=-100;
+break;
+}
+ms.dif=min(ms.dif,100*(toSidePerspective(ms.eval)-toSidePerspective(alt.eval)));
+}
+}
+stable_sort(rootMoves.begin(),rootMoves.end(),[](const moveState& a,const moveState& b){return a.dif>b.dif;});
+return rootMoves[0].dif;
+}
+void extractDifPVUntilChance(MCTSTable& T,Position& rootPos,array<int,64>& mask,vector<int>& outPV){
+outPV.clear();
+Position pos=rootPos;
+while(1){
+TTNode* n=T.findNodeNoInsert(pos.key);
+if(!n||n->expanded.load(memory_order_acquire)!=1||n->edgeCount==0)return;
+float q;
+vector<moveState> moves;
+collectRootMoves(T,pos,q,moves);
+if(n->terminal){
+outPV.push_back(moves[0].move);
+return;
+}
+for(moveState& ms:moves){
+if(pos.side&&ms.eval>=0)ms.eval=1-ms.eval;
+Position p=pos;
+makeMove(p,mask,ms.move);
+extractBestPVUntilChance(T,p,mask,ms.pv,ms.pvKey);
+ms.pv.insert(ms.pv.begin(),ms.move);
+}
+computeDifForRootMoves(moves,T,pos,mask);
+int bestMove=moves[0].move;
+outPV.push_back(bestMove);
+makeMove(pos,mask,bestMove);
+}
+}
+int getMaxVisitsLen(vector<moveState>& rootMoves){
+int maxLen=0;
+for(moveState& ms:rootMoves)maxLen=max(maxLen,to_string(ms.visits).size());
+return maxLen;
+}
 static void extractBestPVUntilChance(MCTSTable& T,
     const Position& rootPos,
     const std::array<int, 64>& mask,
