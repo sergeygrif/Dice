@@ -5344,34 +5344,26 @@ line.push_back(cur.move);
 for(int m:alt.pv)if(m!=cur.move)line.push_back(m);
 return terminalAwareKeyAfterLine(T,rootPos,mask,line)!=alt.pvKey;
 }
-static double computeDifForRootMoves(const std::vector<moveState>& rootMoves,
-    int side,
-    const Position& rootPos,
-    const std::array<uint64_t, 4>& path,
-    const std::array<int, 64>& mask) {
-    if (rootMoves.empty() || rootMoves[0].pvKey == 0ull) return 100.0;
-    const uint64_t bestKey = rootMoves[0].pvKey;
-    auto toSidePerspective = [side](double eval) {
-        if(eval==-1)return 0.0;
-        return (side == 0) ? eval : (1.0 - eval);
-    };
-    const double bestEval = toSidePerspective(rootMoves[0].eval);
-    double altMax = -1e9;
-    bool hasAlt = false;
-    for (const auto& ms : rootMoves) {
-        std::vector<int> line;
-        line.push_back(rootMoves[0].move);
-        for (int m : ms.pv) {
-            if (m != rootMoves[0].move) line.push_back(m);
-        }
-        const uint64_t key = terminalAwareKeyAfterLine(rootPos, path, mask, line);
-        if (ms.pvKey != bestKey && key != ms.pvKey) {
-            altMax = std::max(altMax, toSidePerspective((double)ms.eval));
-            hasAlt = true;
-        }
-    }
-    if (!hasAlt) return 100.0;
-    return 100.0 * (bestEval - altMax);
+double computeDifForRootMoves(vector<moveState>& rootMoves,MCTSTable& T,Position& rootPos,array<int,64>& mask){
+auto toSidePerspective=[&rootPos](double eval){return rootPos.side==0?eval:1-eval;};
+if(rootMoves.empty())return 100;
+for(moveState& ms:rootMoves){
+ms.dif=100;
+if(ms.pvKey==0||rootMoves[0].visits==0)continue;
+if(ms.visits==0){
+ms.dif=-100;
+continue;
+}
+for(moveState& alt:rootMoves)if(Alternative(ms,alt,T,rootPos,mask)&&alt.visits){
+if(alt.pvKey==0||&alt==&rootMoves[0]){
+ms.dif=-100;
+break;
+}
+ms.dif=min(ms.dif,100*(toSidePerspective(ms.eval)-toSidePerspective(alt.eval)));
+}
+}
+stable_sort(rootMoves.begin(),rootMoves.end(),[](const moveState& a,const moveState& b){return a.dif>b.dif;});
+return rootMoves[0].dif;
 }
 Position POS;
 array<uint64_t,4> PATH;
