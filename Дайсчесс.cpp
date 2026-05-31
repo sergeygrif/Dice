@@ -10745,6 +10745,13 @@ POS.color[piece/6]|=bit(sq);
 POS.piece[piece%6]|=bit(sq);
 }
 }
+void CASTLESET(){
+int c,r;
+for(c=0;c<2;c++){
+for(r=0;r<2;r++)if((POS.color[c]&POS.piece[3]&bit(7*r+56*c))==0)POS.castle&=~bit(r+2*c);
+if((POS.color[c]&POS.piece[5]&bit(4+56*c))==0)POS.castle&=~(bit(2*c)|bit(1+2*c));
+}
+}
 void DICESET(vector<int>& s){
 int i,dice,d;
 uint64_t pawns;
@@ -10884,6 +10891,7 @@ continue;
 }
 BOARDSET(b2);
 POS.side=SIDE(s2);
+CASTLESET();
 if(s1.empty()){
 DICESET(s2);
 POS.key=computeKey(POS);
