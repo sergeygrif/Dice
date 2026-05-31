@@ -5394,7 +5394,7 @@ makeMove(pos,mask,bestMove);
 }
 int getMaxVisitsLen(vector<moveState>& rootMoves){
 int maxLen=0;
-for(moveState& ms:rootMoves)maxLen=max(maxLen,to_string(ms.visits).size());
+for(moveState& ms:rootMoves)maxLen=max(maxLen,int(to_string(ms.visits).size()));
 return maxLen;
 }
 Position POS;
