@@ -5298,42 +5298,25 @@ static std::string moveToStr(int move) {
     if (pc) s.push_back(pc);
     return s;
 }
-static void extractBestPVUntilChance(MCTSTable& T,
-    const Position& rootPos,
-    const std::array<int, 64>& mask,
-    std::vector<int>& outPV,
-    int maxDepth = 256) {
-    outPV.clear();
-
-    Position pos = rootPos;
-
-    for (int depth = 0; depth < maxDepth; ++depth) {
-        TTNode* n = T.findNodeNoInsert(pos.key);
-        if (!n) break;
-
-        uint8_t ex = n->expanded.load(std::memory_order_acquire);
-        if (ex != 1) break;
-
-        if (n->terminal) {
-            if (n->edgeCount) {
-                TTEdge* e0 = T.edgePtr(n->edgeBegin);
-                outPV.push_back(e0[0].move);
-            }
-            break;
-        }
-
-        // chance node: stop BEFORE makeRandom()
-        if (n->chance) break;
-
-        if (n->edgeCount == 0) break;
-
-        TTEdge* e0 = T.edgePtr(n->edgeBegin);
-        int bi = selectBestPVEdge(*n, e0);
-        int m = e0[bi].move;
-
-        outPV.push_back(m);
-        makeMove(pos, mask, m);
-    }
+void extractBestPVUntilChance(MCTSTable& T,Position& rootPos,array<int,64>& mask,vector<int>& outPV,uint64_t& key){
+outPV.clear();
+Position pos=rootPos;
+while(1){
+TTNode* n=T.findNodeNoInsert(pos.key);
+if(!n||n->expanded.load(memory_order_acquire)!=1||n->edgeCount==0){
+key=pos.key;
+return;
+}
+TTEdge* e0=T.edgePtr(n->edgeBegin);
+if(n->terminal){
+outPV.push_back(e0[0].move);
+key=0;
+return;
+}
+int m=e0[selectBestPVEdge(*n,e0)].move;
+outPV.push_back(m);
+makeMove(pos,mask,m);
+}
 }
 static uint64_t terminalAwareKeyAfterPV(MCTSTable& T,
     Position pos,
