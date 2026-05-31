@@ -5605,7 +5605,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         }
         double dif=computeDifForRootMoves(rootMovesNow,T,rootPos,mask);
         std::vector<int> pvNow;
-        extractBestPVUntilChance(T, rootPos, mask, pvNow, 256);
+        extractDifPVUntilChance(T,rootPos,mask,rootMovesNow,pvNow);
 
         clearConsoleFull();
         std::cout << std::fixed << std::setprecision(2);
@@ -5709,7 +5709,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
     }
     computeDifForRootMoves(outRootMoves,T,rootPos,mask);
     // NEW: extract the first line before dice roll
-    extractBestPVUntilChance(T, rootPos, mask, outPVBeforeRoll, 256);
+    extractDifPVUntilChance(T,rootPos,mask,outRootMoves,outPVBeforeRoll);
 
     (void)simOK; (void)simFail; (void)nnExp;
     if (forceExit) return;
