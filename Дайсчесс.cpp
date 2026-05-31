@@ -5621,9 +5621,10 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             cout<<endl<<"dif="<<showpos<<setprecision(2)<<dif<<noshowpos<<setprecision(6);
         
         std::cout << '\n';
+        int maxLen=getMaxVisitsLen(rootMovesNow);
         for (const auto& ms : rootMovesNow) {
             int d = (int)std::to_string(ms.visits).size();
-            int spacesBeforePrior = 1 + (to_string(rootMovesNow[0].visits).size() - d);
+            int spacesBeforePrior = 1 + (maxLen - d);
 
             std::cout
                 << moveToStr(ms.move)
@@ -11007,7 +11008,7 @@ searchThread.join();
 
         for (const auto& ms : rootMoves) {
             int d = (int)std::to_string(ms.visits).size();
-            int spacesBeforePrior = 1 + (to_string(rootMoves[0].visits).size() - d);
+            int spacesBeforePrior = 1 + (getMaxVisitsLen(rootMoves) - d);
 
             std::cout
                 << moveToStr(ms.move)
