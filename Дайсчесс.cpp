@@ -5394,6 +5394,11 @@ outPV.push_back(moves[0].move);
 makeMove(pos,mask,moves[0].move);
 }
 }
+int getMaxVisitsLen(vector<moveState>& rootMoves){
+int maxLen=0;
+for(moveState& ms:rootMoves)maxLen=max(maxLen,int(to_string(ms.visits).size()));
+return maxLen;
+}
 mutex posMutex;
 Position POS;
 array<uint64_t,4> PATH;
