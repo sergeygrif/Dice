@@ -289,7 +289,6 @@ struct moveState {
     float prior;
     uint64_t pvKey;
     std::vector<int> pv;
-    double dif;
 };
 
 
@@ -5299,108 +5298,115 @@ static std::string moveToStr(int move) {
     if (pc) s.push_back(pc);
     return s;
 }
-void extractBestPVUntilChance(MCTSTable& T,Position& rootPos,array<int,64>& mask,vector<int>& outPV,uint64_t& key){
-outPV.clear();
-Position pos=rootPos;
-while(1){
-TTNode* n=T.findNodeNoInsert(pos.key);
-if(!n||n->expanded.load(memory_order_acquire)!=1||n->edgeCount==0){
-key=pos.key;
-return;
+static void extractBestPVUntilChance(MCTSTable& T,
+    const Position& rootPos,
+    const std::array<int, 64>& mask,
+    std::vector<int>& outPV,
+    int maxDepth = 256) {
+    outPV.clear();
+
+    Position pos = rootPos;
+
+    for (int depth = 0; depth < maxDepth; ++depth) {
+        TTNode* n = T.findNodeNoInsert(pos.key);
+        if (!n) break;
+
+        uint8_t ex = n->expanded.load(std::memory_order_acquire);
+        if (ex != 1) break;
+
+        if (n->terminal) {
+            if (n->edgeCount) {
+                TTEdge* e0 = T.edgePtr(n->edgeBegin);
+                outPV.push_back(e0[0].move);
+            }
+            break;
+        }
+
+        // chance node: stop BEFORE makeRandom()
+        if (n->chance) break;
+
+        if (n->edgeCount == 0) break;
+
+        TTEdge* e0 = T.edgePtr(n->edgeBegin);
+        int bi = selectBestPVEdge(*n, e0);
+        int m = e0[bi].move;
+
+        outPV.push_back(m);
+        makeMove(pos, mask, m);
+    }
 }
-TTEdge* e0=T.edgePtr(n->edgeBegin);
-if(n->terminal){
-outPV.push_back(e0[0].move);
-key=0;
-return;
+static uint64_t terminalAwareKeyAfterPV(MCTSTable& T,
+    Position pos,
+    const std::array<uint64_t, 4>& path,
+    const std::array<int, 64>& mask) {
+    for (int depth = 0; depth < 256; ++depth) {
+        MoveList ml;
+        int term = 0;
+        Position probe = pos;
+        genLegal(probe, path, mask, ml, term);
+        if (term) return 0ull;
+
+        TTNode* n = T.findNodeNoInsert(pos.key);
+        if (!n) return pos.key;
+        uint8_t ex = n->expanded.load(std::memory_order_acquire);
+        if (ex != 1 || n->chance || n->edgeCount == 0) return pos.key;
+        if (n->terminal) return 0ull;
+
+        TTEdge* e0 = T.edgePtr(n->edgeBegin);
+        int bi = selectBestPVEdge(*n, e0);
+        makeMove(pos, mask, e0[bi].move);
+    }
+    return pos.key;
 }
-int m=e0[selectBestPVEdge(*n,e0)].move;
-outPV.push_back(m);
-makeMove(pos,mask,m);
+static uint64_t terminalAwareKeyAfterLine(Position pos,
+    const std::array<uint64_t, 4>& path,
+    const std::array<int, 64>& mask,
+    const std::vector<int>& line) {
+    for (int m : line) {
+        MoveList ml;
+        int term = 0;
+        Position probe = pos;
+        genLegal(probe, path, mask, ml, term);
+        if (term) return 0ull;
+        makeMove(pos, mask, m);
+    }
+
+    MoveList ml;
+    int term = 0;
+    Position probe = pos;
+    genLegal(probe, path, mask, ml, term);
+    if (term) return 0ull;
+    return pos.key;
 }
+static double computeDifForRootMoves(const std::vector<moveState>& rootMoves,
+    int side,
+    const Position& rootPos,
+    const std::array<uint64_t, 4>& path,
+    const std::array<int, 64>& mask) {
+    if (rootMoves.empty() || rootMoves[0].pvKey == 0ull) return 100.0;
+    const uint64_t bestKey = rootMoves[0].pvKey;
+    auto toSidePerspective = [side](double eval) {
+        if(eval==-1)return 0.0;
+        return (side == 0) ? eval : (1.0 - eval);
+    };
+    const double bestEval = toSidePerspective(rootMoves[0].eval);
+    double altMax = -1e9;
+    bool hasAlt = false;
+    for (const auto& ms : rootMoves) {
+        std::vector<int> line;
+        line.push_back(rootMoves[0].move);
+        for (int m : ms.pv) {
+            if (m != rootMoves[0].move) line.push_back(m);
+        }
+        const uint64_t key = terminalAwareKeyAfterLine(rootPos, path, mask, line);
+        if (ms.pvKey != bestKey && key != ms.pvKey) {
+            altMax = std::max(altMax, toSidePerspective((double)ms.eval));
+            hasAlt = true;
+        }
+    }
+    if (!hasAlt) return 100.0;
+    return 100.0 * (bestEval - altMax);
 }
-uint64_t terminalAwareKeyAfterLine(MCTSTable& T,Position& rootPos,array<int,64>& mask,vector<int>& line){
-Position pos=rootPos;
-for(int m:line){
-TTNode* n=T.findNodeNoInsert(pos.key);
-if(!n||n->expanded.load(memory_order_acquire)!=1)return pos.key;
-if(n->terminal)return 0;
-bool found=false;
-TTEdge* e0=T.edgePtr(n->edgeBegin);
-for(int i=0;i<n->edgeCount;i++)if(e0[i].move==m){
-found=true;
-break;
-}
-if(!found)return pos.key;
-makeMove(pos,mask,m);
-}
-TTNode* n=T.findNodeNoInsert(pos.key);
-if(!n||n->expanded.load(memory_order_acquire)!=1||!n->terminal)return pos.key;
-return 0;
-}
-int Alternative(moveState& cur,moveState& alt,MCTSTable& T,Position& rootPos,array<int,64>& mask){
-if(alt.pvKey==cur.pvKey)return 0;
-vector<int> line;
-line.push_back(cur.move);
-for(int m:alt.pv)if(m!=cur.move)line.push_back(m);
-return terminalAwareKeyAfterLine(T,rootPos,mask,line)!=alt.pvKey;
-}
-double computeDifForRootMoves(vector<moveState>& rootMoves,MCTSTable& T,Position& rootPos,array<int,64>& mask){
-auto toSidePerspective=[&rootPos](double eval){return rootPos.side==0?eval:1-eval;};
-if(rootMoves.empty())return 100;
-for(moveState& ms:rootMoves){
-ms.dif=100;
-if(ms.pvKey==0||rootMoves[0].visits==0)continue;
-if(ms.visits==0){
-ms.dif=-100;
-continue;
-}
-for(moveState& alt:rootMoves)if(Alternative(ms,alt,T,rootPos,mask)&&alt.visits){
-if(alt.pvKey==0||&alt==&rootMoves[0]){
-ms.dif=-100;
-break;
-}
-ms.dif=min(ms.dif,100*(toSidePerspective(ms.eval)-toSidePerspective(alt.eval)));
-}
-}
-stable_sort(rootMoves.begin(),rootMoves.end(),[](const moveState& a,const moveState& b){return a.dif>b.dif;});
-return rootMoves[0].dif;
-}
-void collectRootMoves(MCTSTable& T,const Position& rootPos,float& outQSideToMove,vector<moveState>& outMoves);
-void extractDifPVUntilChance(MCTSTable& T,Position& rootPos,array<int,64>& mask,vector<moveState>& rootMoves,vector<int>& outPV){
-outPV.clear();
-Position pos=rootPos;
-if(rootMoves.empty())return;
-outPV.push_back(rootMoves[0].move);
-makeMove(pos,mask,rootMoves[0].move);
-while(1){
-TTNode* n=T.findNodeNoInsert(pos.key);
-if(!n||n->expanded.load(memory_order_acquire)!=1||n->edgeCount==0)return;
-float q;
-vector<moveState> moves;
-collectRootMoves(T,pos,q,moves);
-if(n->terminal){
-outPV.push_back(moves[0].move);
-return;
-}
-for(moveState& ms:moves){
-if(pos.side&&ms.eval>=0)ms.eval=1-ms.eval;
-Position p=pos;
-makeMove(p,mask,ms.move);
-extractBestPVUntilChance(T,p,mask,ms.pv,ms.pvKey);
-ms.pv.insert(ms.pv.begin(),ms.move);
-}
-computeDifForRootMoves(moves,T,pos,mask);
-outPV.push_back(moves[0].move);
-makeMove(pos,mask,moves[0].move);
-}
-}
-int getMaxVisitsLen(vector<moveState>& rootMoves){
-int maxLen=0;
-for(moveState& ms:rootMoves)maxLen=max(maxLen,int(to_string(ms.visits).size()));
-return maxLen;
-}
-mutex posMutex;
 Position POS;
 array<uint64_t,4> PATH;
 array<int,64> MASK;
@@ -5598,13 +5604,14 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             for (auto& ms : rootMovesNow) {
                 Position p = rootPos;
                 makeMove(p, mask, ms.move);
-                extractBestPVUntilChance(T, p, mask, ms.pv, ms.pvKey);
+                ms.pvKey = terminalAwareKeyAfterPV(T, p, path, mask);
+                extractBestPVUntilChance(T, p, mask, ms.pv, 255);
                 ms.pv.insert(ms.pv.begin(), ms.move);
             }
         }
-        double dif=computeDifForRootMoves(rootMovesNow,T,rootPos,mask);
+
         std::vector<int> pvNow;
-        extractDifPVUntilChance(T,rootPos,mask,rootMovesNow,pvNow);
+        extractBestPVUntilChance(T, rootPos, mask, pvNow, 256);
 
         clearConsoleFull();
         std::cout << std::fixed << std::setprecision(2);
@@ -5616,13 +5623,13 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             std::cout << moveToStr(pvNow[i]);
         }
         
-        cout<<endl<<"dif="<<showpos<<setprecision(2)<<dif<<noshowpos<<setprecision(6);
+            const double dif = computeDifForRootMoves(rootMovesNow, rootPos.side, rootPos, path, mask);
+            cout<<endl<<"dif="<<showpos<<setprecision(2)<<dif<<noshowpos<<setprecision(6);
         
         std::cout << '\n';
-        int maxLen=getMaxVisitsLen(rootMovesNow);
         for (const auto& ms : rootMovesNow) {
             int d = (int)std::to_string(ms.visits).size();
-            int spacesBeforePrior = 1 + (maxLen - d);
+            int spacesBeforePrior = 1 + (to_string(rootMovesNow[0].visits).size() - d);
 
             std::cout
                 << moveToStr(ms.move)
@@ -5701,13 +5708,14 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         for (auto& ms : outRootMoves) {
             Position p = rootPos;
             makeMove(p, mask, ms.move);
-            extractBestPVUntilChance(T, p, mask, ms.pv, ms.pvKey);
+            ms.pvKey = terminalAwareKeyAfterPV(T, p, path, mask);
+            extractBestPVUntilChance(T, p, mask, ms.pv, 255);
             ms.pv.insert(ms.pv.begin(), ms.move);
         }
     }
-    computeDifForRootMoves(outRootMoves,T,rootPos,mask);
+
     // NEW: extract the first line before dice roll
-    extractDifPVUntilChance(T,rootPos,mask,outRootMoves,outPVBeforeRoll);
+    extractBestPVUntilChance(T, rootPos, mask, outPVBeforeRoll, 256);
 
     (void)simOK; (void)simFail; (void)nnExp;
     if (forceExit) return;
@@ -10873,7 +10881,6 @@ int change,side,from,to,piece;
 vector<int> s1,s2,b1,b2,way;
 for(;;END(s1,s2,b1,b2)){
 NEW(change,s1,s2,b1,b2);
-lock_guard<mutex> lock(posMutex);
 if(s2.empty()){
 START(POS);
 continue;
@@ -10911,23 +10918,16 @@ POS.key=computeKey(POS);
 }
 }
 void SEARCH(){
-bool ready;
 Position pos;
-float eval,depth;
+float eval;
+float depth;
 vector<moveState> moves;
 vector<int> pv;
 START(pos);
 while(1){
-Sleep(1);
-ready=0;
-{
-lock_guard<mutex> lock(posMutex);
-if(POS.key!=pos.key&&POS.dice){
+while(POS.key==pos.key||POS.dice==0)Sleep(1);
 pos=POS;
-ready=1;
-}
-}
-if(ready)mctsBatchedMT(pos,PATH,MASK,3600,eval,depth,moves,pv,1,1);
+mctsBatchedMT(pos,PATH,MASK,3600,eval,depth,moves,pv,1,1);
 }
 }
 int main() {
@@ -10995,7 +10995,8 @@ searchThread.join();
             std::cout << moveToStr(pvBeforeRoll[i]);
         }
         
-        cout<<endl<<"dif="<<showpos<<setprecision(2)<<rootMoves[0].dif<<noshowpos<<setprecision(6);
+            const double dif = computeDifForRootMoves(rootMoves, pos.side, pos, path, mask);
+            cout<<endl<<"dif="<<showpos<<setprecision(2)<<dif<<noshowpos<<setprecision(6);
         
         std::cout << "\n";
 
@@ -11004,7 +11005,7 @@ searchThread.join();
 
         for (const auto& ms : rootMoves) {
             int d = (int)std::to_string(ms.visits).size();
-            int spacesBeforePrior = 1 + (getMaxVisitsLen(rootMoves) - d);
+            int spacesBeforePrior = 1 + (to_string(rootMoves[0].visits).size() - d);
 
             std::cout
                 << moveToStr(ms.move)
