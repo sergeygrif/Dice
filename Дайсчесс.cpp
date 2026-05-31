@@ -10995,8 +10995,7 @@ searchThread.join();
             std::cout << moveToStr(pvBeforeRoll[i]);
         }
         
-            const double dif = computeDifForRootMoves(rootMoves, pos.side, pos, path, mask);
-            cout<<endl<<"dif="<<showpos<<setprecision(2)<<dif<<noshowpos<<setprecision(6);
+        cout<<endl<<"dif="<<showpos<<setprecision(2)<<rootMoves[0].dif<<noshowpos<<setprecision(6);
         
         std::cout << "\n";
 
