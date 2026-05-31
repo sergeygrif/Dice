@@ -5603,7 +5603,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
                 ms.pv.insert(ms.pv.begin(), ms.move);
             }
         }
-
+        double dif=computeDifForRootMoves(rootMovesNow,T,rootPos,mask);
         std::vector<int> pvNow;
         extractBestPVUntilChance(T, rootPos, mask, pvNow, 256);
 
@@ -5617,8 +5617,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             std::cout << moveToStr(pvNow[i]);
         }
         
-            const double dif = computeDifForRootMoves(rootMovesNow, rootPos.side, rootPos, path, mask);
-            cout<<endl<<"dif="<<showpos<<setprecision(2)<<dif<<noshowpos<<setprecision(6);
+        cout<<endl<<"dif="<<showpos<<setprecision(2)<<dif<<noshowpos<<setprecision(6);
         
         std::cout << '\n';
         int maxLen=getMaxVisitsLen(rootMovesNow);
@@ -5708,7 +5707,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             ms.pv.insert(ms.pv.begin(), ms.move);
         }
     }
-
+    computeDifForRootMoves(outRootMoves,T,rootPos,mask);
     // NEW: extract the first line before dice roll
     extractBestPVUntilChance(T, rootPos, mask, outPVBeforeRoll, 256);
 
