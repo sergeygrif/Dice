@@ -10999,17 +10999,12 @@ searchThread.join();
             std::cout << moveToStr(pvBeforeRoll[i]);
         }
         
-            const double dif = computeDifForRootMoves(rootMoves, pos.side, pos, path, mask);
-            cout<<endl<<"dif="<<showpos<<setprecision(2)<<dif<<noshowpos<<setprecision(6);
-        
-        std::cout << "\n";
-
-
-        
-
+        cout<<endl;
+        Dif(rootMoves[0].dif);
+        cout<<endl;
         for (const auto& ms : rootMoves) {
             int d = (int)std::to_string(ms.visits).size();
-            int spacesBeforePrior = 1 + (to_string(rootMoves[0].visits).size() - d);
+            int spacesBeforePrior = 1 + (getMaxVisitsLen(rootMoves) - d);
 
             std::cout
                 << moveToStr(ms.move)
@@ -11017,7 +11012,9 @@ searchThread.join();
                 << " visits " << ms.visits
                 << std::string(spacesBeforePrior, ' ')
                 << "prior " << ms.prior
-                << '\n';
+                <<' ';
+                Dif(ms.dif);
+                cout<<endl;
         }
 
         cin.get();
