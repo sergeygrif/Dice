@@ -5705,14 +5705,13 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         for (auto& ms : outRootMoves) {
             Position p = rootPos;
             makeMove(p, mask, ms.move);
-            ms.pvKey = terminalAwareKeyAfterPV(T, p, path, mask);
-            extractBestPVUntilChance(T, p, mask, ms.pv, 255);
+            extractBestPVUntilChance(T, p, mask, ms.pv, ms.pvKey);
             ms.pv.insert(ms.pv.begin(), ms.move);
         }
     }
 
-    // NEW: extract the first line before dice roll
-    extractBestPVUntilChance(T, rootPos, mask, outPVBeforeRoll, 256);
+    computeDifForRootMoves(outRootMoves,T,rootPos,mask);
+    extractDifPVUntilChance(T,rootPos,mask,outRootMoves,outPVBeforeRoll);
 
     (void)simOK; (void)simFail; (void)nnExp;
     if (forceExit) return;
