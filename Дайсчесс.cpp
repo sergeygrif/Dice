@@ -5407,6 +5407,7 @@ static double computeDifForRootMoves(const std::vector<moveState>& rootMoves,
     if (!hasAlt) return 100.0;
     return 100.0 * (bestEval - altMax);
 }
+mutex posMutex;
 Position POS;
 array<uint64_t,4> PATH;
 array<int,64> MASK;
@@ -10881,6 +10882,7 @@ int change,side,from,to,piece;
 vector<int> s1,s2,b1,b2,way;
 for(;;END(s1,s2,b1,b2)){
 NEW(change,s1,s2,b1,b2);
+lock_guard<mutex> lock(posMutex);
 if(s2.empty()){
 START(POS);
 continue;
@@ -10918,16 +10920,23 @@ POS.key=computeKey(POS);
 }
 }
 void SEARCH(){
+bool ready;
 Position pos;
-float eval;
-float depth;
+float eval,depth;
 vector<moveState> moves;
 vector<int> pv;
 START(pos);
 while(1){
-while(POS.key==pos.key||POS.dice==0)Sleep(1);
+Sleep(1);
+ready=0;
+{
+lock_guard<mutex> lock(posMutex);
+if(POS.key!=pos.key&&POS.dice){
 pos=POS;
-mctsBatchedMT(pos,PATH,MASK,3600,eval,depth,moves,pv,1,1);
+ready=1;
+}
+}
+if(ready)mctsBatchedMT(pos,PATH,MASK,3600,eval,depth,moves,pv,1,1);
 }
 }
 int main() {
