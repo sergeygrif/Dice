@@ -5337,6 +5337,13 @@ TTNode* n=T.findNodeNoInsert(pos.key);
 if(!n||n->expanded.load(memory_order_acquire)!=1||!n->terminal)return pos.key;
 return 0;
 }
+int Alternative(moveState& cur,moveState& alt,MCTSTable& T,Position& rootPos,array<int,64>& mask){
+if(alt.pvKey==cur.pvKey)return 0;
+vector<int> line;
+line.push_back(cur.move);
+for(int m:alt.pv)if(m!=cur.move)line.push_back(m);
+return terminalAwareKeyAfterLine(T,rootPos,mask,line)!=alt.pvKey;
+}
 static double computeDifForRootMoves(const std::vector<moveState>& rootMoves,
     int side,
     const Position& rootPos,
