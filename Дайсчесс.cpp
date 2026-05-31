@@ -5599,14 +5599,14 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             for (auto& ms : rootMovesNow) {
                 Position p = rootPos;
                 makeMove(p, mask, ms.move);
-                ms.pvKey = terminalAwareKeyAfterPV(T, p, path, mask);
-                extractBestPVUntilChance(T, p, mask, ms.pv, 255);
+                extractBestPVUntilChance(T, p, mask, ms.pv, ms.pvKey);
                 ms.pv.insert(ms.pv.begin(), ms.move);
             }
         }
 
         std::vector<int> pvNow;
-        extractBestPVUntilChance(T, rootPos, mask, pvNow, 256);
+        double dif=computeDifForRootMoves(rootMovesNow,T,rootPos,mask);
+        extractDifPVUntilChance(T,rootPos,mask,rootMovesNow,pvNow);
 
         clearConsoleFull();
         std::cout << std::fixed << std::setprecision(2);
@@ -5618,13 +5618,13 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             std::cout << moveToStr(pvNow[i]);
         }
         
-            const double dif = computeDifForRootMoves(rootMovesNow, rootPos.side, rootPos, path, mask);
-            cout<<endl<<"dif="<<showpos<<setprecision(2)<<dif<<noshowpos<<setprecision(6);
+        cout<<endl;
+        Dif(dif);
         
         std::cout << '\n';
         for (const auto& ms : rootMovesNow) {
             int d = (int)std::to_string(ms.visits).size();
-            int spacesBeforePrior = 1 + (to_string(rootMovesNow[0].visits).size() - d);
+            int spacesBeforePrior = 1 + (getMaxVisitsLen(rootMovesNow) - d);
 
             std::cout
                 << moveToStr(ms.move)
@@ -5632,7 +5632,9 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
                 << " visits " << ms.visits
                 << std::string(spacesBeforePrior, ' ')
                 << "prior " << ms.prior
-                << '\n';
+                <<' ';
+                Dif(ms.dif);
+                cout<<'\n';
         }
         std::cout.flush();
     };
