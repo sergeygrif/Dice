@@ -289,6 +289,7 @@ struct moveState {
     float prior;
     uint64_t pvKey;
     std::vector<int> pv;
+    double dif;
 };
 
 
