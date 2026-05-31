@@ -5318,48 +5318,24 @@ outPV.push_back(m);
 makeMove(pos,mask,m);
 }
 }
-static uint64_t terminalAwareKeyAfterPV(MCTSTable& T,
-    Position pos,
-    const std::array<uint64_t, 4>& path,
-    const std::array<int, 64>& mask) {
-    for (int depth = 0; depth < 256; ++depth) {
-        MoveList ml;
-        int term = 0;
-        Position probe = pos;
-        genLegal(probe, path, mask, ml, term);
-        if (term) return 0ull;
-
-        TTNode* n = T.findNodeNoInsert(pos.key);
-        if (!n) return pos.key;
-        uint8_t ex = n->expanded.load(std::memory_order_acquire);
-        if (ex != 1 || n->chance || n->edgeCount == 0) return pos.key;
-        if (n->terminal) return 0ull;
-
-        TTEdge* e0 = T.edgePtr(n->edgeBegin);
-        int bi = selectBestPVEdge(*n, e0);
-        makeMove(pos, mask, e0[bi].move);
-    }
-    return pos.key;
+uint64_t terminalAwareKeyAfterLine(MCTSTable& T,Position& rootPos,array<int,64>& mask,vector<int>& line){
+Position pos=rootPos;
+for(int m:line){
+TTNode* n=T.findNodeNoInsert(pos.key);
+if(!n||n->expanded.load(memory_order_acquire)!=1)return pos.key;
+if(n->terminal)return 0;
+bool found=false;
+TTEdge* e0=T.edgePtr(n->edgeBegin);
+for(int i=0;i<n->edgeCount;i++)if(e0[i].move==m){
+found=true;
+break;
 }
-static uint64_t terminalAwareKeyAfterLine(Position pos,
-    const std::array<uint64_t, 4>& path,
-    const std::array<int, 64>& mask,
-    const std::vector<int>& line) {
-    for (int m : line) {
-        MoveList ml;
-        int term = 0;
-        Position probe = pos;
-        genLegal(probe, path, mask, ml, term);
-        if (term) return 0ull;
-        makeMove(pos, mask, m);
-    }
-
-    MoveList ml;
-    int term = 0;
-    Position probe = pos;
-    genLegal(probe, path, mask, ml, term);
-    if (term) return 0ull;
-    return pos.key;
+if(!found)return pos.key;
+makeMove(pos,mask,m);
+}
+TTNode* n=T.findNodeNoInsert(pos.key);
+if(!n||n->expanded.load(memory_order_acquire)!=1||!n->terminal)return pos.key;
+return 0;
 }
 static double computeDifForRootMoves(const std::vector<moveState>& rootMoves,
     int side,
