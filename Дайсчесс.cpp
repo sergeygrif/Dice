@@ -5366,6 +5366,34 @@ stable_sort(rootMoves.begin(),rootMoves.end(),[](const moveState& a,const moveSt
 return rootMoves[0].dif;
 }
 void collectRootMoves(MCTSTable& T,const Position& rootPos,float& outQSideToMove,vector<moveState>& outMoves);
+void extractDifPVUntilChance(MCTSTable& T,Position& rootPos,array<int,64>& mask,vector<moveState>& rootMoves,vector<int>& outPV){
+outPV.clear();
+Position pos=rootPos;
+if(rootMoves.empty())return;
+outPV.push_back(rootMoves[0].move);
+makeMove(pos,mask,rootMoves[0].move);
+while(1){
+TTNode* n=T.findNodeNoInsert(pos.key);
+if(!n||n->expanded.load(memory_order_acquire)!=1||n->edgeCount==0)return;
+float q;
+vector<moveState> moves;
+collectRootMoves(T,pos,q,moves);
+if(n->terminal){
+outPV.push_back(moves[0].move);
+return;
+}
+for(moveState& ms:moves){
+if(pos.side&&ms.eval>=0)ms.eval=1-ms.eval;
+Position p=pos;
+makeMove(p,mask,ms.move);
+extractBestPVUntilChance(T,p,mask,ms.pv,ms.pvKey);
+ms.pv.insert(ms.pv.begin(),ms.move);
+}
+computeDifForRootMoves(moves,T,pos,mask);
+outPV.push_back(moves[0].move);
+makeMove(pos,mask,moves[0].move);
+}
+}
 mutex posMutex;
 Position POS;
 array<uint64_t,4> PATH;
