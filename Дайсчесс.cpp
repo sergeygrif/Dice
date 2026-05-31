@@ -5598,8 +5598,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             for (auto& ms : rootMovesNow) {
                 Position p = rootPos;
                 makeMove(p, mask, ms.move);
-                ms.pvKey = terminalAwareKeyAfterPV(T, p, path, mask);
-                extractBestPVUntilChance(T, p, mask, ms.pv, 255);
+                extractBestPVUntilChance(T, p, mask, ms.pv, ms.pvKey);
                 ms.pv.insert(ms.pv.begin(), ms.move);
             }
         }
@@ -5702,8 +5701,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         for (auto& ms : outRootMoves) {
             Position p = rootPos;
             makeMove(p, mask, ms.move);
-            ms.pvKey = terminalAwareKeyAfterPV(T, p, path, mask);
-            extractBestPVUntilChance(T, p, mask, ms.pv, 255);
+            extractBestPVUntilChance(T, p, mask, ms.pv, ms.pvKey);
             ms.pv.insert(ms.pv.begin(), ms.move);
         }
     }
