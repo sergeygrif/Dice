@@ -10939,7 +10939,7 @@ pos=POS;
 ready=1;
 }
 }
-if(ready)mctsBatchedMT(pos,PATH,MASK,3600,eval,depth,moves,pv,1,1);
+if(ready)mctsBatchedMT(pos,PATH,MASK,INT_MAX,eval,depth,moves,pv,1,1);
 }
 }
 int main() {
@@ -10995,7 +10995,7 @@ searchThread.join();
         float mctsAvgDepth = 0.0f;
         std::vector<int> pvBeforeRoll;
         std::vector<moveState> rootMoves;
-        mctsBatchedMT(pos, path, mask, 60.0, mctsEvalWhite, mctsAvgDepth, rootMoves, pvBeforeRoll, 1, 0);
+        mctsBatchedMT(pos, path, mask, INT_MAX, mctsEvalWhite, mctsAvgDepth, rootMoves, pvBeforeRoll, 1, 0);
         clearConsoleFull();
         std::cout << std::fixed << std::setprecision(2);
         std::cout << "depth=" << mctsAvgDepth << std::endl;
