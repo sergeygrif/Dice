@@ -11033,6 +11033,7 @@ searchThread.join();
         }
 
         diagLogLine("[main] finished normally");
+        cin.get();
         return 0;
     }
     catch (const std::exception& e) {
@@ -11043,5 +11044,4 @@ searchThread.join();
         diagLogLine("[main] fatal unknown exception");
         return 1;
     }
-cin.get();
 }
