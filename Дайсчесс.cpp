@@ -11007,8 +11007,10 @@ searchThread.join();
             std::cout << moveToStr(pvBeforeRoll[i]);
         }
         
+        if(rootMoves.size()){
         cout<<endl;
         Dif(rootMoves[0].dif);
+        }
         cout<<endl;
         for (const auto& ms : rootMoves) {
             int d = (int)std::to_string(ms.visits).size();
