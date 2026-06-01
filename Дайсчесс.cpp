@@ -11024,9 +11024,6 @@ searchThread.join();
                 Dif(ms.dif);
                 cout<<endl;
         }
-
-        cin.get();
-
         {
             std::lock_guard<std::mutex> lk(g_trtMutex);
             g_trt.shutdown();
@@ -11044,4 +11041,5 @@ searchThread.join();
         diagLogLine("[main] fatal unknown exception");
         return 1;
     }
+cin.get();
 }
