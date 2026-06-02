@@ -3818,6 +3818,7 @@ struct SearchParams {
     float c_init = 1.25f;
     float fpu_reduction = 0.08f;
     float c_base = 1000000;
+    float c_mult = 0;
 };
 
 static const SearchParams kDefaultSearchParams{};
@@ -3826,7 +3827,7 @@ static AI_FORCEINLINE float cpuctFromVisits(
     uint32_t parentVisits,
     bool isRoot,
     const SearchParams& sp) {
-    float c = sp.c_init;
+    float c = sp.c_init+sp.c_mult*log((parentVisits+sp.c_base)/sp.c_base);
     if (isRoot) c *= 1.10f;
     return c;
 }
