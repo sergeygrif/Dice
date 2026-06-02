@@ -3818,7 +3818,7 @@ struct SearchParams {
     float c_init = 1.25f;
     float fpu_reduction = 0.08f;
     float c_base = 1000000;
-    float c_mult = 2;
+    float c_mult = 1;
 };
 
 static const SearchParams kDefaultSearchParams{};
