@@ -10944,9 +10944,7 @@ if(ready)mctsBatchedMT(pos,PATH,MASK,INT_MAX,eval,depth,moves,pv,1,1);
 }
 }
 int main() {
-    installCrashDiagnostics();
-
-    try {
+     try {
         const std::string ptFile = "net.pt";
         const std::string emaFile = "net_ema.pt";
         const std::string planFile = "net.plan";
