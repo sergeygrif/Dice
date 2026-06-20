@@ -10856,8 +10856,8 @@ dif+=DIF(s1[n],s2[n]);
 }
 return dif>=10000;
 }
-void NEW(int& change,vector<int>& s1,vector<int>& s2,vector<int>& b1,vector<int>& b2){
-int stabmin,stabfull,i,roll;
+void NEW(int& roll,int& change,vector<int>& s1,vector<int>& s2,vector<int>& b1,vector<int>& b2){
+int stabmin,stabfull,i;
 vector<int> b;
 vector<vector<int>> v;
 vector<BOARDSTAT> bs;
@@ -10877,10 +10877,10 @@ if(v[i].empty()&&s1.size()||roll==0&&stabmin||roll&&stabfull&&DIF(v[!i],v[i])==0
 }
 }
 void LOAD(){
-int change,side,from,to,piece;
+int roll,change,side,from,to,piece;
 vector<int> s1,s2,b1,b2,way;
 for(;;END(s1,s2,b1,b2)){
-NEW(change,s1,s2,b1,b2);
+NEW(roll,change,s1,s2,b1,b2);
 lock_guard<mutex> lock(posMutex);
 if(s2.empty()){
 START(POS);
