@@ -10922,32 +10922,26 @@ POS.key=computeKey(POS);
 }
 }
 void SEARCH(){
-bool ready;
-bool sideChanged;
+int clear,ready;
 Position pos;
 float eval,depth;
 vector<moveState> moves;
 vector<int> pv;
-const size_t nodePow2 = 1ull << (26 - 3);
-const size_t edgeCap = 1ull << (29 - 3);
-MCTSTable T(nodePow2, edgeCap);
+MCTSTable T(1<<23,1<<26);
 START(pos);
 while(1){
 Sleep(1);
-ready=0;
-sideChanged=0;
+ready=clear=0;
 {
 lock_guard<mutex> lock(posMutex);
-if(POS.key!=pos.key&&POS.dice){
-sideChanged=(POS.side!=pos.side);
+if(POS.key!=pos.key){
 pos=POS;
-ready=1;
+clear=ROLL;
+ready=POS.color[0]&POS.piece[5]&&POS.color[1]&POS.piece[5];
 }
 }
-if(ready){
-if(sideChanged)T.newGame();
-mctsBatchedMT(T,pos,PATH,MASK,INT_MAX,eval,depth,moves,pv,1,1);
-}
+if(clear)T.newGame();
+if(ready)mctsBatchedMT(T,pos,PATH,MASK,INT_MAX,eval,depth,moves,pv,1,1);
 }
 }
 int main() {
