@@ -5406,7 +5406,8 @@ mutex posMutex;
 Position POS;
 array<uint64_t,4> PATH;
 array<int,64> MASK;
-void mctsBatchedMT(Position& rootPos,
+void mctsBatchedMT(MCTSTable& T,
+    Position& rootPos,
     std::array<uint64_t, 4>& path,
     std::array<int, 64>& mask,
     double timeSec,
@@ -5434,11 +5435,6 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         }
         return;
     }
-
-    const size_t nodePow2 = 1ull << 26-3*abort;
-    const size_t edgeCap = 1ull << 29-3*abort;
-
-    MCTSTable T(nodePow2, edgeCap);
 
     TTNode* rootNode = T.getNode(rootPos.key);
     if (!rootNode) {
@@ -10925,22 +10921,31 @@ POS.key=computeKey(POS);
 }
 void SEARCH(){
 bool ready;
+bool sideChanged;
 Position pos;
 float eval,depth;
 vector<moveState> moves;
 vector<int> pv;
+const size_t nodePow2 = 1ull << (26 - 3);
+const size_t edgeCap = 1ull << (29 - 3);
+MCTSTable T(nodePow2, edgeCap);
 START(pos);
 while(1){
 Sleep(1);
 ready=0;
+sideChanged=0;
 {
 lock_guard<mutex> lock(posMutex);
 if(POS.key!=pos.key&&POS.dice){
+sideChanged=(POS.side!=pos.side);
 pos=POS;
 ready=1;
 }
 }
-if(ready)mctsBatchedMT(pos,PATH,MASK,INT_MAX,eval,depth,moves,pv,1,1);
+if(ready){
+if(sideChanged)T.newGame();
+mctsBatchedMT(T,pos,PATH,MASK,INT_MAX,eval,depth,moves,pv,1,1);
+}
 }
 }
 int main() {
@@ -10994,7 +10999,10 @@ searchThread.join();
         float mctsAvgDepth = 0.0f;
         std::vector<int> pvBeforeRoll;
         std::vector<moveState> rootMoves;
-        mctsBatchedMT(pos, path, mask, INT_MAX, mctsEvalWhite, mctsAvgDepth, rootMoves, pvBeforeRoll, 1, 0);
+        const size_t nodePow2 = 1ull << 26;
+        const size_t edgeCap = 1ull << 29;
+        MCTSTable T(nodePow2, edgeCap);
+        mctsBatchedMT(T, pos, path, mask, INT_MAX, mctsEvalWhite, mctsAvgDepth, rootMoves, pvBeforeRoll, 1, 0);
         clearConsoleFull();
         std::cout << std::fixed << std::setprecision(2);
         std::cout << "depth=" << mctsAvgDepth << std::endl;
