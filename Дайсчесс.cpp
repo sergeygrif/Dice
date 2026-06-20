@@ -5403,6 +5403,7 @@ for(moveState& ms:rootMoves)maxLen=max(maxLen,int(to_string(ms.visits).size()));
 return maxLen;
 }
 mutex posMutex;
+int ROLL;
 Position POS;
 array<uint64_t,4> PATH;
 array<int,64> MASK;
@@ -10882,6 +10883,7 @@ vector<int> s1,s2,b1,b2,way;
 for(;;END(s1,s2,b1,b2)){
 NEW(roll,change,s1,s2,b1,b2);
 lock_guard<mutex> lock(posMutex);
+ROLL=roll;
 if(s2.empty()){
 START(POS);
 continue;
