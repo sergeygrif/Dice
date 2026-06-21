@@ -10859,22 +10859,26 @@ return dif>=10000;
 }
 void NEW(int& roll,int& change,vector<int>& s1,vector<int>& s2,vector<int>& b1,vector<int>& b2){
 int stabmin,stabfull,i;
+time_point<steady_clock> t1,t2;
 vector<int> b;
 vector<vector<int>> v;
 vector<BOARDSTAT> bs;
-stabfull=stabmin=change=0;
+t1=steady_clock::now();
 v={s1,{}};
+stabfull=stabmin=change=0;
 for(i=1;;i=!i){
+t2=steady_clock::now();
 v[i]=S();
 change+=SIDE(v[i])!=SIDE(v[!i]);
 stabmin+=STABMIN(v[!i],v[i]);
 stabfull+=STABFULL(v[!i],v[i]);
 roll=s1.empty()||change||v[i].empty();
+if(DIF(v[!i],v[i]))t1=t2;
 b=BOARD(v[i]);
 ADD(b1,b,bs);
 if(roll||DICENEXT(s1,v[i]))s2=v[i];
 if(roll||bs.size()&&b==bs[0].board)b2=b;
-if(v[i].empty()&&s1.size()||roll==0&&stabmin||roll&&stabfull&&DIF(v[!i],v[i])==0)return;
+if(v[i].empty()&&s1.size()||roll==0&&stabmin||roll&&stabfull&&(t2-t1).count()>=100000000)return;
 }
 }
 void LOAD(){
