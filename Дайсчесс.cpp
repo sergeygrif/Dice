@@ -10927,10 +10927,10 @@ POS.key=computeKey(POS);
 }
 void SEARCH(){
 int clear,ready;
-Position pos;
 float eval,depth;
-vector<moveState> moves;
 vector<int> pv;
+vector<moveState> moves;
+Position pos;
 MCTSTable T(1<<23,1<<26);
 START(pos);
 while(1){
@@ -10974,6 +10974,7 @@ int main() {
             return 1;
         }
 if(fen=="s"){
+ROLL=0;
 START(POS);
 START();
 thread loadThread(LOAD);
