@@ -1507,8 +1507,11 @@ static AI_FORCEINLINE AI_HOT void genMovesSideT(const Position& pos, const array
                 uint64_t capL = ((pawns << 7) & ~FILE_H) & them;
                 uint64_t capR = ((pawns << 9) & ~FILE_A) & them;
 
-                uint64_t capLp = capL & RANK_8, capLn = capL & ~RANK_8;
-                uint64_t capRp = capR & RANK_8, capRn = capR & ~RANK_8;
+                const uint64_t enemyKing = pos.piece[5] & them;
+                uint64_t capLp = capL & RANK_8 & ~enemyKing;
+                uint64_t capLn = (capL & ~RANK_8) | (capL & RANK_8 & enemyKing);
+                uint64_t capRp = capR & RANK_8 & ~enemyKing;
+                uint64_t capRn = (capR & ~RANK_8) | (capR & RANK_8 & enemyKing);
 
                 while (capLn) { int to = pop_lsb(capLn); ADD_MOVE_FAST(to - 7, to, 0); }
                 while (capRn) { int to = pop_lsb(capRn); ADD_MOVE_FAST(to - 9, to, 0); }
@@ -1566,8 +1569,11 @@ static AI_FORCEINLINE AI_HOT void genMovesSideT(const Position& pos, const array
                 uint64_t capL = ((pawns >> 9) & ~FILE_H) & them;
                 uint64_t capR = ((pawns >> 7) & ~FILE_A) & them;
 
-                uint64_t capLp = capL & RANK_1, capLn = capL & ~RANK_1;
-                uint64_t capRp = capR & RANK_1, capRn = capR & ~RANK_1;
+                const uint64_t enemyKing = pos.piece[5] & them;
+                uint64_t capLp = capL & RANK_1 & ~enemyKing;
+                uint64_t capLn = (capL & ~RANK_1) | (capL & RANK_1 & enemyKing);
+                uint64_t capRp = capR & RANK_1 & ~enemyKing;
+                uint64_t capRn = (capR & ~RANK_1) | (capR & RANK_1 & enemyKing);
 
                 while (capLn) { int to = pop_lsb(capLn); ADD_MOVE_FAST(to + 9, to, 0); }
                 while (capRn) { int to = pop_lsb(capRn); ADD_MOVE_FAST(to + 7, to, 0); }
@@ -1713,8 +1719,11 @@ static AI_FORCEINLINE AI_HOT int genFirstSideT(const Position& pos, const array<
                 uint64_t capL = ((pawns << 7) & ~FILE_H) & them;
                 uint64_t capR = ((pawns << 9) & ~FILE_A) & them;
 
-                uint64_t capLp = capL & RANK_8, capLn = capL & ~RANK_8;
-                uint64_t capRp = capR & RANK_8, capRn = capR & ~RANK_8;
+                const uint64_t enemyKing = pos.piece[5] & them;
+                uint64_t capLp = capL & RANK_8 & ~enemyKing;
+                uint64_t capLn = (capL & ~RANK_8) | (capL & RANK_8 & enemyKing);
+                uint64_t capRp = capR & RANK_8 & ~enemyKing;
+                uint64_t capRn = (capR & ~RANK_8) | (capR & RANK_8 & enemyKing);
 
                 if (capLn) { int to = ctz64(capLn); RETURN_MOVE_FAST(to - 7, to, 0); }
                 if (capRn) { int to = ctz64(capRn); RETURN_MOVE_FAST(to - 9, to, 0); }
@@ -1748,8 +1757,11 @@ static AI_FORCEINLINE AI_HOT int genFirstSideT(const Position& pos, const array<
                 uint64_t capL = ((pawns >> 9) & ~FILE_H) & them;
                 uint64_t capR = ((pawns >> 7) & ~FILE_A) & them;
 
-                uint64_t capLp = capL & RANK_1, capLn = capL & ~RANK_1;
-                uint64_t capRp = capR & RANK_1, capRn = capR & ~RANK_1;
+                const uint64_t enemyKing = pos.piece[5] & them;
+                uint64_t capLp = capL & RANK_1 & ~enemyKing;
+                uint64_t capLn = (capL & ~RANK_1) | (capL & RANK_1 & enemyKing);
+                uint64_t capRp = capR & RANK_1 & ~enemyKing;
+                uint64_t capRn = (capR & ~RANK_1) | (capR & RANK_1 & enemyKing);
 
                 if (capLn) { int to = ctz64(capLn); RETURN_MOVE_FAST(to + 9, to, 0); }
                 if (capRn) { int to = ctz64(capRn); RETURN_MOVE_FAST(to + 7, to, 0); }
