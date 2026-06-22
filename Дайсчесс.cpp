@@ -10960,6 +10960,137 @@ if(clear)T.newGame();
 if(ready)mctsBatchedMT(T,pos,PATH,MASK,INT_MAX,eval,depth,moves,pv,1,1);
 }
 }
+
+static bool isChanceOrTerminalPosition(Position& pos,
+    const std::array<uint64_t, 4>& path,
+    const std::array<int, 64>& mask,
+    bool& outTerminal,
+    bool& outChance) {
+    MoveList ml;
+    int term = 0;
+    Position tmp = pos;
+    genLegal(tmp, path, mask, ml, term);
+    outTerminal = (term != 0);
+    outChance = (!outTerminal && ml.n == 0);
+    return outTerminal || outChance;
+}
+
+static bool analyzeAndPlayFirstPvMove(MCTSTable& T,
+    Position& pos,
+    std::array<uint64_t, 4>& path,
+    std::array<int, 64>& mask,
+    double seconds) {
+    T.newGame();
+    float eval = 0.5f;
+    float depth = 0.0f;
+    std::vector<moveState> moves;
+    std::vector<int> pv;
+    mctsBatchedMT(T, pos, path, mask, seconds, eval, depth, moves, pv, 0, 0);
+    if (pv.empty()) return false;
+    makeMove(pos, mask, pv[0]);
+    return true;
+}
+
+static bool analyzeOnceAndPlayPvUntilChance(MCTSTable& T,
+    Position& pos,
+    std::array<uint64_t, 4>& path,
+    std::array<int, 64>& mask,
+    double seconds) {
+    T.newGame();
+    float eval = 0.5f;
+    float depth = 0.0f;
+    std::vector<moveState> moves;
+    std::vector<int> pv;
+    mctsBatchedMT(T, pos, path, mask, seconds, eval, depth, moves, pv, 0, 0);
+    if (pv.empty()) return false;
+
+    for (int mv : pv) {
+        bool terminal = false;
+        bool chance = false;
+        if (isChanceOrTerminalPosition(pos, path, mask, terminal, chance)) return true;
+        makeMove(pos, mask, mv);
+    }
+    return true;
+}
+
+static int playOneTimedPvMatchGame(const Position& startPos,
+    std::array<uint64_t, 4> path,
+    std::array<int, 64> mask,
+    bool p1IsWhite,
+    const std::vector<int>* mirroredDice,
+    std::vector<int>* producedDice,
+    int maxPlies = 512) {
+    Position pos = startPos;
+    MCTSTable p1Table(1ull << 23, 1ull << 26);
+    MCTSTable p2Table(1ull << 23, 1ull << 26);
+    size_t chanceIdx = 0;
+
+    for (int ply = 0; ply < maxPlies; ++ply) {
+        bool terminal = false;
+        bool chance = false;
+        isChanceOrTerminalPosition(pos, path, mask, terminal, chance);
+
+        if (terminal) {
+            const bool p1Won = ((pos.side == 0) == p1IsWhite);
+            return p1Won ? +1 : -1;
+        }
+
+        if (chance) {
+            TTNode* n = (((pos.side == 0) == p1IsWhite) ? p1Table : p2Table).findNodeNoInsert(pos.key);
+            if (mirroredDice && chanceIdx < mirroredDice->size()) {
+                makeRandomWithRolledDice(pos, n, (*mirroredDice)[chanceIdx]);
+            }
+            else {
+                const int rolledDice = Dice[Range(Random)];
+                if (producedDice) producedDice->push_back(rolledDice);
+                makeRandomWithRolledDice(pos, n, rolledDice);
+            }
+            ++chanceIdx;
+            continue;
+        }
+
+        const bool p1Turn = ((pos.side == 0) == p1IsWhite);
+        if (p1Turn) {
+            do {
+                if (!analyzeAndPlayFirstPvMove(p1Table, pos, path, mask, 1.0)) return 0;
+                isChanceOrTerminalPosition(pos, path, mask, terminal, chance);
+            } while (!terminal && !chance);
+        }
+        else {
+            if (!analyzeOnceAndPlayPvUntilChance(p2Table, pos, path, mask, 3.0)) return 0;
+        }
+    }
+
+    return 0;
+}
+
+static MatchStatsGeneric runTimedPvMatch(int games) {
+    MatchStatsGeneric st;
+    for (int g = 0; g < games; g += 2) {
+        Position startPos;
+        std::array<uint64_t, 4> path;
+        std::array<int, 64> mask;
+        chess960(startPos, path, mask);
+
+        std::vector<int> firstGameDice;
+        int r1 = playOneTimedPvMatchGame(startPos, path, mask, true, nullptr, &firstGameDice);
+        if (r1 > 0) ++st.p1Wins; else if (r1 < 0) ++st.p2Wins; else ++st.draws;
+
+        if (g + 1 < games) {
+            int r2 = playOneTimedPvMatchGame(startPos, path, mask, false, &firstGameDice, nullptr);
+            if (r2 > 0) ++st.p1Wins; else if (r2 < 0) ++st.p2Wins; else ++st.draws;
+        }
+
+        const int played = std::min(g + 2, games);
+        if ((played % 10) == 0 || played == games) {
+            std::cout << "[timed-pv-match] games=" << played
+                << " p1/p2/draw=" << st.p1Wins << '/' << st.p2Wins << '/' << st.draws
+                << " p1Score=" << std::fixed << std::setprecision(4) << st.p1Score() << '\n';
+        }
+    }
+    return st;
+}
+
 int main() {
      try {
         const std::string ptFile = "net.pt";
@@ -10984,6 +11115,16 @@ int main() {
             diagLogLine("[main] TensorRT engine not ready");
             std::cout << "TensorRT engine is not loaded.\n";
             return 1;
+        }
+        if (fen == "match") {
+            MatchStatsGeneric st = runTimedPvMatch(10000);
+            std::cout << "[timed-pv-match] final p1/p2/draw="
+                << st.p1Wins << '/' << st.p2Wins << '/' << st.draws
+                << " p1Score=" << std::fixed << std::setprecision(4) << st.p1Score() << std::endl;
+            std::lock_guard<std::mutex> lk(g_trtMutex);
+            g_trt.shutdown();
+            g_trtReady = false;
+            return 0;
         }
 if(fen=="s"){
 ROLL=0;
