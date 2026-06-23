@@ -1413,7 +1413,7 @@ static AI_FORCEINLINE char pieceAtChar(const Position& pos, int sq) {
 }
 static void printBoardViz(const Position& pos) {
     for (int r = 7; r >= 0; --r) {
-        cout <<"| ";
+        cout << "| ";
         for (int f = 0; f < 8; ++f) {
             int sq = r * 8 + f;
             uint64_t b = bit(sq);
@@ -3839,7 +3839,7 @@ static AI_FORCEINLINE float cpuctFromVisits(
     uint32_t parentVisits,
     bool isRoot,
     const SearchParams& sp) {
-    float c = sp.c_init+sp.c_mult*log((parentVisits+sp.c_base)/sp.c_base);
+    float c = sp.c_init + sp.c_mult * log((parentVisits + sp.c_base) / sp.c_base);
     if (isRoot) c *= 1.10f;
     return c;
 }
@@ -5312,113 +5312,113 @@ static std::string moveToStr(int move) {
     if (pc) s.push_back(pc);
     return s;
 }
-void extractBestPVUntilChance(MCTSTable& T,Position& rootPos,array<int,64>& mask,vector<int>& outPV,uint64_t& key){
-outPV.clear();
-Position pos=rootPos;
-while(1){
-TTNode* n=T.findNodeNoInsert(pos.key);
-if(!n||n->expanded.load(memory_order_acquire)!=1||n->edgeCount==0){
-key=pos.key;
-return;
+void extractBestPVUntilChance(MCTSTable& T, Position& rootPos, array<int, 64>& mask, vector<int>& outPV, uint64_t& key) {
+    outPV.clear();
+    Position pos = rootPos;
+    while (1) {
+        TTNode* n = T.findNodeNoInsert(pos.key);
+        if (!n || n->expanded.load(memory_order_acquire) != 1 || n->edgeCount == 0) {
+            key = pos.key;
+            return;
+        }
+        TTEdge* e0 = T.edgePtr(n->edgeBegin);
+        if (n->terminal) {
+            outPV.push_back(e0[0].move);
+            key = 0;
+            return;
+        }
+        int m = e0[selectBestPVEdge(*n, e0)].move;
+        outPV.push_back(m);
+        makeMove(pos, mask, m);
+    }
 }
-TTEdge* e0=T.edgePtr(n->edgeBegin);
-if(n->terminal){
-outPV.push_back(e0[0].move);
-key=0;
-return;
+uint64_t terminalAwareKeyAfterLine(MCTSTable& T, Position& rootPos, array<int, 64>& mask, vector<int>& line) {
+    Position pos = rootPos;
+    for (int m : line) {
+        TTNode* n = T.findNodeNoInsert(pos.key);
+        if (!n || n->expanded.load(memory_order_acquire) != 1)return pos.key;
+        if (n->terminal)return 0;
+        bool found = false;
+        TTEdge* e0 = T.edgePtr(n->edgeBegin);
+        for (int i = 0; i < n->edgeCount; i++)if (e0[i].move == m) {
+            found = true;
+            break;
+        }
+        if (!found)return pos.key;
+        makeMove(pos, mask, m);
+    }
+    TTNode* n = T.findNodeNoInsert(pos.key);
+    if (!n || n->expanded.load(memory_order_acquire) != 1 || !n->terminal)return pos.key;
+    return 0;
 }
-int m=e0[selectBestPVEdge(*n,e0)].move;
-outPV.push_back(m);
-makeMove(pos,mask,m);
+int Alternative(moveState& cur, moveState& alt, MCTSTable& T, Position& rootPos, array<int, 64>& mask) {
+    if (alt.pvKey == cur.pvKey)return 0;
+    vector<int> line;
+    line.push_back(cur.move);
+    for (int m : alt.pv)if (m != cur.move)line.push_back(m);
+    return terminalAwareKeyAfterLine(T, rootPos, mask, line) != alt.pvKey;
 }
+double computeDifForRootMoves(vector<moveState>& rootMoves, MCTSTable& T, Position& rootPos, array<int, 64>& mask) {
+    auto toSidePerspective = [&rootPos](double eval) {return rootPos.side == 0 ? eval : 1 - eval; };
+    if (rootMoves.empty())return 100;
+    for (moveState& ms : rootMoves) {
+        ms.dif = 100;
+        if (ms.pvKey == 0 || rootMoves[0].visits == 0)continue;
+        if (ms.visits == 0) {
+            ms.dif = -100;
+            continue;
+        }
+        for (moveState& alt : rootMoves)if (Alternative(ms, alt, T, rootPos, mask) && alt.visits) {
+            if (alt.pvKey == 0 || &alt == &rootMoves[0]) {
+                ms.dif = -100;
+                break;
+            }
+            ms.dif = min(ms.dif, 100 * (toSidePerspective(ms.eval) - toSidePerspective(alt.eval)));
+        }
+    }
+    stable_sort(rootMoves.begin(), rootMoves.end(), [](const moveState& a, const moveState& b) {return a.dif > b.dif; });
+    return rootMoves[0].dif;
 }
-uint64_t terminalAwareKeyAfterLine(MCTSTable& T,Position& rootPos,array<int,64>& mask,vector<int>& line){
-Position pos=rootPos;
-for(int m:line){
-TTNode* n=T.findNodeNoInsert(pos.key);
-if(!n||n->expanded.load(memory_order_acquire)!=1)return pos.key;
-if(n->terminal)return 0;
-bool found=false;
-TTEdge* e0=T.edgePtr(n->edgeBegin);
-for(int i=0;i<n->edgeCount;i++)if(e0[i].move==m){
-found=true;
-break;
+void Dif(double dif) { if (dif > -100)cout << showpos << setprecision(2) << "dif=" << dif << noshowpos << setprecision(6); }
+void collectRootMoves(MCTSTable& T, const Position& rootPos, float& outQSideToMove, vector<moveState>& outMoves);
+void extractDifPVUntilChance(MCTSTable& T, Position& rootPos, array<int, 64>& mask, vector<moveState>& rootMoves, vector<int>& outPV) {
+    outPV.clear();
+    Position pos = rootPos;
+    if (rootMoves.empty())return;
+    outPV.push_back(rootMoves[0].move);
+    makeMove(pos, mask, rootMoves[0].move);
+    while (1) {
+        TTNode* n = T.findNodeNoInsert(pos.key);
+        if (!n || n->expanded.load(memory_order_acquire) != 1 || n->edgeCount == 0)return;
+        float q;
+        vector<moveState> moves;
+        collectRootMoves(T, pos, q, moves);
+        if (n->terminal) {
+            outPV.push_back(moves[0].move);
+            return;
+        }
+        for (moveState& ms : moves) {
+            if (pos.side && ms.eval >= 0)ms.eval = 1 - ms.eval;
+            Position p = pos;
+            makeMove(p, mask, ms.move);
+            extractBestPVUntilChance(T, p, mask, ms.pv, ms.pvKey);
+            ms.pv.insert(ms.pv.begin(), ms.move);
+        }
+        computeDifForRootMoves(moves, T, pos, mask);
+        outPV.push_back(moves[0].move);
+        makeMove(pos, mask, moves[0].move);
+    }
 }
-if(!found)return pos.key;
-makeMove(pos,mask,m);
-}
-TTNode* n=T.findNodeNoInsert(pos.key);
-if(!n||n->expanded.load(memory_order_acquire)!=1||!n->terminal)return pos.key;
-return 0;
-}
-int Alternative(moveState& cur,moveState& alt,MCTSTable& T,Position& rootPos,array<int,64>& mask){
-if(alt.pvKey==cur.pvKey)return 0;
-vector<int> line;
-line.push_back(cur.move);
-for(int m:alt.pv)if(m!=cur.move)line.push_back(m);
-return terminalAwareKeyAfterLine(T,rootPos,mask,line)!=alt.pvKey;
-}
-double computeDifForRootMoves(vector<moveState>& rootMoves,MCTSTable& T,Position& rootPos,array<int,64>& mask){
-auto toSidePerspective=[&rootPos](double eval){return rootPos.side==0?eval:1-eval;};
-if(rootMoves.empty())return 100;
-for(moveState& ms:rootMoves){
-ms.dif=100;
-if(ms.pvKey==0||rootMoves[0].visits==0)continue;
-if(ms.visits==0){
-ms.dif=-100;
-continue;
-}
-for(moveState& alt:rootMoves)if(Alternative(ms,alt,T,rootPos,mask)&&alt.visits){
-if(alt.pvKey==0||&alt==&rootMoves[0]){
-ms.dif=-100;
-break;
-}
-ms.dif=min(ms.dif,100*(toSidePerspective(ms.eval)-toSidePerspective(alt.eval)));
-}
-}
-stable_sort(rootMoves.begin(),rootMoves.end(),[](const moveState& a,const moveState& b){return a.dif>b.dif;});
-return rootMoves[0].dif;
-}
-void Dif(double dif){if(dif>-100)cout<<showpos<<setprecision(2)<<"dif="<<dif<<noshowpos<<setprecision(6);}
-void collectRootMoves(MCTSTable& T,const Position& rootPos,float& outQSideToMove,vector<moveState>& outMoves);
-void extractDifPVUntilChance(MCTSTable& T,Position& rootPos,array<int,64>& mask,vector<moveState>& rootMoves,vector<int>& outPV){
-outPV.clear();
-Position pos=rootPos;
-if(rootMoves.empty())return;
-outPV.push_back(rootMoves[0].move);
-makeMove(pos,mask,rootMoves[0].move);
-while(1){
-TTNode* n=T.findNodeNoInsert(pos.key);
-if(!n||n->expanded.load(memory_order_acquire)!=1||n->edgeCount==0)return;
-float q;
-vector<moveState> moves;
-collectRootMoves(T,pos,q,moves);
-if(n->terminal){
-outPV.push_back(moves[0].move);
-return;
-}
-for(moveState& ms:moves){
-if(pos.side&&ms.eval>=0)ms.eval=1-ms.eval;
-Position p=pos;
-makeMove(p,mask,ms.move);
-extractBestPVUntilChance(T,p,mask,ms.pv,ms.pvKey);
-ms.pv.insert(ms.pv.begin(),ms.move);
-}
-computeDifForRootMoves(moves,T,pos,mask);
-outPV.push_back(moves[0].move);
-makeMove(pos,mask,moves[0].move);
-}
-}
-int getMaxVisitsLen(vector<moveState>& rootMoves){
-int maxLen=0;
-for(moveState& ms:rootMoves)maxLen=max(maxLen,int(to_string(ms.visits).size()));
-return maxLen;
+int getMaxVisitsLen(vector<moveState>& rootMoves) {
+    int maxLen = 0;
+    for (moveState& ms : rootMoves)maxLen = max(maxLen, int(to_string(ms.visits).size()));
+    return maxLen;
 }
 mutex posMutex;
 int ROLL;
 Position POS;
-array<uint64_t,4> PATH;
-array<int,64> MASK;
+array<uint64_t, 4> PATH;
+array<int, 64> MASK;
 void mctsBatchedMT(MCTSTable& T,
     Position& rootPos,
     std::array<uint64_t, 4>& path,
@@ -5428,7 +5428,6 @@ void mctsBatchedMT(MCTSTable& T,
     float& outAvgDepth,
     std::vector<moveState>& outRootMoves,
     std::vector<int>& outPVBeforeRoll,
-    std::vector<int>& outMctsPV,
     int write,
     int abort) {
     MoveList ml;
@@ -5436,7 +5435,6 @@ void mctsBatchedMT(MCTSTable& T,
     genLegal(rootPos, path, mask, ml, term);
 
     outPVBeforeRoll.clear();
-    outMctsPV.clear();
 
     if (term) {
         outEvalWhite = 1 - rootPos.side;
@@ -5444,10 +5442,9 @@ void mctsBatchedMT(MCTSTable& T,
         outRootMoves.clear();
         outRootMoves.push_back({ ml.m[0], outEvalWhite, 0, 0.0f, 0ull });
         outPVBeforeRoll.push_back(ml.m[0]);
-        outMctsPV.push_back(ml.m[0]);
         if (write == 1) {
             clearConsoleFull();
-std::cout << moveToStr(ml.m[0]) << std::endl;
+            std::cout << moveToStr(ml.m[0]) << std::endl;
         }
         return;
     }
@@ -5458,7 +5455,6 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         outAvgDepth = 0.0f;
         outRootMoves.clear();
         outPVBeforeRoll.clear();
-        outMctsPV.clear();
         return;
     }
 
@@ -5469,7 +5465,6 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         outAvgDepth = 0.0f;
         outRootMoves.clear();
         outPVBeforeRoll.clear();
-        outMctsPV.clear();
         return;
     }
 
@@ -5620,8 +5615,8 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         }
 
         std::vector<int> pvNow;
-        double dif=computeDifForRootMoves(rootMovesNow,T,rootPos,mask);
-        extractDifPVUntilChance(T,rootPos,mask,rootMovesNow,pvNow);
+        double dif = computeDifForRootMoves(rootMovesNow, T, rootPos, mask);
+        extractDifPVUntilChance(T, rootPos, mask, rootMovesNow, pvNow);
 
         clearConsoleFull();
         std::cout << std::fixed << std::setprecision(2);
@@ -5632,10 +5627,10 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             if (i) std::cout << ' ';
             std::cout << moveToStr(pvNow[i]);
         }
-        
-        cout<<endl;
+
+        cout << endl;
         Dif(dif);
-        
+
         std::cout << '\n';
         for (const auto& ms : rootMovesNow) {
             int d = (int)std::to_string(ms.visits).size();
@@ -5647,12 +5642,12 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
                 << " visits " << ms.visits
                 << std::string(spacesBeforePrior, ' ')
                 << "prior " << ms.prior
-                <<' ';
-                Dif(ms.dif);
-                cout<<'\n';
+                << ' ';
+            Dif(ms.dif);
+            cout << '\n';
         }
         std::cout.flush();
-    };
+        };
 
     bool forceExit = false;
     while (std::chrono::steady_clock::now() < tEnd) {
@@ -5725,13 +5720,8 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         }
     }
 
-    outMctsPV.clear();
-    if (!outRootMoves.empty()) {
-        outMctsPV = outRootMoves[0].pv;
-    }
-
-    computeDifForRootMoves(outRootMoves,T,rootPos,mask);
-    extractDifPVUntilChance(T,rootPos,mask,outRootMoves,outPVBeforeRoll);
+    computeDifForRootMoves(outRootMoves, T, rootPos, mask);
+    extractDifPVUntilChance(T, rootPos, mask, outRootMoves, outPVBeforeRoll);
 
     (void)simOK; (void)simFail; (void)nnExp;
     if (forceExit) return;
@@ -7973,7 +7963,7 @@ static MatchStatsGeneric runUniversalMatchEngine(
         if (r > 0) p1Wins.fetch_add(1, std::memory_order_relaxed);
         else if (r < 0) p2Wins.fetch_add(1, std::memory_order_relaxed);
         else draws.fetch_add(1, std::memory_order_relaxed);
-    };
+        };
 
     for (size_t li = 0; li < lanes.size(); ++li) {
         outer.emplace_back([&, li] {
@@ -8018,7 +8008,7 @@ static MatchStatsGeneric runUniversalMatchEngine(
                 std::lock_guard<std::mutex> lk(exM);
                 if (!ex) ex = std::current_exception();
             }
-        });
+            });
     }
 
     for (auto& th : outer) {
@@ -8094,26 +8084,26 @@ static int playOneArenaGameOnLane(
         return currentTurn
             ? lane.curCtx.T.findNodeNoInsert(pos.key)
             : lane.oldCtx.T.findNodeNoInsert(pos.key);
-    };
+        };
 
     auto searchMoves = [&](bool currentTurn,
-                           const Position& pos,
-                           const std::array<uint64_t, 4>& pathRef,
-                           const std::array<int, 64>& maskRef,
-                           std::vector<moveState>& moves) -> bool {
-        SelfPlayContext& ctx = currentTurn ? lane.curCtx : lane.oldCtx;
+        const Position& pos,
+        const std::array<uint64_t, 4>& pathRef,
+        const std::array<int, 64>& maskRef,
+        std::vector<moveState>& moves) -> bool {
+            SelfPlayContext& ctx = currentTurn ? lane.curCtx : lane.oldCtx;
 
-        float q = 0.5f;
-        runFixedSims(ctx.T, ctx.pool, ctx.server, ctx.backend,
-            pos, pathRef, maskRef, simsPerPos, /*rootNoise=*/false);
+            float q = 0.5f;
+            runFixedSims(ctx.T, ctx.pool, ctx.server, ctx.backend,
+                pos, pathRef, maskRef, simsPerPos, /*rootNoise=*/false);
 
-        if (ctx.T.abort.load(std::memory_order_relaxed)) {
-            return false;
-        }
+            if (ctx.T.abort.load(std::memory_order_relaxed)) {
+                return false;
+            }
 
-        collectRootMoves(ctx.T, pos, q, moves);
-        return !moves.empty();
-    };
+            collectRootMoves(ctx.T, pos, q, moves);
+            return !moves.empty();
+        };
 
     return playOneUniversalMatchGame(
         startPos, path, mask, currentIsWhite, maxPlies,
@@ -8153,7 +8143,7 @@ static ArenaStats runArenaMatch(int games, int simsPerPos) {
                 << " score=" << std::fixed << std::setprecision(4) << s.p1Score()
                 << " LOS=" << std::setprecision(2) << los << "%\n";
         }
-    };
+        };
 
     MatchStatsGeneric g = runUniversalMatchEngine(
         lanes,
@@ -8165,8 +8155,8 @@ static ArenaStats runArenaMatch(int games, int simsPerPos) {
             bool p1IsWhite,
             const std::vector<int>* mirroredDice,
             std::vector<int>* producedDice) -> int {
-            return playOneArenaGameOnLane(
-                lane, startPos, path, mask, p1IsWhite, simsPerPos, 256, mirroredDice, producedDice);
+                return playOneArenaGameOnLane(
+                    lane, startPos, path, mask, p1IsWhite, simsPerPos, 256, mirroredDice, producedDice);
         },
         onProgress,
         /*progressEveryPairs=*/50);
@@ -8260,27 +8250,27 @@ static int playOneTuneGameOnLane(
         return p1Turn
             ? lane.p1Ctx.T.findNodeNoInsert(pos.key)
             : lane.p2Ctx.T.findNodeNoInsert(pos.key);
-    };
+        };
 
     auto searchMoves = [&](bool p1Turn,
-                           const Position& pos,
-                           const std::array<uint64_t, 4>& pathRef,
-                           const std::array<int, 64>& maskRef,
-                           std::vector<moveState>& moves) -> bool {
-        GameContext& ctx = p1Turn ? lane.p1Ctx : lane.p2Ctx;
-        const SearchParams& sp = p1Turn ? p1 : p2;
+        const Position& pos,
+        const std::array<uint64_t, 4>& pathRef,
+        const std::array<int, 64>& maskRef,
+        std::vector<moveState>& moves) -> bool {
+            GameContext& ctx = p1Turn ? lane.p1Ctx : lane.p2Ctx;
+            const SearchParams& sp = p1Turn ? p1 : p2;
 
-        float q = 0.5f;
-        runFixedSims(ctx.T, ctx.pool, sharedSrv, backend,
-            pos, pathRef, maskRef, simsPerPos, /*rootNoise=*/false, sp);
+            float q = 0.5f;
+            runFixedSims(ctx.T, ctx.pool, sharedSrv, backend,
+                pos, pathRef, maskRef, simsPerPos, /*rootNoise=*/false, sp);
 
-        if (ctx.T.abort.load(std::memory_order_relaxed)) {
-            return false;
-        }
+            if (ctx.T.abort.load(std::memory_order_relaxed)) {
+                return false;
+            }
 
-        collectRootMoves(ctx.T, pos, q, moves);
-        return !moves.empty();
-    };
+            collectRootMoves(ctx.T, pos, q, moves);
+            return !moves.empty();
+        };
 
     return playOneUniversalMatchGame(
         startPos, path, mask, p1IsWhite, maxPlies,
@@ -8333,29 +8323,29 @@ static int playOneNetArenaGameOnLane(
         return n1Turn
             ? lane.n1Ctx.T.findNodeNoInsert(pos.key)
             : lane.n2Ctx.T.findNodeNoInsert(pos.key);
-    };
+        };
 
     auto searchMoves = [&](bool n1Turn,
-                           const Position& pos,
-                           const std::array<uint64_t, 4>& pathRef,
-                           const std::array<int, 64>& maskRef,
-                           std::vector<moveState>& moves) -> bool {
-        GameContext& ctx = n1Turn ? lane.n1Ctx : lane.n2Ctx;
-        ITrainInferenceServer& srv = n1Turn ? n1Srv : n2Srv;
-        BackendBinding backend = n1Turn ? n1Backend : n2Backend;
-        const SearchParams& sp = n1Turn ? n1Params : n2Params;
+        const Position& pos,
+        const std::array<uint64_t, 4>& pathRef,
+        const std::array<int, 64>& maskRef,
+        std::vector<moveState>& moves) -> bool {
+            GameContext& ctx = n1Turn ? lane.n1Ctx : lane.n2Ctx;
+            ITrainInferenceServer& srv = n1Turn ? n1Srv : n2Srv;
+            BackendBinding backend = n1Turn ? n1Backend : n2Backend;
+            const SearchParams& sp = n1Turn ? n1Params : n2Params;
 
-        float q = 0.5f;
-        runFixedSims(ctx.T, ctx.pool, srv, backend,
-            pos, pathRef, maskRef, simsPerPos, /*rootNoise=*/false, sp);
+            float q = 0.5f;
+            runFixedSims(ctx.T, ctx.pool, srv, backend,
+                pos, pathRef, maskRef, simsPerPos, /*rootNoise=*/false, sp);
 
-        if (ctx.T.abort.load(std::memory_order_relaxed)) {
-            return false;
-        }
+            if (ctx.T.abort.load(std::memory_order_relaxed)) {
+                return false;
+            }
 
-        collectRootMoves(ctx.T, pos, q, moves);
-        return !moves.empty();
-    };
+            collectRootMoves(ctx.T, pos, q, moves);
+            return !moves.empty();
+        };
 
     return playOneUniversalMatchGame(
         startPos, path, mask, n1IsWhite, maxPlies,
@@ -8451,7 +8441,7 @@ void arena(string net1, string net2) {
         if ((playedGames % 2) == 0 && (playedGames % 100) == 0) {
             printTuneProgress(playedGames, s.p1Wins, s.p2Wins);
         }
-    };
+        };
 
     MatchStatsGeneric g = runUniversalMatchEngine(
         lanes,
@@ -8463,23 +8453,23 @@ void arena(string net1, string net2) {
             bool n1IsWhite,
             const std::vector<int>* mirroredDice,
             std::vector<int>* producedDice) -> int {
-            return playOneNetArenaGameOnLane(
-                lane,
-                n1Srv,
-                n2Srv,
-                n1Backend,
-                n2Backend,
-                n1Params,
-                n2Params,
-                startPos,
-                path,
-                mask,
-                n1IsWhite,
-                SIMS_PER_POS,
-                MAX_PLIES,
-                mirroredDice,
-                producedDice
-            );
+                return playOneNetArenaGameOnLane(
+                    lane,
+                    n1Srv,
+                    n2Srv,
+                    n1Backend,
+                    n2Backend,
+                    n1Params,
+                    n2Params,
+                    startPos,
+                    path,
+                    mask,
+                    n1IsWhite,
+                    SIMS_PER_POS,
+                    MAX_PLIES,
+                    mirroredDice,
+                    producedDice
+                );
         },
         onProgress,
         /*progressEveryPairs=*/50);
@@ -8489,7 +8479,7 @@ void arena(string net1, string net2) {
 }
 
 void tune(float c_init1, float fpu_reduction1,
-          float c_init2, float fpu_reduction2) {
+    float c_init2, float fpu_reduction2) {
     if (!g_trtReady) {
         std::cerr << "[tune] TensorRT backend is not ready.\n";
         return;
@@ -8550,7 +8540,7 @@ void tune(float c_init1, float fpu_reduction1,
         if ((playedGames % 2) == 0 && (playedGames % 100) == 0) {
             printTuneProgress(playedGames, s.p1Wins, s.p2Wins);
         }
-    };
+        };
 
     MatchStatsGeneric g = runUniversalMatchEngine(
         lanes,
@@ -8562,21 +8552,21 @@ void tune(float c_init1, float fpu_reduction1,
             bool p1IsWhite,
             const std::vector<int>* mirroredDice,
             std::vector<int>* producedDice) -> int {
-            return playOneTuneGameOnLane(
-                lane,
-                sharedSrv,
-                backend,
-                p1,
-                p2,
-                startPos,
-                path,
-                mask,
-                p1IsWhite,
-                SIMS_PER_POS,
-                MAX_PLIES,
-                mirroredDice,
-                producedDice
-            );
+                return playOneTuneGameOnLane(
+                    lane,
+                    sharedSrv,
+                    backend,
+                    p1,
+                    p2,
+                    startPos,
+                    path,
+                    mask,
+                    p1IsWhite,
+                    SIMS_PER_POS,
+                    MAX_PLIES,
+                    mirroredDice,
+                    producedDice
+                );
         },
         onProgress,
         /*progressEveryPairs=*/50);
@@ -8584,20 +8574,20 @@ void tune(float c_init1, float fpu_reduction1,
     printTuneProgress(TOTAL_GAMES, g.p1Wins, g.p2Wins);
     std::cout << "[tune] finished\n";
 }
-static float lambdaQ=1;//ok
-static float lambdaD=1;//ok
-static float lambdaC=0.8;//ok
-static float lambdaT=1;//ok
-static float lambdaS=0;//ok
-static float lambdaZ=0;//ok
+static float lambdaQ = 1;//ok
+static float lambdaD = 1;//ok
+static float lambdaC = 0.8;//ok
+static float lambdaT = 1;//ok
+static float lambdaS = 0;//ok
+static float lambdaZ = 0;//ok
 static AI_FORCEINLINE float valueToSidePerspective(float v, int fromSide, int toSide) {
     v = clamp01(v);
     return (fromSide == toSide) ? v : (1.0f - v);
 }
 
 static AI_FORCEINLINE float chanceStepDecay(uint8_t chanceCount) {
-if(chanceCount)return lambdaC;
-return lambdaD;
+    if (chanceCount)return lambdaC;
+    return lambdaD;
 }
 
 static void buildChanceWeightedTargets(
@@ -8612,9 +8602,9 @@ static void buildChanceWeightedTargets(
 
     for (int i = 0; i < n; ++i) {
         const int sideCur = sideAtSample[(size_t)i];
-        float v=lambdaQ;
+        float v = lambdaQ;
         float sumV = v;
-        float weighted = v*clamp01(game[(size_t)i].q);
+        float weighted = v * clamp01(game[(size_t)i].q);
 
         for (int j = i + 1; j < n; ++j) {
             v *= chanceStepDecay(chanceToNext[(size_t)j - 1]);
@@ -8626,7 +8616,7 @@ static void buildChanceWeightedTargets(
             weighted += v * qInCurPerspective;
         }
 
-        v=v*chanceStepDecay(chanceToNext[(size_t)n - 1])*lambdaT+sumV*lambdaS+lambdaZ;
+        v = v * chanceStepDecay(chanceToNext[(size_t)n - 1]) * lambdaT + sumV * lambdaS + lambdaZ;
         sumV += v;
 
         const float zCur = (sideCur == 0) ? zWhite : (1.0f - zWhite);
@@ -10227,7 +10217,7 @@ void Training(int targetGames) {
     // but without insane expansion of GameContext count.
     const unsigned SEARCH_THREADS_PER_GAME = 1u;
 
-const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
+    const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
 
     const size_t SP_NODE_POW2 =
         (PARALLEL_GAMES >= 6 ? (1u << 18) :
@@ -10274,7 +10264,7 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
     SearchPoolStatsSnapshot prevSearchStats = snapshotAllSearchStats(gamesCtx);
     bool stopTraining = false;
 
-    std::cout << "[selfplay] parallel_games=" << PARALLEL_GAMES<< "\n";
+    std::cout << "[selfplay] parallel_games=" << PARALLEL_GAMES << "\n";
 
     // -------------------------------
     // SCHEDULER
@@ -10530,7 +10520,7 @@ const unsigned PARALLEL_GAMES = std::max(2u, hwSP - 4u);
                     }
                 }
             }
-float b=stof(fmtFixed(getAverageInferBatchSize(), 2));
+            float b = stof(fmtFixed(getAverageInferBatchSize(), 2));
             std::cout << "Time: ";
             if (haveEta) std::cout << fmtFixed(remainDays, 2);
             else         std::cout << "--";
@@ -10542,11 +10532,11 @@ float b=stof(fmtFixed(getAverageInferBatchSize(), 2));
                 << " | P: " << fmtFixed(trainer.lastLossP, 2)
                 << " | V: " << fmtFixed(trainer.lastVMAE, 2)
                 << " | Grad: " << fmtFixed(trainer.lastGradNorm, 1)
-                << " | Len: " << fmtFixed(avgLen, 1)       
+                << " | Len: " << fmtFixed(avgLen, 1)
                 << " | NPS: " << fmtFixed(nps, 0)
-<< " | Batch: " << b
-<< " | Duty: " << fmtFixed(nnDutyPct, 1) << "%"
-<< " | Speed: " << stof(fmtFixed(nnCallsPerSec, 1))*b
+                << " | Batch: " << b
+                << " | Duty: " << fmtFixed(nnDutyPct, 1) << "%"
+                << " | Speed: " << stof(fmtFixed(nnCallsPerSec, 1)) * b
                 << " | Depth: " << fmtFixed(avgDepth, 0)
                 << "\n";
 
@@ -10647,329 +10637,328 @@ float b=stof(fmtFixed(getAverageInferBatchSize(), 2));
     std::cout << "Training completed successfully! Files net.pt, net_ema.pt, optimizer.pt, and net.plan are ready.\n";
     diagLogLine("[Training] finished normally");
 }
-vector<long long> sqKey={100002324,505950000,609121555,110242252,614571640,610172920,35020000,355080122,34360208,37770000,338410393,631600651,0};
-vector<long long> diceKey={100001856,405160010,6571113,6831247,309371046,606462162,324110006,341110119,126520169,123350009,430810277,826600559,188800000000,285506010000,115807560000,127107610000,110310990000,220107560000,1124640000,14842670000,26427290000,5623910000,33132030000,64527490000};
-vector<int> stabKey={-9495531,-9561067,-10020846,-10086382,-13169399,-13169655,-13432313};
-struct BOARDSTAT{vector<int> board;int num;int time;};
-int NUMBER(long long key,vector<long long>& v){
-int min,i,d,n;
-min=INT_MAX;
-for(i=0;i<v.size();i++){
-d=abs(v[i]%10000-key%10000)+abs(v[i]/10000%10000-key/10000%10000)+abs(v[i]/100000000-key/100000000);
-if(d<min){
-n=i;
-min=d;
+vector<long long> sqKey = { 100002324,505950000,609121555,110242252,614571640,610172920,35020000,355080122,34360208,37770000,338410393,631600651,0 };
+vector<long long> diceKey = { 100001856,405160010,6571113,6831247,309371046,606462162,324110006,341110119,126520169,123350009,430810277,826600559,188800000000,285506010000,115807560000,127107610000,110310990000,220107560000,1124640000,14842670000,26427290000,5623910000,33132030000,64527490000 };
+vector<int> stabKey = { -9495531,-9561067,-10020846,-10086382,-13169399,-13169655,-13432313 };
+struct BOARDSTAT { vector<int> board; int num; int time; };
+int NUMBER(long long key, vector<long long>& v) {
+    int min, i, d, n;
+    min = INT_MAX;
+    for (i = 0; i < v.size(); i++) {
+        d = abs(v[i] % 10000 - key % 10000) + abs(v[i] / 10000 % 10000 - key / 10000 % 10000) + abs(v[i] / 100000000 - key / 100000000);
+        if (d < min) {
+            n = i;
+            min = d;
+        }
+    }
+    return n;
 }
+vector<int> S(int x1, int x2, int y1, int y2) {
+    int w, h;
+    vector<int> s;
+    HDC d, m;
+    HBITMAP b;
+    BITMAPINFO p;
+    w = x2 - x1 + 1;
+    h = y2 - y1 + 1;
+    s.resize(w * h);
+    d = GetDC(0);
+    m = CreateCompatibleDC(d);
+    b = CreateCompatibleBitmap(d, w, h);
+    p = { 40,w,-h,1,32 };
+    SelectObject(m, b);
+    BitBlt(m, 0, 0, w, h, d, x1, y1, 13369376);
+    GetDIBits(d, b, 0, h, s.data(), &p, 0);
+    DeleteObject(b);
+    DeleteObject(m);
+    DeleteObject(d);
+    return s;
 }
-return n;
+vector<int> S() {
+    vector<int> s;
+    s = S(407, 1510, 550, 1865);
+    if (s[928 + 1104 * 430] == -15189205)s = {};
+    return s;
 }
-vector<int> S(int x1,int x2,int y1,int y2){
-int w,h;
-vector<int> s;
-HDC d,m;
-HBITMAP b;
-BITMAPINFO p;
-w=x2-x1+1;
-h=y2-y1+1;
-s.resize(w*h);
-d=GetDC(0);
-m=CreateCompatibleDC(d);
-b=CreateCompatibleBitmap(d,w,h);
-p={40,w,-h,1,32};
-SelectObject(m,b);
-BitBlt(m,0,0,w,h,d,x1,y1,13369376);
-GetDIBits(d,b,0,h,s.data(),&p,0);
-DeleteObject(b);
-DeleteObject(m);
-DeleteObject(d);
-return s;
+int FLIP(vector<int>& s) { return s.size() && s[8 + 1104 * 1200] == -665935; }
+int SIDE(vector<int>& s) { return s.size() && s[1038 + 1104 * 40] == -16443635 != FLIP(s); }
+vector<int> BOARD(vector<int>& s) {
+    int sq, SQ, x, y, p;
+    long long key;
+    vector<int> board;
+    if (s.empty())return {};
+    for (sq = 0; sq < 64; sq++) {
+        if (FLIP(s) == 0)SQ = sq ^ 56; else SQ = sq ^ 7;
+        key = 0;
+        for (x = 0; x < 138; x++)for (y = 0; y < 138; y++) {
+            p = s[138 * (SQ % 8) + x + 1104 * (212 + 138 * (SQ / 8) + y)];
+            key += (p == -1) + 10000 * (p == -16777216) + 100000000 * (p == -8421505);
+        }
+        board.push_back(NUMBER(key, sqKey));
+    }
+    return board;
 }
-vector<int> S(){
-vector<int> s;
-s=S(407,1510,550,1865);
-if(s[928+1104*430]==-15189205)s={};
-return s;
+vector<int> DICE(vector<int>& s) {
+    int i, x, y, p;
+    long long key;
+    vector<int> dice;
+    if (s.empty())return {};
+    for (i = 0; i < 3; i++) {
+        key = 0;
+        for (x = 0; x < 158; x++)for (y = 0; y < 158; y++) {
+            p = s[248 + 228 * i + x + 1104 * y];
+            key += (p == -1) + 10000 * (p == -16777216) + 100000000 * (p == -8421505);
+        }
+        dice.push_back(NUMBER(key, diceKey));
+    }
+    return dice;
 }
-int FLIP(vector<int>& s){return s.size()&&s[8+1104*1200]==-665935;}
-int SIDE(vector<int>& s){return s.size()&&s[1038+1104*40]==-16443635!=FLIP(s);}
-vector<int> BOARD(vector<int>& s){
-int sq,SQ,x,y,p;
-long long key;
-vector<int> board;
-if(s.empty())return {};
-for(sq=0;sq<64;sq++){
-if(FLIP(s)==0)SQ=sq^56;else SQ=sq^7;
-key=0;
-for(x=0;x<138;x++)for(y=0;y<138;y++){
-p=s[138*(SQ%8)+x+1104*(212+138*(SQ/8)+y)];
-key+=(p==-1)+10000*(p==-16777216)+100000000*(p==-8421505);
+int FROM(int sq) { return sq == 4 || sq >= 24 && sq <= 39 || sq == 60; }
+vector<int> WAY(vector<int>& b1, vector<int>& b2) {
+    int sq;
+    vector<int> way;
+    if (b1.empty() || b2.empty())return {};
+    for (sq = 0; sq < 64; sq++)if (b2[sq] != b1[sq])way.push_back(sq);
+    sort(way.begin(), way.end(), [&](int a, int b) {return b2[a] > b2[b] || b2[a] == b2[b] && FROM(a) > FROM(b); });
+    return way;
 }
-board.push_back(NUMBER(key,sqKey));
+void START(Position& pos) {
+    pos.color = { 0,0 };
+    pos.piece = { 0,0,0,0,0,0 };
+    pos.side = 0;
+    pos.ep1 = { 0,0 };
+    pos.ep2 = 0;
+    pos.rook = { 0,7,56,63 };
+    pos.castle = 15;
+    pos.dice = 0;
+    pos.key = computeKey(pos);
 }
-return board;
+void START() {
+    PATH = { bit(1) | bit(2) | bit(3),bit(5) | bit(6),bit(57) | bit(58) | bit(59),bit(61) | bit(62) };
+    MASK.fill(0);
+    MASK[0] = 1;
+    MASK[4] = 3;
+    MASK[7] = 2;
+    MASK[56] = 4;
+    MASK[60] = 12;
+    MASK[63] = 8;
 }
-vector<int> DICE(vector<int>& s){
-int i,x,y,p;
-long long key;
-vector<int> dice;
-if(s.empty())return {};
-for(i=0;i<3;i++){
-key=0;
-for(x=0;x<158;x++)for(y=0;y<158;y++){
-p=s[248+228*i+x+1104*y];
-key+=(p==-1)+10000*(p==-16777216)+100000000*(p==-8421505);
+void BOARDSET(vector<int>& board) {
+    int sq, piece;
+    POS.color = { 0,0 };
+    POS.piece = { 0,0,0,0,0,0 };
+    if (board.empty())return;
+    for (sq = 0; sq < 64; sq++) {
+        piece = board[sq];
+        if (piece == 12)continue;
+        POS.color[piece / 6] |= bit(sq);
+        POS.piece[piece % 6] |= bit(sq);
+    }
 }
-dice.push_back(NUMBER(key,diceKey));
+void CASTLESET() {
+    int c, r;
+    for (c = 0; c < 2; c++) {
+        for (r = 0; r < 2; r++)if ((POS.color[c] & POS.piece[3] & bit(7 * r + 56 * c)) == 0)POS.castle &= ~bit(r + 2 * c);
+        if ((POS.color[c] & POS.piece[5] & bit(4 + 56 * c)) == 0)POS.castle &= ~(bit(2 * c) | bit(1 + 2 * c));
+    }
 }
-return dice;
+void DICESET(vector<int>& s) {
+    int i, dice, d;
+    uint64_t pawns;
+    string t;
+    vector<int> v;
+    if (s.empty()) {
+        POS.dice = 0;
+        return;
+    }
+    v = DICE(s);
+    for (i = 0; i < 3; i++)v[i] %= 6;
+    sort(v.begin(), v.end());
+    for (i = 0; i < 3; i++)t += pieceChar(v[i]);
+    dice = diceFenToInt(t);
+    pawns = POS.color[POS.side] & POS.piece[0];
+    d = 6;
+    if (pawns)if (POS.side == 0)d = clz64(pawns) >> 3; else d = ctz64(pawns) >> 3;
+    for (i = 0; i < 5; i++)while (dicePiece[dice][i] && (POS.color[POS.side] & POS.piece[i]) == 0 && d > dicePiece[dice][0])dice = newDice[dice][i];
+    POS.dice = dice;
 }
-int FROM(int sq){return sq==4||sq>=24&&sq<=39||sq==60;}
-vector<int> WAY(vector<int>& b1,vector<int>& b2){
-int sq;
-vector<int> way;
-if(b1.empty()||b2.empty())return {};
-for(sq=0;sq<64;sq++)if(b2[sq]!=b1[sq])way.push_back(sq);
-sort(way.begin(),way.end(),[&](int a,int b){return b2[a]>b2[b]||b2[a]==b2[b]&&FROM(a)>FROM(b);});
-return way;
+void END(vector<int>& s1, vector<int>& s2, vector<int>& b1, vector<int>& b2) {
+    s1 = s2;
+    b1 = b2;
 }
-void START(Position& pos){
-pos.color={0,0};
-pos.piece={0,0,0,0,0,0};
-pos.side=0;
-pos.ep1={0,0};
-pos.ep2=0;
-pos.rook={0,7,56,63};
-pos.castle=15;
-pos.dice=0;
-pos.key=computeKey(pos);
+vector<int> STAB(vector<int>& s) {
+    int i, n;
+    vector<int> stab;
+    if (s.empty())return { 2,2,2 };
+    for (i = 0; i < 3; i++) {
+        n = find(stabKey.begin(), stabKey.end(), s[326 + 228 * i + 1104 * 147]) - stabKey.begin();
+        stab.push_back(n / 4 + (n == 7));
+    }
+    return stab;
 }
-void START(){
-PATH={bit(1)|bit(2)|bit(3),bit(5)|bit(6),bit(57)|bit(58)|bit(59),bit(61)|bit(62)};
-MASK.fill(0);
-MASK[0]=1;
-MASK[4]=3;
-MASK[7]=2;
-MASK[56]=4;
-MASK[60]=12;
-MASK[63]=8;
+int STABMIN(vector<int>& s1, vector<int>& s2) {
+    int dark, act, i;
+    act = dark = 0;
+    for (i = 0; i < 3; i++)if (STAB(s2)[i] != 1)act = 1; else if (STAB(s1)[i] == 2)dark = 1;
+    return dark && act;
 }
-void BOARDSET(vector<int>& board){
-int sq,piece;
-POS.color={0,0};
-POS.piece={0,0,0,0,0,0};
-if(board.empty())return;
-for(sq=0;sq<64;sq++){
-piece=board[sq];
-if(piece==12)continue;
-POS.color[piece/6]|=bit(sq);
-POS.piece[piece%6]|=bit(sq);
+int STABFULL(vector<int>& s) {
+    int w, i;
+    vector<int> stab;
+    stab = STAB(s);
+    w = 0;
+    for (i = 0; i < 3; i++) {
+        if (stab[i] == 2)return 0;
+        if (stab[i] == 0)w = 1;
+    }
+    return w;
 }
+int STABFULL(vector<int>& s1, vector<int>& s2) { return STABFULL(s2) > STABFULL(s1); }
+int PROMO(int piece, int sq) { return piece == 0 && sq / 8 == 7 || piece == 6 && sq / 8 == 0; }
+int BOARDNEXT(vector<int>& b1, vector<int>& b2) {
+    int side, x, dir, i;
+    vector<int> way, key;
+    vector<vector<int>> v;
+    for (side = 0; side < 2; side++)for (x = 0; x < 8; x++)for (dir = -1; dir <= 1; dir += 2)if (x + dir >= 0 && x + dir <= 7)v.push_back({ x + 32 - 8 * side,6 * side,12,x + dir + 32 - 8 * side,6 * !side,12,x + dir + 40 - 24 * side,12,6 * side });
+    for (side = 0; side < 2; side++)for (dir = 0; dir < 2; dir++)v.push_back({ 4 + 56 * side,5 + 6 * side,12,7 * dir + 56 * side,3 + 6 * side,12,2 + 4 * dir + 56 * side,12,5 + 6 * side,3 + 2 * dir + 56 * side,12,3 + 6 * side });
+    way = WAY(b1, b2);
+    for (i = 0; i < way.size(); i++) {
+        key.push_back(way[i]);
+        key.push_back(b1[way[i]]);
+        key.push_back(b2[way[i]]);
+    }
+    return key.size() == 6 && key[2] == 12 && (PROMO(key[1], key[3]) == 0 && key[5] == key[1] || PROMO(key[1], key[3]) && key[5] >= key[1] + 1 && key[5] <= key[1] + 4) || find(v.begin(), v.end(), key) < v.end();
 }
-void CASTLESET(){
-int c,r;
-for(c=0;c<2;c++){
-for(r=0;r<2;r++)if((POS.color[c]&POS.piece[3]&bit(7*r+56*c))==0)POS.castle&=~bit(r+2*c);
-if((POS.color[c]&POS.piece[5]&bit(4+56*c))==0)POS.castle&=~(bit(2*c)|bit(1+2*c));
+void ADD(vector<int>& b1, vector<int>& b, vector<BOARDSTAT>& bs) {
+    int i;
+    if (BOARDNEXT(b1, b) == 0)return;
+    for (i = 0; i < bs.size(); i++)if (bs[i].board == b)break;
+    if (i < bs.size()) {
+        bs[i].num++;
+        bs[i].time = clock();
+    }
+    else bs.push_back({ b,1,clock() });
+    sort(bs.begin(), bs.end(), [](BOARDSTAT a, BOARDSTAT b) {return a.num > b.num || a.num == b.num && a.time > b.time; });
 }
+int DICENEXT(vector<int>& s1, vector<int>& s2) {
+    int dark, i, dif;
+    vector<int> d1, d2;
+    if (s1.empty() || s2.empty())return 0;
+    d1 = DICE(s1);
+    d2 = DICE(s2);
+    dark = 0;
+    for (i = 0; i < 3; i++) {
+        dif = d2[i] - d1[i];
+        if (dif % 12)return 0;
+        if (dif == 12)dark = 1;
+    }
+    return dark;
 }
-void DICESET(vector<int>& s){
-int i,dice,d;
-uint64_t pawns;
-string t;
-vector<int> v;
-if(s.empty()){
-POS.dice=0;
-return;
+int DIF(int a, int b) {
+    a += 16777216;
+    b += 16777216;
+    return abs(b % 256 - a % 256) + abs(b / 256 % 256 - a / 256 % 256) + abs(b / 65536 - a / 65536);
 }
-v=DICE(s);
-for(i=0;i<3;i++)v[i]%=6;
-sort(v.begin(),v.end());
-for(i=0;i<3;i++)t+=pieceChar(v[i]);
-dice=diceFenToInt(t);
-pawns=POS.color[POS.side]&POS.piece[0];
-d=6;
-if(pawns)if(POS.side==0)d=clz64(pawns)>>3;else d=ctz64(pawns)>>3;
-for(i=0;i<5;i++)while(dicePiece[dice][i]&&(POS.color[POS.side]&POS.piece[i])==0&&d>dicePiece[dice][0])dice=newDice[dice][i];
-POS.dice=dice;
+int DIF(vector<int>& s1, vector<int>& s2) {
+    int dif, i, x, y, n;
+    if (s1.empty() || s2.empty())return 1;
+    dif = 0;
+    for (i = 0; i < 3; i++)for (x = 0; x < 158; x++)for (y = 0; y < 158; y++) {
+        n = 248 + 228 * i + x + 1104 * y;
+        dif += DIF(s1[n], s2[n]);
+    }
+    return dif >= 10000;
 }
-void END(vector<int>& s1,vector<int>& s2,vector<int>& b1,vector<int>& b2){
-s1=s2;
-b1=b2;
+void NEW(int& roll, int& change, vector<int>& s1, vector<int>& s2, vector<int>& b1, vector<int>& b2) {
+    int stabmin, stabfull, i;
+    time_point<steady_clock> t1, t2;
+    vector<int> b;
+    vector<vector<int>> v;
+    vector<BOARDSTAT> bs;
+    t1 = steady_clock::now();
+    v = { s1,{} };
+    stabfull = stabmin = change = 0;
+    for (i = 1;; i = !i) {
+        t2 = steady_clock::now();
+        v[i] = S();
+        change += SIDE(v[i]) != SIDE(v[!i]);
+        stabmin += STABMIN(v[!i], v[i]);
+        stabfull += STABFULL(v[!i], v[i]);
+        roll = s1.empty() || change || v[i].empty();
+        if (DIF(v[!i], v[i]))t1 = t2;
+        b = BOARD(v[i]);
+        ADD(b1, b, bs);
+        if (roll || DICENEXT(s1, v[i]))s2 = v[i];
+        if (roll || bs.size() && b == bs[0].board)b2 = b;
+        if (v[i].empty() && s1.size() || roll == 0 && stabmin || roll && stabfull && (t2 - t1).count() >= 100000000)return;
+    }
 }
-vector<int> STAB(vector<int>& s){
-int i,n;
-vector<int> stab;
-if(s.empty())return {2,2,2};
-for(i=0;i<3;i++){
-n=find(stabKey.begin(),stabKey.end(),s[326+228*i+1104*147])-stabKey.begin();
-stab.push_back(n/4+(n==7));
+void LOAD() {
+    int roll, change, side, from, to, piece;
+    vector<int> s1, s2, b1, b2, way;
+    for (;; END(s1, s2, b1, b2)) {
+        NEW(roll, change, s1, s2, b1, b2);
+        lock_guard<mutex> lock(posMutex);
+        ROLL = roll;
+        if (s2.empty()) {
+            START(POS);
+            continue;
+        }
+        BOARDSET(b2);
+        POS.side = SIDE(s2);
+        CASTLESET();
+        if (s1.empty()) {
+            DICESET(s2);
+            POS.key = computeKey(POS);
+            continue;
+        }
+        side = SIDE(s1);
+        way = WAY(b1, b2);
+        if (way.size() == 4) {
+            POS.castle &= 12 - 9 * side;
+            POS.dice = newDice[POS.dice][5];
+            POS.dice = newDice[POS.dice][3];
+        }
+        else if (way.size() == 3)POS.dice = newDice[POS.dice][0]; else if (way.size() == 2) {
+            from = way[0];
+            to = way[1];
+            piece = b1[from] % 6;
+            if (piece == 0 && (from ^ to) == 16)POS.ep1[!side] |= bit((from + to) / 2);
+            if (piece == 0 && POS.ep1[side] & epMask[to])POS.ep2 |= bit(to);
+            POS.castle &= ~(MASK[from] | MASK[to]);
+            POS.dice = newDice[POS.dice][piece];
+        }
+        if (change) {
+            POS.ep1[side] = 0;
+            POS.ep2 = 0;
+            DICESET(s2);
+        }
+        if (change >= 2)POS.ep1[!side] = 0;
+        POS.key = computeKey(POS);
+    }
 }
-return stab;
-}
-int STABMIN(vector<int>& s1,vector<int>& s2){
-int dark,act,i;
-act=dark=0;
-for(i=0;i<3;i++)if(STAB(s2)[i]!=1)act=1;else if(STAB(s1)[i]==2)dark=1;
-return dark&&act;
-}
-int STABFULL(vector<int>& s){
-int w,i;
-vector<int> stab;
-stab=STAB(s);
-w=0;
-for(i=0;i<3;i++){
-if(stab[i]==2)return 0;
-if(stab[i]==0)w=1;
-}
-return w;
-}
-int STABFULL(vector<int>& s1,vector<int>& s2){return STABFULL(s2)>STABFULL(s1);}
-int PROMO(int piece,int sq){return piece==0&&sq/8==7||piece==6&&sq/8==0;}
-int BOARDNEXT(vector<int>& b1,vector<int>& b2){
-int side,x,dir,i;
-vector<int> way,key;
-vector<vector<int>> v;
-for(side=0;side<2;side++)for(x=0;x<8;x++)for(dir=-1;dir<=1;dir+=2)if(x+dir>=0&&x+dir<=7)v.push_back({x+32-8*side,6*side,12,x+dir+32-8*side,6*!side,12,x+dir+40-24*side,12,6*side});
-for(side=0;side<2;side++)for(dir=0;dir<2;dir++)v.push_back({4+56*side,5+6*side,12,7*dir+56*side,3+6*side,12,2+4*dir+56*side,12,5+6*side,3+2*dir+56*side,12,3+6*side});
-way=WAY(b1,b2);
-for(i=0;i<way.size();i++){
-key.push_back(way[i]);
-key.push_back(b1[way[i]]);
-key.push_back(b2[way[i]]);
-}
-return key.size()==6&&key[2]==12&&(PROMO(key[1],key[3])==0&&key[5]==key[1]||PROMO(key[1],key[3])&&key[5]>=key[1]+1&&key[5]<=key[1]+4)||find(v.begin(),v.end(),key)<v.end();
-}
-void ADD(vector<int>& b1,vector<int>& b,vector<BOARDSTAT>& bs){
-int i;
-if(BOARDNEXT(b1,b)==0)return;
-for(i=0;i<bs.size();i++)if(bs[i].board==b)break;
-if(i<bs.size()){
-bs[i].num++;
-bs[i].time=clock();
-}
-else bs.push_back({b,1,clock()});
-sort(bs.begin(),bs.end(),[](BOARDSTAT a,BOARDSTAT b){return a.num>b.num||a.num==b.num&&a.time>b.time;});
-}
-int DICENEXT(vector<int>& s1,vector<int>& s2){
-int dark,i,dif;
-vector<int> d1,d2;
-if(s1.empty()||s2.empty())return 0;
-d1=DICE(s1);
-d2=DICE(s2);
-dark=0;
-for(i=0;i<3;i++){
-dif=d2[i]-d1[i];
-if(dif%12)return 0;
-if(dif==12)dark=1;
-}
-return dark;
-}
-int DIF(int a,int b){
-a+=16777216;
-b+=16777216;
-return abs(b%256-a%256)+abs(b/256%256-a/256%256)+abs(b/65536-a/65536);
-}
-int DIF(vector<int>& s1,vector<int>& s2){
-int dif,i,x,y,n;
-if(s1.empty()||s2.empty())return 1;
-dif=0;
-for(i=0;i<3;i++)for(x=0;x<158;x++)for(y=0;y<158;y++){
-n=248+228*i+x+1104*y;
-dif+=DIF(s1[n],s2[n]);
-}
-return dif>=10000;
-}
-void NEW(int& roll,int& change,vector<int>& s1,vector<int>& s2,vector<int>& b1,vector<int>& b2){
-int stabmin,stabfull,i;
-time_point<steady_clock> t1,t2;
-vector<int> b;
-vector<vector<int>> v;
-vector<BOARDSTAT> bs;
-t1=steady_clock::now();
-v={s1,{}};
-stabfull=stabmin=change=0;
-for(i=1;;i=!i){
-t2=steady_clock::now();
-v[i]=S();
-change+=SIDE(v[i])!=SIDE(v[!i]);
-stabmin+=STABMIN(v[!i],v[i]);
-stabfull+=STABFULL(v[!i],v[i]);
-roll=s1.empty()||change||v[i].empty();
-if(DIF(v[!i],v[i]))t1=t2;
-b=BOARD(v[i]);
-ADD(b1,b,bs);
-if(roll||DICENEXT(s1,v[i]))s2=v[i];
-if(roll||bs.size()&&b==bs[0].board)b2=b;
-if(v[i].empty()&&s1.size()||roll==0&&stabmin||roll&&stabfull&&(t2-t1).count()>=100000000)return;
-}
-}
-void LOAD(){
-int roll,change,side,from,to,piece;
-vector<int> s1,s2,b1,b2,way;
-for(;;END(s1,s2,b1,b2)){
-NEW(roll,change,s1,s2,b1,b2);
-lock_guard<mutex> lock(posMutex);
-ROLL=roll;
-if(s2.empty()){
-START(POS);
-continue;
-}
-BOARDSET(b2);
-POS.side=SIDE(s2);
-CASTLESET();
-if(s1.empty()){
-DICESET(s2);
-POS.key=computeKey(POS);
-continue;
-}
-side=SIDE(s1);
-way=WAY(b1,b2);
-if(way.size()==4){
-POS.castle&=12-9*side;
-POS.dice=newDice[POS.dice][5];
-POS.dice=newDice[POS.dice][3];
-}
-else if(way.size()==3)POS.dice=newDice[POS.dice][0];else if(way.size()==2){
-from=way[0];
-to=way[1];
-piece=b1[from]%6;
-if(piece==0&&(from^to)==16)POS.ep1[!side]|=bit((from+to)/2);
-if(piece==0&&POS.ep1[side]&epMask[to])POS.ep2|=bit(to);
-POS.castle&=~(MASK[from]|MASK[to]);
-POS.dice=newDice[POS.dice][piece];
-}
-if(change){
-POS.ep1[side]=0;
-POS.ep2=0;
-DICESET(s2);
-}
-if(change>=2)POS.ep1[!side]=0;
-POS.key=computeKey(POS);
-}
-}
-void SEARCH(){
-int clear,ready;
-float eval,depth;
-vector<int> pv;
-vector<int> pvMcts;
-vector<moveState> moves;
-Position pos;
-MCTSTable T(1<<23,1<<26);
-START(pos);
-while(1){
-Sleep(1);
-ready=clear=0;
-{
-lock_guard<mutex> lock(posMutex);
-if(POS.key!=pos.key){
-pos=POS;
-clear=ROLL;
-ready=POS.color[0]&POS.piece[5]&&POS.color[1]&POS.piece[5];
-}
-}
-if(clear)T.newGame();
-if(ready)mctsBatchedMT(T,pos,PATH,MASK,INT_MAX,eval,depth,moves,pv,pvMcts,1,1);
-}
+void SEARCH() {
+    int clear, ready;
+    float eval, depth;
+    vector<int> pv;
+    vector<moveState> moves;
+    Position pos;
+    MCTSTable T(1 << 23, 1 << 26);
+    START(pos);
+    while (1) {
+        Sleep(1);
+        ready = clear = 0;
+        {
+            lock_guard<mutex> lock(posMutex);
+            if (POS.key != pos.key) {
+                pos = POS;
+                clear = ROLL;
+                ready = POS.color[0] & POS.piece[5] && POS.color[1] & POS.piece[5];
+            }
+        }
+        if (clear)T.newGame();
+        if (ready)mctsBatchedMT(T, pos, PATH, MASK, INT_MAX, eval, depth, moves, pv, 1, 1);
+    }
 }
 
 static bool isChanceOrTerminalPosition(Position& pos,
@@ -10996,8 +10985,7 @@ static bool analyzeAndPlayFirstPvMove(MCTSTable& T,
     float depth = 0.0f;
     std::vector<moveState> moves;
     std::vector<int> pv;
-    std::vector<int> pvMcts;
-    mctsBatchedMT(T, pos, path, mask, seconds, eval, depth, moves, pv, pvMcts, 0, 0);
+    mctsBatchedMT(T, pos, path, mask, seconds, eval, depth, moves, pv, 0, 0);
     if (pv.empty()) return false;
     makeMove(pos, mask, pv[0]);
     return true;
@@ -11013,8 +11001,7 @@ static bool analyzeOnceAndPlayPvUntilChance(MCTSTable& T,
     float depth = 0.0f;
     std::vector<moveState> moves;
     std::vector<int> pv;
-    std::vector<int> pvMcts;
-    mctsBatchedMT(T, pos, path, mask, seconds, eval, depth, moves, pv, pvMcts, 0, 0);
+    mctsBatchedMT(T, pos, path, mask, seconds, eval, depth, moves, pv, 0, 0);
     if (pv.empty()) return false;
 
     for (int mv : pv) {
@@ -11105,7 +11092,7 @@ static MatchStatsGeneric runTimedPvMatch(int games) {
 }
 
 int main() {
-     try {
+    try {
         const std::string ptFile = "net.pt";
         const std::string emaFile = "net_ema.pt";
         const std::string planFile = "net.plan";
@@ -11139,15 +11126,15 @@ int main() {
             g_trtReady = false;
             return 0;
         }
-if(fen=="s"){
-ROLL=0;
-START(POS);
-START();
-thread loadThread(LOAD);
-thread searchThread(SEARCH);
-loadThread.join();
-searchThread.join();
-}
+        if (fen == "s") {
+            ROLL = 0;
+            START(POS);
+            START();
+            thread loadThread(LOAD);
+            thread searchThread(SEARCH);
+            loadThread.join();
+            searchThread.join();
+        }
         Position pos;
         std::array<uint64_t, 4> path;
         std::array<int, 64> mask;
@@ -11165,12 +11152,11 @@ searchThread.join();
         float mctsEvalWhite = 0.5f;
         float mctsAvgDepth = 0.0f;
         std::vector<int> pvBeforeRoll;
-        std::vector<int> pvMcts;
         std::vector<moveState> rootMoves;
         const size_t nodePow2 = 1ull << 26;
         const size_t edgeCap = 1ull << 29;
         MCTSTable T(nodePow2, edgeCap);
-        mctsBatchedMT(T, pos, path, mask, INT_MAX, mctsEvalWhite, mctsAvgDepth, rootMoves, pvBeforeRoll, pvMcts, 1, 0);
+        mctsBatchedMT(T, pos, path, mask, INT_MAX, mctsEvalWhite, mctsAvgDepth, rootMoves, pvBeforeRoll, 1, 0);
         clearConsoleFull();
         std::cout << std::fixed << std::setprecision(2);
         std::cout << "depth=" << mctsAvgDepth << std::endl;
@@ -11181,12 +11167,12 @@ searchThread.join();
             if (i) std::cout << ' ';
             std::cout << moveToStr(pvBeforeRoll[i]);
         }
-        
-        if(rootMoves.size()){
-        cout<<endl;
-        Dif(rootMoves[0].dif);
+
+        if (rootMoves.size()) {
+            cout << endl;
+            Dif(rootMoves[0].dif);
         }
-        cout<<endl;
+        cout << endl;
         for (const auto& ms : rootMoves) {
             int d = (int)std::to_string(ms.visits).size();
             int spacesBeforePrior = 1 + (getMaxVisitsLen(rootMoves) - d);
@@ -11197,9 +11183,9 @@ searchThread.join();
                 << " visits " << ms.visits
                 << std::string(spacesBeforePrior, ' ')
                 << "prior " << ms.prior
-                <<' ';
-                Dif(ms.dif);
-                cout<<endl;
+                << ' ';
+            Dif(ms.dif);
+            cout << endl;
         }
         {
             std::lock_guard<std::mutex> lk(g_trtMutex);
