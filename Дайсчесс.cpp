@@ -5428,6 +5428,7 @@ void mctsBatchedMT(MCTSTable& T,
     float& outAvgDepth,
     std::vector<moveState>& outRootMoves,
     std::vector<int>& outPVBeforeRoll,
+    std::vector<int>& outMctsPV,
     int write,
     int abort) {
     MoveList ml;
@@ -5435,6 +5436,7 @@ void mctsBatchedMT(MCTSTable& T,
     genLegal(rootPos, path, mask, ml, term);
 
     outPVBeforeRoll.clear();
+    outMctsPV.clear();
 
     if (term) {
         outEvalWhite = 1 - rootPos.side;
@@ -5442,6 +5444,7 @@ void mctsBatchedMT(MCTSTable& T,
         outRootMoves.clear();
         outRootMoves.push_back({ ml.m[0], outEvalWhite, 0, 0.0f, 0ull });
         outPVBeforeRoll.push_back(ml.m[0]);
+        outMctsPV.push_back(ml.m[0]);
         if (write == 1) {
             clearConsoleFull();
 std::cout << moveToStr(ml.m[0]) << std::endl;
@@ -5455,6 +5458,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         outAvgDepth = 0.0f;
         outRootMoves.clear();
         outPVBeforeRoll.clear();
+        outMctsPV.clear();
         return;
     }
 
@@ -5465,6 +5469,7 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
         outAvgDepth = 0.0f;
         outRootMoves.clear();
         outPVBeforeRoll.clear();
+        outMctsPV.clear();
         return;
     }
 
@@ -5718,6 +5723,11 @@ std::cout << moveToStr(ml.m[0]) << std::endl;
             extractBestPVUntilChance(T, p, mask, ms.pv, ms.pvKey);
             ms.pv.insert(ms.pv.begin(), ms.move);
         }
+    }
+
+    outMctsPV.clear();
+    if (!outRootMoves.empty()) {
+        outMctsPV = outRootMoves[0].pv;
     }
 
     computeDifForRootMoves(outRootMoves,T,rootPos,mask);
@@ -10941,6 +10951,7 @@ void SEARCH(){
 int clear,ready;
 float eval,depth;
 vector<int> pv;
+vector<int> pvMcts;
 vector<moveState> moves;
 Position pos;
 MCTSTable T(1<<23,1<<26);
@@ -10957,7 +10968,7 @@ ready=POS.color[0]&POS.piece[5]&&POS.color[1]&POS.piece[5];
 }
 }
 if(clear)T.newGame();
-if(ready)mctsBatchedMT(T,pos,PATH,MASK,INT_MAX,eval,depth,moves,pv,1,1);
+if(ready)mctsBatchedMT(T,pos,PATH,MASK,INT_MAX,eval,depth,moves,pv,pvMcts,1,1);
 }
 }
 
@@ -10985,7 +10996,8 @@ static bool analyzeAndPlayFirstPvMove(MCTSTable& T,
     float depth = 0.0f;
     std::vector<moveState> moves;
     std::vector<int> pv;
-    mctsBatchedMT(T, pos, path, mask, seconds, eval, depth, moves, pv, 0, 0);
+    std::vector<int> pvMcts;
+    mctsBatchedMT(T, pos, path, mask, seconds, eval, depth, moves, pv, pvMcts, 0, 0);
     if (pv.empty()) return false;
     makeMove(pos, mask, pv[0]);
     return true;
@@ -11001,7 +11013,8 @@ static bool analyzeOnceAndPlayPvUntilChance(MCTSTable& T,
     float depth = 0.0f;
     std::vector<moveState> moves;
     std::vector<int> pv;
-    mctsBatchedMT(T, pos, path, mask, seconds, eval, depth, moves, pv, 0, 0);
+    std::vector<int> pvMcts;
+    mctsBatchedMT(T, pos, path, mask, seconds, eval, depth, moves, pv, pvMcts, 0, 0);
     if (pv.empty()) return false;
 
     for (int mv : pv) {
@@ -11152,11 +11165,12 @@ searchThread.join();
         float mctsEvalWhite = 0.5f;
         float mctsAvgDepth = 0.0f;
         std::vector<int> pvBeforeRoll;
+        std::vector<int> pvMcts;
         std::vector<moveState> rootMoves;
         const size_t nodePow2 = 1ull << 26;
         const size_t edgeCap = 1ull << 29;
         MCTSTable T(nodePow2, edgeCap);
-        mctsBatchedMT(T, pos, path, mask, INT_MAX, mctsEvalWhite, mctsAvgDepth, rootMoves, pvBeforeRoll, 1, 0);
+        mctsBatchedMT(T, pos, path, mask, INT_MAX, mctsEvalWhite, mctsAvgDepth, rootMoves, pvBeforeRoll, pvMcts, 1, 0);
         clearConsoleFull();
         std::cout << std::fixed << std::setprecision(2);
         std::cout << "depth=" << mctsAvgDepth << std::endl;
