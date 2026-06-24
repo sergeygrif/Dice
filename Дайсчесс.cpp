@@ -5387,7 +5387,7 @@ return rootMoves[0].dif;
 }
 void Dif(double dif) { if (dif > -100)cout << showpos << setprecision(2) << "dif=" << dif << noshowpos << setprecision(6); }
 void collectRootMoves(MCTSTable& T, const Position& rootPos, float& outQSideToMove, vector<moveState>& outMoves);
-void extractDifPVUntilChance(MCTSTable& T, Position& rootPos, array<int, 64>& mask, vector<moveState>& rootMoves, vector<int>& outPV) {
+void extractDifPVUntilChance(int write,MCTSTable& T, Position& rootPos, array<int, 64>& mask, vector<moveState>& rootMoves, vector<int>& outPV) {
     outPV.clear();
     Position pos = rootPos;
     if (rootMoves.empty())return;
@@ -5410,7 +5410,7 @@ void extractDifPVUntilChance(MCTSTable& T, Position& rootPos, array<int, 64>& ma
             extractBestPVUntilChance(T, p, mask, ms.pv, ms.pvKey);
             ms.pv.insert(ms.pv.begin(), ms.move);
         }
-        computeDifForRootMoves(moves, T, pos, mask);
+        computeDifForRootMoves(write,moves, T, pos, mask);
         outPV.push_back(moves[0].move);
         makeMove(pos, mask, moves[0].move);
     }
@@ -5622,7 +5622,7 @@ void mctsBatchedMT(MCTSTable& T,
 
         std::vector<int> pvNow;
         double dif = computeDifForRootMoves(write,rootMovesNow, T, rootPos, mask);
-        extractDifPVUntilChance(T, rootPos, mask, rootMovesNow, pvNow);
+        extractDifPVUntilChance(write,T, rootPos, mask, rootMovesNow, pvNow);
 
         clearConsoleFull();
         std::cout << std::fixed << std::setprecision(2);
@@ -5727,7 +5727,7 @@ void mctsBatchedMT(MCTSTable& T,
     }
 
     computeDifForRootMoves(write,outRootMoves, T, rootPos, mask);
-    extractDifPVUntilChance(T, rootPos, mask, outRootMoves, outPVBeforeRoll);
+    extractDifPVUntilChance(write,T, rootPos, mask, outRootMoves, outPVBeforeRoll);
 
     (void)simOK; (void)simFail; (void)nnExp;
     if (forceExit) return;
