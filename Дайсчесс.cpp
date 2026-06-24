@@ -5448,7 +5448,7 @@ void mctsBatchedMT(MCTSTable& T,
         outRootMoves.clear();
         outRootMoves.push_back({ ml.m[0], outEvalWhite, 0, 0.0f, 0ull });
         outPVBeforeRoll.push_back(ml.m[0]);
-        if (write == 1) {
+        if (write == 2) {
             clearConsoleFull();
             std::cout << moveToStr(ml.m[0]) << std::endl;
         }
@@ -5665,7 +5665,7 @@ void mctsBatchedMT(MCTSTable& T,
             break;
         }
 
-        if (write == 1) {
+        if (write == 2) {
             if (now >= tNextWrite) {
                 emitSearchSnapshot();
                 tNextWrite += std::chrono::seconds(1);
@@ -10963,7 +10963,7 @@ void SEARCH() {
             }
         }
         if (clear)T.newGame();
-        if (ready)mctsBatchedMT(T, pos, PATH, MASK, INT_MAX, eval, depth, moves, pv, 1, 1);
+        if (ready)mctsBatchedMT(T, pos, PATH, MASK, INT_MAX, eval, depth, moves, pv, 2, 1);
     }
 }
 
@@ -11162,7 +11162,7 @@ int main() {
         const size_t nodePow2 = 1ull << 26;
         const size_t edgeCap = 1ull << 29;
         MCTSTable T(nodePow2, edgeCap);
-        mctsBatchedMT(T, pos, path, mask, INT_MAX, mctsEvalWhite, mctsAvgDepth, rootMoves, pvBeforeRoll, 1, 0);
+        mctsBatchedMT(T, pos, path, mask, INT_MAX, mctsEvalWhite, mctsAvgDepth, rootMoves, pvBeforeRoll, 2, 0);
         clearConsoleFull();
         std::cout << std::fixed << std::setprecision(2);
         std::cout << "depth=" << mctsAvgDepth << std::endl;
