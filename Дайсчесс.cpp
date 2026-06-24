@@ -5375,14 +5375,15 @@ rootMoves[0].dif=100;
 return 100;
 }
 for(moveState& ms:rootMoves){
-ms.dif=100;
-if(Alternative(ms,rootMoves[0],T,rootPos,mask)||write==0&&ms.pvKey!=rootMoves[0].pvKey){
 ms.dif=-100;
+if(Alternative(ms,rootMoves[0],T,rootPos,mask)||write==0&&ms.pvKey!=rootMoves[0].pvKey){
+ms.dif=100;
 continue;
 }
-for(moveState& alt:rootMoves)if(Alternative(ms,alt,T,rootPos,mask)&&alt.visits)ms.dif=min(ms.dif,100*(toSidePerspective(ms.eval)-toSidePerspective(alt.eval)));
+for(moveState& alt:rootMoves)if(Alternative(ms,alt,T,rootPos,mask)&&alt.visits)ms.dif=max(ms.dif,toSidePerspective(alt.eval));
 }
-stable_sort(rootMoves.begin(),rootMoves.end(),[](const moveState& a,const moveState& b){return a.dif>b.dif;});
+stable_sort(rootMoves.begin(),rootMoves.end(),[](const moveState& a,const moveState& b){return a.dif<b.dif;});
+for(moveState& ms:rootMoves)if(ms.dif>=0&&ms.dif<=1)ms.dif=100*(toSidePerspective(ms.eval)-ms.dif);else ms.dif*=-1;
 return rootMoves[0].dif;
 }
 void Dif(double dif) { if (dif > -100)cout << showpos << setprecision(2) << "dif=" << dif << noshowpos << setprecision(6); }
