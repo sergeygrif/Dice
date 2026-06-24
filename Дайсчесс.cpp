@@ -10896,7 +10896,7 @@ void NEW(int& roll, int& change, vector<int>& s1, vector<int>& s2, vector<int>& 
         ADD(b1, b, bs);
         if (roll || DICENEXT(s1, v[i]))s2 = v[i];
         if (roll || bs.size() && b == bs[0].board)b2 = b;
-        if (v[i].empty() && s1.size() || roll == 0 && stabmin || roll && stabfull && (t2 - t1).count() >= 200000000)return;
+        if (v[i].empty() && s1.size() || roll == 0 && stabmin || roll && stabfull && (t2 - t1).count() >= 300000000)return;
     }
 }
 void LOAD() {
@@ -10959,7 +10959,7 @@ void SEARCH() {
             if (POS.key != pos.key) {
                 pos = POS;
                 clear = ROLL;
-                ready = POS.color[0] & POS.piece[5] && POS.color[1] & POS.piece[5];
+                ready = POS.dice && POS.color[0] & POS.piece[5] && POS.color[1] & POS.piece[5];
             }
         }
         if (clear)T.newGame();
