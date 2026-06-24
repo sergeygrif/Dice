@@ -5365,7 +5365,7 @@ int Alternative(moveState& cur, moveState& alt, MCTSTable& T, Position& rootPos,
     for (int m : alt.pv)if (m != cur.move)line.push_back(m);
     return terminalAwareKeyAfterLine(T, rootPos, mask, line) != alt.pvKey;
 }
-double computeDifForRootMoves(vector<moveState>& rootMoves,MCTSTable& T,Position& rootPos,array<int,64>& mask){
+double computeDifForRootMoves(int write,vector<moveState>& rootMoves,MCTSTable& T,Position& rootPos,array<int,64>& mask){
 auto toSidePerspective=[&rootPos](double eval){return rootPos.side==0?eval:1-eval;};
 if(rootMoves.empty())return 100;
 stable_sort(rootMoves.begin(),rootMoves.end(),[](const moveState& a,const moveState& b){return a.pvKey==0&&b.pvKey;});
@@ -5376,7 +5376,7 @@ return 100;
 }
 for(moveState& ms:rootMoves){
 ms.dif=100;
-if(ms.pvKey!=rootMoves[0].pvKey){
+if(Alternative(ms,rootMoves[0],T,rootPos,mask)||write==0&&ms.pvKey!=rootMoves[0].pvKey){
 ms.dif=-100;
 continue;
 }
@@ -5621,7 +5621,7 @@ void mctsBatchedMT(MCTSTable& T,
         }
 
         std::vector<int> pvNow;
-        double dif = computeDifForRootMoves(rootMovesNow, T, rootPos, mask);
+        double dif = computeDifForRootMoves(write,rootMovesNow, T, rootPos, mask);
         extractDifPVUntilChance(T, rootPos, mask, rootMovesNow, pvNow);
 
         clearConsoleFull();
@@ -5726,7 +5726,7 @@ void mctsBatchedMT(MCTSTable& T,
         }
     }
 
-    computeDifForRootMoves(outRootMoves, T, rootPos, mask);
+    computeDifForRootMoves(write,outRootMoves, T, rootPos, mask);
     extractDifPVUntilChance(T, rootPos, mask, outRootMoves, outPVBeforeRoll);
 
     (void)simOK; (void)simFail; (void)nnExp;
