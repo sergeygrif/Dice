@@ -3835,6 +3835,13 @@ struct SearchParams {
 
 static const SearchParams kDefaultSearchParams{};
 
+static SearchParams makeSearchParams(float c_init, float fpu_reduction) {
+    SearchParams params = kDefaultSearchParams;
+    params.c_init = c_init;
+    params.fpu_reduction = fpu_reduction;
+    return params;
+}
+
 static AI_FORCEINLINE float cpuctFromVisits(
     uint32_t parentVisits,
     bool isRoot,
@@ -8405,8 +8412,8 @@ void arena(string net1, string net2) {
         }
     } guard{ &n1Srv, &n2Srv, &trt1, &trt2 };
 
-    const SearchParams n1Params{ 0.70f, 0.16f, 1000000.0f, 1.0f };
-    const SearchParams n2Params{ 0.70f, 0.16f, 1000000.0f, 1.0f };
+    const SearchParams n1Params = kDefaultSearchParams;
+    const SearchParams n2Params = kDefaultSearchParams;
 
     static constexpr int TOTAL_GAMES = 10000;
     static constexpr int SIMS_PER_POS = 800;
@@ -8484,8 +8491,8 @@ void tune(float c_init1, float fpu_reduction1,
         return;
     }
 
-    const SearchParams p1{ c_init1, fpu_reduction1, 1000000.0f, 1.0f };
-    const SearchParams p2{ c_init2, fpu_reduction2, 1000000.0f, 1.0f };
+    const SearchParams p1 = makeSearchParams(c_init1, fpu_reduction1);
+    const SearchParams p2 = makeSearchParams(c_init2, fpu_reduction2);
 
     static constexpr int TOTAL_GAMES = 10000;
     static constexpr int SIMS_PER_POS = 800;
