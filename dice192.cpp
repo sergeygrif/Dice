@@ -10806,6 +10806,20 @@ void Training(int targetGames) {
                 spRunning = false;
             }
 
+            // Full hourly-style save before the (multi-hour) arena, so a crash
+            // or stop during the arena loses nothing.
+            saveAll(ptFile, emaFile, planFile, optFile, model, emaModel, trainer);
+            if (rb.saveToFile("replay.bin")) {
+                std::ofstream st("train_state.txt", std::ios::trunc);
+                st << games << ' ' << trainSampleCredits << '\n';
+                std::cout << "[arena] pre-arena state saved (replay.bin, "
+                    << rb.currentSize() << " samples)." << std::endl;
+            }
+            else {
+                std::cerr << "[arena] pre-arena replay.bin save FAILED." << std::endl;
+            }
+            nextSave = std::chrono::steady_clock::now() + std::chrono::hours(1);
+
             bool arenaOk = true;
 
             // current TRT must exactly match the current EMA model
