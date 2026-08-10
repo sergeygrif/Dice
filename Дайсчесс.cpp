@@ -2116,12 +2116,12 @@ void genLegal(Position& pos, const array<uint64_t, 4>& path, const array<int, 64
 
 
 static constexpr int NET_BLOCKS = 10;
-static constexpr int NET_CHANNELS = 128;
+static constexpr int NET_CHANNELS = 192; // widened from 128 (see widen192 mode)
 static constexpr int POLICY_P = 73;
 static constexpr double AI_BN_EPS = 1e-5;
 
 // SE (affine)
-static constexpr int SE_CHANNELS = 16;   // for C=128, typically 8..16; 16 is stronger
+static constexpr int SE_CHANNELS = 24;   // scaled with C (C/8)
 
 // Heads
 static constexpr int HEAD_POLICY_C = 32; // 32 for 10x128 — a standard good choice
@@ -3446,6 +3446,12 @@ static TrtRunner g_trt;
 static bool g_trtReady = false;
 static int g_nnBatch = TRT_MAX_BATCH;
 
+// Second TRT runner (own context/stream/buffers/graph). Used by the play-time
+// inference server to pipeline CPU encode/expand phases with GPU compute:
+// while one consumer thread waits on its GPU batch, the other runs its CPU phases.
+static TrtRunner g_trt2;
+static bool g_trt2Ready = false;
+
 // ============================================================
 // =============== Batched MultiThread MCTS ===================
 // Leaf expansion uses a dedicated inference server thread.
@@ -3996,9 +4002,16 @@ static AI_FORCEINLINE void waitGroupDone(SearchWaitGroup* wg) {
 static void waitGroupWaitZero(SearchWaitGroup* wg) {
     if (!wg) return;
     std::unique_lock<std::mutex> lk(wg->m);
-    wg->cv.wait(lk, [&] {
+    // Diagnose (but do not break) a lost-pending-job hang: log every 60s while stuck.
+    int stuckMinutes = 0;
+    while (!wg->cv.wait_for(lk, std::chrono::seconds(60), [&] {
         return wg->pending.load(std::memory_order_acquire) == 0;
-        });
+        })) {
+        ++stuckMinutes;
+        std::cerr << "[waitGroup] STUCK for " << stuckMinutes
+            << " min: pending=" << wg->pending.load(std::memory_order_relaxed)
+            << " (likely a lost NN job; search cannot finish)" << std::endl;
+    }
 }
 
 struct PendingNN {
@@ -4864,27 +4877,40 @@ struct InferenceServer {
 
     std::deque<std::unique_ptr<PendingNN>> q;
     std::thread th;
+    std::thread th2;
 
-    bool busyFlag = false; // protected by m
+    int busyCount = 0; // protected by m; number of consumers processing a batch
+
+    // Consumer runners: [0] is always g_trt; [1] is optional (pipelined mode).
+    TrtRunner* runners[2] = { &g_trt, nullptr };
+    int nRunners = 1;
 
     std::vector<float> neutralPol;     // [POLICY_SIZE]
     std::vector<float> neutralLogits;  // [AI_MAX_MOVES]
 
-    explicit InferenceServer(MCTSTable& tab) : T(tab) {
+    explicit InferenceServer(MCTSTable& tab,
+        TrtRunner* primaryRunner = nullptr,
+        TrtRunner* secondRunner = nullptr) : T(tab) {
         q.clear();
         neutralPol.assign((size_t)POLICY_SIZE, 0.0f);
         neutralLogits.assign((size_t)AI_MAX_MOVES, 0.0f);
+        if (primaryRunner) runners[0] = primaryRunner;
+        if (secondRunner) {
+            runners[1] = secondRunner;
+            nRunners = 2;
+        }
     }
 
     void start() {
         {
             std::lock_guard<std::mutex> lk(m);
             stop.store(false, std::memory_order_relaxed);
-            busyFlag = false;
+            busyCount = 0;
             q.clear();
             qSize.store(0, std::memory_order_relaxed);
         }
-        th = std::thread([this] { this->run(); });
+        th = std::thread([this] { this->run(0); });
+        if (nRunners > 1) th2 = std::thread([this] { this->run(1); });
     }
 
     void stopAndDrain() {
@@ -4897,6 +4923,7 @@ struct InferenceServer {
         cvIdle.notify_all();
 
         if (th.joinable()) th.join();
+        if (th2.joinable()) th2.join();
     }
 
     int size() const {
@@ -4906,7 +4933,7 @@ struct InferenceServer {
     void waitIdle() {
         std::unique_lock<std::mutex> lk(m);
         cvIdle.wait(lk, [&] {
-            return q.empty() && !busyFlag;
+            return q.empty() && busyCount == 0;
             });
     }
 
@@ -4951,7 +4978,9 @@ private:
         return n;
     }
 
-    void run() {
+    void run(int runnerIdx) {
+        TrtRunner& R = *runners[runnerIdx];
+
         std::vector<std::unique_ptr<PendingNN>> batch;
         std::vector<std::unique_ptr<PendingNN>> add;
         std::vector<const PendingNN*> batchPtrs;
@@ -4966,20 +4995,20 @@ private:
             for (int i = 0; i < B; ++i) batchPtrs[(size_t)i] = jobs[(size_t)i].get();
 
 #if AI_HAVE_CUDA_KERNELS
-            bool ok = g_trt.inferBatchGather(batchPtrs.data(), B);
+            bool ok = R.inferBatchGather(batchPtrs.data(), B);
             for (int i = 0; i < B; ++i) {
-                float v = ok ? g_trt.valueHost(i) : 0.5f;
-                const float* logits = ok ? g_trt.gatherLogitsHostPtr(i) : neutralLogits.data();
+                float v = ok ? R.valueHost(i) : 0.5f;
+                const float* logits = ok ? R.gatherLogitsHostPtr(i) : neutralLogits.data();
                 expandLeafWithGatheredLogits(T, *jobs[(size_t)i], v, logits);
             }
 #else
             std::vector<Position> posBatch((size_t)B);
             for (int i = 0; i < B; ++i) posBatch[(size_t)i] = jobs[(size_t)i]->pos;
 
-            bool ok = g_trt.inferBatch(posBatch.data(), B);
+            bool ok = R.inferBatch(posBatch.data(), B);
             for (int i = 0; i < B; ++i) {
-                float v = ok ? g_trt.valueHost(i) : 0.5f;
-                const float* pol = ok ? g_trt.policyHostPtr(i) : neutralPol.data();
+                float v = ok ? R.valueHost(i) : 0.5f;
+                const float* pol = ok ? R.policyHostPtr(i) : neutralPol.data();
                 expandLeafWithOutputs(T, *jobs[(size_t)i], v, pol);
             }
 #endif
@@ -4989,8 +5018,7 @@ private:
             {
                 std::unique_lock<std::mutex> lk(m);
 
-                busyFlag = false;
-                if (q.empty()) cvIdle.notify_all();
+                if (q.empty() && busyCount == 0) cvIdle.notify_all();
 
                 cvNotEmpty.wait(lk, [&] {
                     return stop.load(std::memory_order_relaxed) || !q.empty();
@@ -4998,7 +5026,7 @@ private:
 
                 if (stop.load(std::memory_order_relaxed) && q.empty()) break;
 
-                busyFlag = true;
+                ++busyCount;
                 (void)popBatchUnlocked(batch, TRT_MAX_BATCH);
             }
 
@@ -5033,13 +5061,18 @@ private:
 
             processBatch(batch);
             freePendingBatch(batch);
+
+            {
+                std::lock_guard<std::mutex> lk(m);
+                --busyCount;
+                if (q.empty() && busyCount == 0) cvIdle.notify_all();
+            }
         }
 
         {
             std::lock_guard<std::mutex> lk(m);
-            busyFlag = false;
             qSize.store((int)q.size(), std::memory_order_relaxed);
-            if (q.empty()) cvIdle.notify_all();
+            if (q.empty() && busyCount == 0) cvIdle.notify_all();
         }
 
         cvNotFull.notify_all();
@@ -5058,7 +5091,8 @@ static void ensureRootExpanded(MCTSTable& T,
     const std::array<uint64_t, 4>& path,
     const std::array<int, 64>& mask,
     MoveList& ml,
-    int term) {
+    int term,
+    TrtRunner& RT = g_trt) {
     TTNode* root = T.getNode(rootPos.key);
     if (!root) return;
 
@@ -5108,20 +5142,20 @@ static void ensureRootExpanded(MCTSTable& T,
     float v = 0.5f;
 
 #if AI_HAVE_CUDA_KERNELS
-    if (!g_trt.inferBatchGather(&p, 1)) {
+    if (!RT.inferBatchGather(&p, 1)) {
         v = 0.5f;
         std::vector<float> z((size_t)AI_MAX_MOVES, 0.0f);
         expandLeafWithGatheredLogits(T, p, v, z.data());
         pGuard.release();
         return;
     }
-    v = g_trt.valueHost(0);
-    const float* logits = g_trt.gatherLogitsHostPtr(0);
+    v = RT.valueHost(0);
+    const float* logits = RT.gatherLogitsHostPtr(0);
     expandLeafWithGatheredLogits(T, p, v, logits);
     pGuard.release();
 #else
     std::vector<float> pol((size_t)POLICY_SIZE, 0.0f);
-    if (!g_trt.inferBatch(&p.pos, 1, &v, pol.data())) {
+    if (!RT.inferBatch(&p.pos, 1, &v, pol.data())) {
         v = 0.5f;
         std::fill(pol.begin(), pol.end(), 0.0f);
     }
@@ -5365,30 +5399,30 @@ int Alternative(moveState& cur, moveState& alt, MCTSTable& T, Position& rootPos,
     for (int m : alt.pv)if (m != cur.move)line.push_back(m);
     return terminalAwareKeyAfterLine(T, rootPos, mask, line) != alt.pvKey;
 }
-double computeDifForRootMoves(int write,vector<moveState>& rootMoves,MCTSTable& T,Position& rootPos,array<int,64>& mask){
-auto toSidePerspective=[&rootPos](double eval){return rootPos.side==0?eval:1-eval;};
-if(rootMoves.empty())return 100;
-stable_sort(rootMoves.begin(),rootMoves.end(),[](const moveState& a,const moveState& b){return a.pvKey==0&&b.pvKey;});
-if(rootMoves[0].visits==0||rootMoves[0].pvKey==0){
-for(moveState& ms:rootMoves)ms.dif=-100;
-rootMoves[0].dif=100;
-return 100;
-}
-for(moveState& ms:rootMoves){
-ms.dif=-100;
-if(Alternative(ms,rootMoves[0],T,rootPos,mask)||write==0&&ms.pvKey!=rootMoves[0].pvKey){
-ms.dif=100;
-continue;
-}
-for(moveState& alt:rootMoves)if(Alternative(ms,alt,T,rootPos,mask)&&alt.visits)ms.dif=max(ms.dif,toSidePerspective(alt.eval));
-}
-stable_sort(rootMoves.begin(),rootMoves.end(),[](const moveState& a,const moveState& b){return a.dif<b.dif;});
-for(moveState& ms:rootMoves)if(ms.dif>=0&&ms.dif<=1)ms.dif=100*(toSidePerspective(ms.eval)-ms.dif);else ms.dif*=-1;
-return rootMoves[0].dif;
+double computeDifForRootMoves(int write, vector<moveState>& rootMoves, MCTSTable& T, Position& rootPos, array<int, 64>& mask) {
+    auto toSidePerspective = [&rootPos](double eval) {return rootPos.side == 0 ? eval : 1 - eval; };
+    if (rootMoves.empty())return 100;
+    stable_sort(rootMoves.begin(), rootMoves.end(), [](const moveState& a, const moveState& b) {return a.pvKey == 0 && b.pvKey; });
+    if (rootMoves[0].visits == 0 || rootMoves[0].pvKey == 0) {
+        for (moveState& ms : rootMoves)ms.dif = -100;
+        rootMoves[0].dif = 100;
+        return 100;
+    }
+    for (moveState& ms : rootMoves) {
+        ms.dif = -100;
+        if (Alternative(ms, rootMoves[0], T, rootPos, mask) || write == 0 && ms.pvKey != rootMoves[0].pvKey) {
+            ms.dif = 100;
+            continue;
+        }
+        for (moveState& alt : rootMoves)if (Alternative(ms, alt, T, rootPos, mask) && alt.visits)ms.dif = max(ms.dif, toSidePerspective(alt.eval));
+    }
+    stable_sort(rootMoves.begin(), rootMoves.end(), [](const moveState& a, const moveState& b) {return a.dif < b.dif; });
+    for (moveState& ms : rootMoves)if (ms.dif >= 0 && ms.dif <= 1)ms.dif = 100 * (toSidePerspective(ms.eval) - ms.dif); else ms.dif *= -1;
+    return rootMoves[0].dif;
 }
 void Dif(double dif) { if (dif > -100)cout << showpos << setprecision(2) << "dif=" << dif << noshowpos << setprecision(6); }
 void collectRootMoves(MCTSTable& T, const Position& rootPos, float& outQSideToMove, vector<moveState>& outMoves);
-void extractDifPVUntilChance(int write,MCTSTable& T, Position& rootPos, array<int, 64>& mask, vector<moveState>& rootMoves, vector<int>& outPV) {
+void extractDifPVUntilChance(int write, MCTSTable& T, Position& rootPos, array<int, 64>& mask, vector<moveState>& rootMoves, vector<int>& outPV) {
     outPV.clear();
     Position pos = rootPos;
     if (rootMoves.empty())return;
@@ -5411,7 +5445,7 @@ void extractDifPVUntilChance(int write,MCTSTable& T, Position& rootPos, array<in
             extractBestPVUntilChance(T, p, mask, ms.pv, ms.pvKey);
             ms.pv.insert(ms.pv.begin(), ms.move);
         }
-        computeDifForRootMoves(write,moves, T, pos, mask);
+        computeDifForRootMoves(write, moves, T, pos, mask);
         outPV.push_back(moves[0].move);
         makeMove(pos, mask, moves[0].move);
     }
@@ -5426,6 +5460,15 @@ int ROLL;
 Position POS;
 array<uint64_t, 4> PATH;
 array<int, 64> MASK;
+// Number of leaf-producing worker threads for timed search.
+// Capped at 2: producers busy-spin in the queue throttle, and on a
+// power-limited laptop extra spinning cores steal thermal budget from the GPU
+// (measured: 6 producers scored worse than 1 at 0.4s/move).
+static unsigned autoSearchThreads() {
+    unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    unsigned t = (hw > 2u) ? (hw - 2u) : 1u;
+    return std::min(t, 2u);
+}
 void mctsBatchedMT(MCTSTable& T,
     Position& rootPos,
     std::array<uint64_t, 4>& path,
@@ -5436,7 +5479,12 @@ void mctsBatchedMT(MCTSTable& T,
     std::vector<moveState>& outRootMoves,
     std::vector<int>& outPVBeforeRoll,
     int write,
-    int abort) {
+    int abort,
+    unsigned searchThreads = 1,
+    bool dualInfer = false,
+    TrtRunner* primaryRunner = nullptr,   // nullptr => g_trt
+    InferenceServer* extServer = nullptr) // persistent server (skips per-move start/stop)
+{
     MoveList ml;
     int term;
     genLegal(rootPos, path, mask, ml, term);
@@ -5465,7 +5513,8 @@ void mctsBatchedMT(MCTSTable& T,
         return;
     }
 
-    ensureRootExpanded(T, rootPos, path, mask, ml, term);
+    TrtRunner& RT = primaryRunner ? *primaryRunner : g_trt;
+    ensureRootExpanded(T, rootPos, path, mask, ml, term, RT);
 
     if (T.abort.load(std::memory_order_acquire)) {
         outEvalWhite = 0.5f;
@@ -5475,14 +5524,16 @@ void mctsBatchedMT(MCTSTable& T,
         return;
     }
 
+    // The dual (pipelined) runner mirrors g_trt weights; never pair it with a custom primary.
+    const bool useDual = dualInfer && g_trt2Ready && (!primaryRunner || primaryRunner == &g_trt);
 
+    InferenceServer localServer(T, &RT, useDual ? &g_trt2 : nullptr);
+    InferenceServer& nnServer = extServer ? *extServer : localServer;
+    if (!extServer) localServer.start();
+    InferenceServerStopGuard nnServerGuard(localServer);
+    if (extServer) nnServerGuard.release(); // local server unused; do not touch the external one
 
-    InferenceServer nnServer(T);
-    nnServer.start();
-    InferenceServerStopGuard nnServerGuard(nnServer);
-
-    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
-    const unsigned threads = 1;
+    const unsigned threads = std::max(1u, searchThreads);
 
     const auto t0 = std::chrono::steady_clock::now();
     const auto tEnd = t0 + std::chrono::duration<double>(timeSec);
@@ -5622,8 +5673,8 @@ void mctsBatchedMT(MCTSTable& T,
         }
 
         std::vector<int> pvNow;
-        double dif = computeDifForRootMoves(write,rootMovesNow, T, rootPos, mask);
-        extractDifPVUntilChance(write,T, rootPos, mask, rootMovesNow, pvNow);
+        double dif = computeDifForRootMoves(write, rootMovesNow, T, rootPos, mask);
+        extractDifPVUntilChance(write, T, rootPos, mask, rootMovesNow, pvNow);
 
         clearConsoleFull();
         std::cout << std::fixed << std::setprecision(2);
@@ -5679,8 +5730,11 @@ void mctsBatchedMT(MCTSTable& T,
     for (auto& th : pool) th.join();
     poolGuard.release();
 
-    nnServer.stopAndDrain();
-    nnServerGuard.release();
+    if (extServer) extServer->waitIdle(); // drain in-flight results into the tree, keep server alive
+    else {
+        localServer.stopAndDrain();
+        nnServerGuard.release();
+    }
 
     stopGuard.release();
 
@@ -5727,8 +5781,8 @@ void mctsBatchedMT(MCTSTable& T,
         }
     }
 
-    computeDifForRootMoves(write,outRootMoves, T, rootPos, mask);
-    extractDifPVUntilChance(write,T, rootPos, mask, outRootMoves, outPVBeforeRoll);
+    computeDifForRootMoves(write, outRootMoves, T, rootPos, mask);
+    extractDifPVUntilChance(write, T, rootPos, mask, outRootMoves, outPVBeforeRoll);
 
     (void)simOK; (void)simFail; (void)nnExp;
     if (forceExit) return;
@@ -5787,7 +5841,7 @@ struct ResBlockImpl final : torch::nn::Module {
     torch::nn::BatchNorm2d bn1{ nullptr }, bn2{ nullptr };
     SEAffine se{ nullptr };
 
-    explicit ResBlockImpl(int channels) : C(channels) {
+    explicit ResBlockImpl(int channels, int seChannels = SE_CHANNELS) : C(channels) {
         conv1 = register_module("conv1",
             torch::nn::Conv2d(torch::nn::Conv2dOptions(C, C, 3).padding(1).bias(false)));
         bn1 = register_module("bn1",
@@ -5798,7 +5852,7 @@ struct ResBlockImpl final : torch::nn::Module {
         bn2 = register_module("bn2",
             torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(C).eps(AI_BN_EPS)));
 
-        se = register_module("se", SEAffine(C, SE_CHANNELS));
+        se = register_module("se", SEAffine(C, seChannels));
     }
 
     torch::Tensor forward(torch::Tensor x) {
@@ -5921,6 +5975,235 @@ struct NetImpl final : torch::nn::Module {
     }
 };
 TORCH_MODULE(Net);
+
+// ============================================================
+// widen192: expand a 10x128(se16) checkpoint into this build's
+// 10x192(se24) Net, preserving the source function exactly:
+// weights consuming NEW input channels are zeroed for the rows
+// that produce ORIGINAL outputs, so both heads compute the same
+// function as the 128 net until training turns new capacity on.
+// ============================================================
+
+// Donor module: exact 10x128/se16/p32/v32 architecture (same submodule names as Net).
+struct Net128Impl final : torch::nn::Module {
+    static constexpr int C128 = 128;
+    static constexpr int SE128 = 16;
+
+    torch::nn::Conv2d stem{ nullptr };
+    torch::nn::BatchNorm2d stemBn{ nullptr };
+    torch::nn::ModuleList blocks;
+
+    torch::nn::Conv2d polConv1{ nullptr };
+    torch::nn::BatchNorm2d polBn1{ nullptr };
+    torch::nn::Conv2d polConv2{ nullptr };
+
+    torch::nn::Conv2d valConv1{ nullptr };
+    torch::nn::BatchNorm2d valBn1{ nullptr };
+    torch::nn::Linear valFC1{ nullptr };
+    torch::nn::Linear valFC2{ nullptr };
+
+    Net128Impl() {
+        stem = register_module("stem",
+            torch::nn::Conv2d(torch::nn::Conv2dOptions(NN_SQ_PLANES, C128, 3).padding(1).bias(false)));
+        stemBn = register_module("stemBn",
+            torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(C128).eps(AI_BN_EPS)));
+
+        blocks = register_module("blocks", torch::nn::ModuleList());
+        for (int i = 0; i < NET_BLOCKS; ++i) blocks->push_back(ResBlock(C128, SE128));
+
+        polConv1 = register_module("polConv1",
+            torch::nn::Conv2d(torch::nn::Conv2dOptions(C128, HEAD_POLICY_C, 1).padding(0).bias(false)));
+        polBn1 = register_module("polBn1",
+            torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(HEAD_POLICY_C).eps(AI_BN_EPS)));
+        polConv2 = register_module("polConv2",
+            torch::nn::Conv2d(torch::nn::Conv2dOptions(HEAD_POLICY_C, POLICY_P, 1).padding(0).bias(true)));
+
+        valConv1 = register_module("valConv1",
+            torch::nn::Conv2d(torch::nn::Conv2dOptions(C128, HEAD_VALUE_C, 1).padding(0).bias(false)));
+        valBn1 = register_module("valBn1",
+            torch::nn::BatchNorm2d(torch::nn::BatchNorm2dOptions(HEAD_VALUE_C).eps(AI_BN_EPS)));
+
+        valFC1 = register_module("valFC1",
+            torch::nn::Linear(torch::nn::LinearOptions(HEAD_VALUE_C * 64, HEAD_VALUE_FC).bias(true)));
+        valFC2 = register_module("valFC2",
+            torch::nn::Linear(torch::nn::LinearOptions(HEAD_VALUE_FC, 1).bias(true)));
+    }
+};
+TORCH_MODULE(Net128);
+
+struct WidenCopyStats {
+    int exact = 0;
+    int prefix = 0;
+    int seSplit = 0;
+    int zeroedCross = 0;
+};
+
+static bool widenEndsWith(const std::string& s, const char* suffix) {
+    const size_t n = std::strlen(suffix);
+    return s.size() >= n && s.compare(s.size() - n, n, suffix) == 0;
+}
+
+static torch::Tensor widenTensorForCopy(const torch::Tensor& src, const torch::Tensor& dst) {
+    return src.detach().to(dst.device(), dst.scalar_type(), false, false).contiguous();
+}
+
+static bool widenSameShape(const torch::Tensor& a, const torch::Tensor& b) {
+    if (a.dim() != b.dim()) return false;
+    for (int64_t d = 0; d < a.dim(); ++d)
+        if (a.size(d) != b.size(d)) return false;
+    return true;
+}
+
+static bool widenFitsPrefix(const torch::Tensor& src, const torch::Tensor& dst) {
+    if (src.dim() != dst.dim()) return false;
+    for (int64_t d = 0; d < src.dim(); ++d)
+        if (src.size(d) > dst.size(d)) return false;
+    return true;
+}
+
+static torch::Tensor widenPrefixView(const torch::Tensor& dst, const torch::Tensor& src) {
+    torch::Tensor view = dst;
+    for (int64_t d = 0; d < src.dim(); ++d)
+        view = view.slice(d, 0, src.size(d));
+    return view;
+}
+
+// For weights with an input-channel dim (conv [O,I,k,k], linear [O,I]):
+// zero dst[0:srcO, srcI:dstI] so original outputs ignore new channels.
+static void widenZeroCrossTerms(torch::Tensor& dst,
+    const torch::Tensor& src,
+    WidenCopyStats& stats) {
+    if (src.dim() < 2) return;
+    const int64_t srcO = src.size(0), srcI = src.size(1);
+    const int64_t dstI = dst.size(1);
+    if (srcI >= dstI) return;
+    torch::Tensor z = dst.slice(0, 0, srcO).slice(1, srcI, dstI);
+    z.zero_();
+    ++stats.zeroedCross;
+}
+
+// SE fc2 emits 2*C (W then B halves): copy each half's prefix and zero its cross-terms.
+static bool widenCopySplitSEFc2(const std::string& name,
+    torch::Tensor dst,
+    const torch::Tensor& srcIn,
+    WidenCopyStats& stats) {
+    const bool isWeight = widenEndsWith(name, ".se.fc2.weight");
+    const bool isBias = widenEndsWith(name, ".se.fc2.bias");
+    if (!isWeight && !isBias) return false;
+
+    if (srcIn.dim() != dst.dim() || srcIn.dim() < 1)
+        throw std::runtime_error("SE fc2 tensor rank mismatch: " + name);
+    if ((srcIn.size(0) % 2) != 0 || (dst.size(0) % 2) != 0)
+        throw std::runtime_error("SE fc2 channel mismatch: " + name);
+
+    const int64_t srcC = srcIn.size(0) / 2;
+    const int64_t dstC = dst.size(0) / 2;
+    if (srcC > dstC)
+        throw std::runtime_error("SE fc2 cannot shrink: " + name);
+
+    const torch::Tensor s = widenTensorForCopy(srcIn, dst);
+
+    torch::Tensor srcW = s.slice(0, 0, srcC);
+    torch::Tensor srcB = s.slice(0, srcC, srcC * 2);
+    torch::Tensor dstW = dst.slice(0, 0, srcC);
+    torch::Tensor dstB = dst.slice(0, dstC, dstC + srcC);
+
+    for (int64_t d = 1; d < s.dim(); ++d) {
+        dstW = dstW.slice(d, 0, s.size(d));
+        dstB = dstB.slice(d, 0, s.size(d));
+    }
+    dstW.copy_(srcW);
+    dstB.copy_(srcB);
+
+    if (isWeight && s.dim() >= 2 && s.size(1) < dst.size(1)) {
+        // zero new-seC inputs for the copied W and B rows
+        torch::Tensor zw = dst.slice(0, 0, srcC).slice(1, s.size(1), dst.size(1));
+        torch::Tensor zb = dst.slice(0, dstC, dstC + srcC).slice(1, s.size(1), dst.size(1));
+        zw.zero_();
+        zb.zero_();
+        ++stats.zeroedCross;
+    }
+
+    ++stats.seSplit;
+    return true;
+}
+
+static void widenCopyTensorByName(const std::string& name,
+    torch::Tensor dst,
+    const torch::Tensor& src,
+    WidenCopyStats& stats) {
+    torch::NoGradGuard ng;
+
+    if (!widenSameShape(src, dst) && widenCopySplitSEFc2(name, dst, src, stats)) return;
+
+    const torch::Tensor s = widenTensorForCopy(src, dst);
+    if (widenSameShape(s, dst)) {
+        dst.copy_(s);
+        ++stats.exact;
+        return;
+    }
+
+    if (!widenFitsPrefix(s, dst)) {
+        std::ostringstream oss;
+        oss << "widen192: cannot copy '" << name << "'";
+        throw std::runtime_error(oss.str());
+    }
+
+    widenPrefixView(dst, s).copy_(s);
+    widenZeroCrossTerms(dst, s, stats);
+    ++stats.prefix;
+}
+
+static WidenCopyStats widenNet128To192(Net128& src, Net& dst) {
+    WidenCopyStats stats;
+    torch::NoGradGuard ng;
+
+    auto srcParams = src->named_parameters(true);
+    auto dstParams = dst->named_parameters(true);
+    for (const auto& kv : srcParams) {
+        auto* d = dstParams.find(kv.key());
+        if (!d) throw std::runtime_error("widen192 missing parameter: " + kv.key());
+        widenCopyTensorByName(kv.key(), *d, kv.value(), stats);
+    }
+
+    auto srcBufs = src->named_buffers(true);
+    auto dstBufs = dst->named_buffers(true);
+    for (const auto& kv : srcBufs) {
+        auto* d = dstBufs.find(kv.key());
+        if (!d) throw std::runtime_error("widen192 missing buffer: " + kv.key());
+        widenCopyTensorByName(kv.key(), *d, kv.value(), stats);
+    }
+
+    dst->eval();
+    return stats;
+}
+
+static bool createNet192FromFile(const std::string& srcFile, const std::string& dstFile) {
+    try {
+        Net128 src;
+        torch::load(src, srcFile);
+        src->to(torch::kCPU);
+        src->eval();
+
+        torch::manual_seed(192);
+        Net dst;
+        dst->to(torch::kCPU);
+
+        const WidenCopyStats stats = widenNet128To192(src, dst);
+        torch::save(dst, dstFile);
+
+        std::cout << "widen192: " << srcFile << " -> " << dstFile
+            << " (exact=" << stats.exact
+            << ", prefix=" << stats.prefix
+            << ", seSplit=" << stats.seSplit
+            << ", zeroedCross=" << stats.zeroedCross << ")" << std::endl;
+        return true;
+    }
+    catch (const std::exception& e) {
+        std::cerr << "widen192 failed for " << srcFile << ": " << e.what() << std::endl;
+        return false;
+    }
+}
 
 // ------------------------------------------------------------
 // ReplayBuffer: X + SPARSE policy target + z
@@ -6051,6 +6334,69 @@ struct ReplayBuffer {
 
     size_t currentSize() {
         std::lock_guard<std::mutex> lk(m);
+        return size;
+    }
+
+    // ---- persistence for fast training restart ----
+    static constexpr uint64_t REPLAY_MAGIC = 0xD1CE0BAFull;
+
+    bool saveToFile(const std::string& path) {
+        static_assert(std::is_trivially_copyable<TrainSample>::value,
+            "TrainSample must be trivially copyable for raw dump");
+
+        std::vector<TrainSample> snap;
+        {
+            std::lock_guard<std::mutex> lk(m);
+            snap.resize(size);
+            const size_t start = (head + cap - size) % cap;
+            for (size_t i = 0; i < size; ++i) snap[i] = buf[(start + i) % cap];
+        }
+
+        const std::string tmp = path + ".tmp";
+        {
+            std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+            if (!f) return false;
+            const uint64_t magic = REPLAY_MAGIC;
+            const uint32_t version = 1;
+            const uint32_t ss = (uint32_t)sizeof(TrainSample);
+            const uint64_t count = (uint64_t)snap.size();
+            f.write((const char*)&magic, 8);
+            f.write((const char*)&version, 4);
+            f.write((const char*)&ss, 4);
+            f.write((const char*)&count, 8);
+            if (count) f.write((const char*)snap.data(),
+                (std::streamsize)(count * sizeof(TrainSample)));
+            if (!f.good()) return false;
+        }
+#if defined(_WIN32)
+        if (!MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) return false;
+#else
+        if (std::rename(tmp.c_str(), path.c_str()) != 0) return false;
+#endif
+        return true;
+    }
+
+    size_t loadFromFile(const std::string& path) {
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return 0;
+
+        uint64_t magic = 0; uint32_t version = 0, ss = 0; uint64_t count = 0;
+        f.read((char*)&magic, 8);
+        f.read((char*)&version, 4);
+        f.read((char*)&ss, 4);
+        f.read((char*)&count, 8);
+        if (!f.good() || magic != REPLAY_MAGIC || version != 1 ||
+            ss != (uint32_t)sizeof(TrainSample)) return 0;
+
+        std::lock_guard<std::mutex> lk(m);
+        const uint64_t keep = std::min<uint64_t>(count, (uint64_t)cap);
+        if (count > keep) {
+            f.seekg((std::streamoff)((count - keep) * sizeof(TrainSample)), std::ios::cur);
+        }
+        f.read((char*)buf.data(), (std::streamsize)(keep * sizeof(TrainSample)));
+        if (!f.good()) { size = 0; head = 0; return 0; }
+        size = (size_t)keep;
+        head = (size_t)(keep % cap);
         return size;
     }
 };
@@ -6543,6 +6889,15 @@ struct UnifiedInferenceServerTrain : ITrainInferenceServer {
     void waitIdle() override {
         std::unique_lock<std::mutex> lk(m);
         cvIdle.wait(lk, [&] {
+            return q.empty() && !busyFlag;
+            });
+    }
+
+    // Timed variant: returns false if the server did not go idle in time
+    // (protects quiesce barriers from livelock under continuous submissions).
+    bool waitIdleFor(int64_t timeoutMs) {
+        std::unique_lock<std::mutex> lk(m);
+        return cvIdle.wait_for(lk, std::chrono::milliseconds(timeoutMs), [&] {
             return q.empty() && !busyFlag;
             });
     }
@@ -8210,7 +8565,7 @@ static void printTuneProgress(int played, int wins1, int losses1) {
         << "[tune] games=" << played
         << " W/L=" << wins1 << "/" << losses1
         << " score=" << std::fixed << std::setprecision(4) << score1
-        << " LOS=" << std::setprecision(2) << los << "%\n";
+        << " LOS=" << std::setprecision(2) << los << '%' << std::endl;
 }
 
 struct TuneLane {
@@ -8442,7 +8797,7 @@ void arena(string net1, string net2) {
         << "  net2: " << net2 << "\n"
         << "  games=" << TOTAL_GAMES << " sims=" << SIMS_PER_POS << "\n"
         << "  parallel_lanes=" << parallelLanes
-        << " threads_per_side=" << threadsPerSide << "\n";
+        << " threads_per_side=" << threadsPerSide << std::endl;
 
     auto onProgress = [&](int playedGames, const MatchStatsGeneric& s) {
         if ((playedGames % 2) == 0 && (playedGames % 100) == 0) {
@@ -9857,17 +10212,36 @@ static void saveAll(const std::string& ptFile,
 // Training(minutes)
 // ------------------------------------------------------------
 
-static AI_FORCEINLINE void waitForNoInferenceInFlight() {
+static AI_FORCEINLINE bool waitForNoInferenceInFlightBounded(int64_t timeoutMs) {
+    using Clock = std::chrono::steady_clock;
+    const auto deadline = Clock::now() + std::chrono::milliseconds(timeoutMs);
     while (g_inferInFlight.load(std::memory_order_acquire) != 0) {
+        if (Clock::now() >= deadline) return false;
         std::this_thread::sleep_for(std::chrono::microseconds(50));
     }
+    return true;
 }
 
-static void safeRefitBarrierShared(SharedInferenceServerTrain& srv) {
-    srv.waitIdle();
-    waitForNoInferenceInFlight();
+// Bounded quiesce barrier. Returns false (and logs) instead of hanging forever
+// when the shared server never drains; the caller skips its action this round.
+static bool safeRefitBarrierShared(SharedInferenceServerTrain& srv) {
+    if (!srv.waitIdleFor(120000)) {
+        std::cerr << "[barrier] TIMEOUT: train server not idle after 120s"
+            << " (queue=" << srv.size() << "); skipping quiesce round." << std::endl;
+        return false;
+    }
+    if (!waitForNoInferenceInFlightBounded(120000)) {
+        std::cerr << "[barrier] TIMEOUT: inference in flight after 120s (inFlight="
+            << g_inferInFlight.load(std::memory_order_relaxed)
+            << "); skipping quiesce round." << std::endl;
+        return false;
+    }
     srv.clearQueueUnsafeWhenIdle();
-    waitForNoInferenceInFlight();
+    if (!waitForNoInferenceInFlightBounded(120000)) {
+        std::cerr << "[barrier] TIMEOUT after clearQueue; skipping quiesce round." << std::endl;
+        return false;
+    }
+    return true;
 }
 
 static AI_FORCEINLINE bool tryClaimGameBudget(std::atomic<int>& gamesLeft) {
@@ -10302,6 +10676,37 @@ void Training(int targetGames) {
     auto statWindowStart = std::chrono::steady_clock::now();
     int nextArenaAt = 100000;
 
+    // ---- fast-restart state: replay buffer + counters ----
+    {
+        const size_t restored = rb.loadFromFile("replay.bin");
+        if (restored) {
+            std::cout << "[replay] restored " << restored
+                << " samples from replay.bin" << std::endl;
+        }
+        std::ifstream st("train_state.txt");
+        if (st) {
+            long long g = 0; double credits = 0.0;
+            if (st >> g >> credits) {
+                games = (int)std::max(0ll, g);
+                trainSampleCredits = std::max(0.0, credits);
+                while (games >= nextArenaAt) nextArenaAt += 100000;
+                std::cout << "[state] restored games=" << games
+                    << " credits=" << trainSampleCredits << std::endl;
+            }
+        }
+    }
+
+    // Arena gate #2: require at least 100k games played by THIS process,
+    // so a fresh restart never triggers an arena almost immediately.
+    const int gamesAtProcessStart = games;
+
+    // Arenas run only at 100k-multiples of the TOTAL game counter; skip any
+    // milestone that would fall earlier than start+100k (missed ones are dropped).
+    while (nextArenaAt < gamesAtProcessStart + 100000) nextArenaAt += 100000;
+
+    // Network snapshots, unlike arenas, happen at EVERY 100k-multiple reached.
+    int nextNetSaveAt = (games / 100000 + 1) * 100000;
+
     std::cout << "Starting training for " << targetGames << " games...\n";
 
     while (games < targetGames) {
@@ -10330,6 +10735,30 @@ void Training(int targetGames) {
 
         games += (int)spBlk.games;
 
+        // Versioned network snapshot at every 100k-multiple of the total game
+        // counter, independent of whether an arena runs at that milestone.
+        while (games >= nextNetSaveAt) {
+            const int netVer = nextNetSaveAt / 100000;
+            const std::string vp = "net" + std::to_string(netVer);
+            try {
+                std::lock_guard<std::mutex> lkM(g_modelMutex);
+                torch::save(model, vp + ".pt");
+                torch::save(emaModel, vp + "_ema.pt");
+            }
+            catch (const std::exception& e) {
+                std::cerr << "[snapshot] save failed for " << vp << ": " << e.what() << std::endl;
+            }
+            {
+                std::lock_guard<std::mutex> lkT(g_trtMutex);
+                if (!trtSavePlanToDisk(g_trt, vp + ".plan")) {
+                    std::cerr << "[snapshot] plan save failed for " << vp << std::endl;
+                }
+            }
+            std::cout << "[snapshot] saved " << vp << ".pt, " << vp << "_ema.pt, "
+                << vp << ".plan at " << nextNetSaveAt << " games." << std::endl;
+            nextNetSaveAt += 100000;
+        }
+
         statGamesWindow += spBlk.games;
         statPlyWindow += spBlk.plies;
         statTruncatedWindow += spBlk.truncated;
@@ -10356,17 +10785,19 @@ void Training(int targetGames) {
                     (int)(trainSampleCredits / (double)trainer.B));
 
             if (targetSteps > 0) {
-                safeRefitBarrierShared(sharedSrv);
+                if (safeRefitBarrierShared(sharedSrv)) {
+                    // use old function as fixed-step runner by giving it a huge time budget
+                    didTrain = trainer.trainBlockBudgetMs(rb, model, emaModel,
+                        /*budgetMs=*/24 * 60 * 60 * 1000,
+                        /*maxStepsHard=*/targetSteps,
+                        TRAIN_WARMUP_BATCHES);
 
-                // use old function as fixed-step runner by giving it a huge time budget
-                didTrain = trainer.trainBlockBudgetMs(rb, model, emaModel,
-                    /*budgetMs=*/24 * 60 * 60 * 1000,
-                    /*maxStepsHard=*/targetSteps,
-                    TRAIN_WARMUP_BATCHES);
-
-                trainSampleCredits -= (double)didTrain * (double)trainer.B;
-                if (trainSampleCredits < 0.0) trainSampleCredits = 0.0;
-
+                    trainSampleCredits -= (double)didTrain * (double)trainer.B;
+                    if (trainSampleCredits < 0.0) trainSampleCredits = 0.0;
+                }
+                else {
+                    std::cerr << "[trainer] train block skipped (barrier timeout)." << std::endl;
+                }
             }
         }
 
@@ -10374,20 +10805,24 @@ void Training(int targetGames) {
         // 3) REFIT TRT
         // ===========================
         if (didTrain > 0) {
-            safeRefitBarrierShared(sharedSrv);
+            if (safeRefitBarrierShared(sharedSrv)) {
+                std::scoped_lock lk(g_modelMutex, g_trtMutex);
+                torch::NoGradGuard ng;
 
-            std::scoped_lock lk(g_modelMutex, g_trtMutex);
-            torch::NoGradGuard ng;
-
-            if (!trtRefitFromTorchModel(g_trt, emaModel)) {
-                std::cerr << "[refit] TRT refit failed.\n";
+                if (!trtRefitFromTorchModel(g_trt, emaModel)) {
+                    std::cerr << "[refit] TRT refit failed.\n";
+                }
+                else {
+                    ++refits;
+                }
             }
             else {
-                ++refits;
+                std::cerr << "[refit] skipped (barrier timeout)." << std::endl;
             }
         }
 
-        while (games >= nextArenaAt) {
+        while (games >= nextArenaAt &&
+            (games - gamesAtProcessStart) >= 100000) {
             // Fully pause main self-play during arena:
             // remove extra worker threads / inference server activity.
             if (spRunning) {
@@ -10397,6 +10832,20 @@ void Training(int targetGames) {
                 }
                 spRunning = false;
             }
+
+            // Full hourly-style save before the (multi-hour) arena, so a crash
+            // or stop during the arena loses nothing.
+            saveAll(ptFile, emaFile, planFile, optFile, model, emaModel, trainer);
+            if (rb.saveToFile("replay.bin")) {
+                std::ofstream st("train_state.txt", std::ios::trunc);
+                st << games << ' ' << trainSampleCredits << '\n';
+                std::cout << "[arena] pre-arena state saved (replay.bin, "
+                    << rb.currentSize() << " samples)." << std::endl;
+            }
+            else {
+                std::cerr << "[arena] pre-arena replay.bin save FAILED." << std::endl;
+            }
+            nextSave = std::chrono::steady_clock::now() + std::chrono::hours(1);
 
             bool arenaOk = true;
 
@@ -10414,13 +10863,16 @@ void Training(int targetGames) {
             }
 
             if (arenaOk) {
-                std::cout << "\n[arena] start: current vs old, games=2000, sims=800, triggerGames="
-                    << nextArenaAt << "\n";
+                // (Network snapshot for this milestone is already written by the
+                // unconditional 100k-multiple snapshot in the self-play section.)
+                static constexpr int ARENA_GAMES = 10000;
+                std::cout << "\n[arena] start: current vs old, games=" << ARENA_GAMES
+                    << ", sims=800, triggerGames=" << nextArenaAt << std::endl;
 
-                ArenaStats ar = runArenaMatch(/*games=*/2000, /*simsPerPos=*/800);
+                ArenaStats ar = runArenaMatch(/*games=*/ARENA_GAMES, /*simsPerPos=*/800);
 
                 const double arenaLos = computeLOSPercent(ar.curWins, ar.oldWins);
-                std::cout << "[arena] games=2000 W/L="
+                std::cout << "[arena] games=" << ARENA_GAMES << " W/L="
                     << ar.curWins << "/" << ar.oldWins
                     << " score=" << std::fixed << std::setprecision(4) << ar.currentScore()
                     << " LOS=" << std::setprecision(2) << arenaLos << "%\n";
@@ -10471,7 +10923,18 @@ void Training(int targetGames) {
 
             saveAll(ptFile, emaFile, planFile, optFile, model, emaModel, trainer);
 
-            std::cout << "[autosave] Progress: " << games << " / " << targetGames << " games.\n";
+            // Fast-restart state: replay buffer + counters (atomic replace via .tmp).
+            if (rb.saveToFile("replay.bin")) {
+                std::ofstream st("train_state.txt", std::ios::trunc);
+                st << games << ' ' << trainSampleCredits << '\n';
+                std::cout << "[autosave] replay.bin saved ("
+                    << rb.currentSize() << " samples)." << std::endl;
+            }
+            else {
+                std::cerr << "[autosave] replay.bin save FAILED." << std::endl;
+            }
+
+            std::cout << "[autosave] Progress: " << games << " / " << targetGames << " games." << std::endl;
         }
 
         if (now >= nextStat) {
@@ -10571,6 +11034,10 @@ void Training(int targetGames) {
     sharedSrv.join();
 
     std::cout << "\n[Completion] Collected " << targetGames << " games. Saving final weights...\n";
+    if (rb.saveToFile("replay.bin")) {
+        std::ofstream st("train_state.txt", std::ios::trunc);
+        st << games << ' ' << trainSampleCredits << '\n';
+    }
     {
         std::lock_guard<std::mutex> lk(g_modelMutex);
 
@@ -10964,7 +11431,7 @@ void SEARCH() {
             }
         }
         if (clear)T.newGame();
-        if (ready)mctsBatchedMT(T, pos, PATH, MASK, INT_MAX, eval, depth, moves, pv, 2, 1);
+        if (ready)mctsBatchedMT(T, pos, PATH, MASK, INT_MAX, eval, depth, moves, pv, 2, 1, autoSearchThreads(), true);
     }
 }
 
@@ -11098,7 +11565,176 @@ static MatchStatsGeneric runTimedPvMatch(int games) {
     return st;
 }
 
+// ===================== A/B strength match: final vs original =====================
+// P1 = "final": multi-threaded leaf production + tree reuse across the game.
+// P2 = "original": exact old play behavior (1 thread, fresh tree before every move).
+// Paired games: same Chess960 opening, same dice sequence, colors swapped.
+
+struct AbPlayerCfg {
+    unsigned threads = 1;
+    bool treeReuse = false;
+    bool dualInfer = false;
+    bool oldNet = false;        // use g_trt_old (net_old.plan) instead of g_trt
+    bool persistServer = false; // keep one InferenceServer per game instead of per move
+    double moveTimeSec = 0.4;
+    const char* name = "";
+
+    TrtRunner* primary() const {
+        return (oldNet && g_trtOldReady) ? &g_trt_old : nullptr;
+    }
+};
+
+static void abPrepareTableForSearch(MCTSTable& T, const AbPlayerCfg& cfg) {
+    if (!cfg.treeReuse) { T.newGame(); return; }
+    // Reuse mode: keep the tree, but reset if the edge pool is close to full
+    // or a previous search aborted on overflow.
+    const bool aborted = T.abort.load(std::memory_order_relaxed);
+    const double edgeFill =
+        (double)T.edgeTop.load(std::memory_order_relaxed) / (double)T.edges.size();
+    if (aborted || edgeFill > 0.75) T.newGame();
+}
+
+static int playOneAbMatchGame(const AbPlayerCfg& p1Cfg,
+    const AbPlayerCfg& p2Cfg,
+    MCTSTable& p1Table,
+    MCTSTable& p2Table,
+    const Position& startPos,
+    std::array<uint64_t, 4> path,
+    std::array<int, 64> mask,
+    bool p1IsWhite,
+    const std::vector<int>* mirroredDice,
+    std::vector<int>* producedDice,
+    int maxPlies = 512) {
+    Position pos = startPos;
+    p1Table.newGame();
+    p2Table.newGame();
+    size_t chanceIdx = 0;
+
+    // Optional per-game persistent inference servers (skip per-move start/stop/ramp costs).
+    struct SrvHolder {
+        std::unique_ptr<InferenceServer> s;
+        ~SrvHolder() noexcept { if (s) { try { s->stopAndDrain(); } catch (...) {} } }
+    };
+    SrvHolder p1Srv, p2Srv;
+    if (p1Cfg.persistServer) {
+        TrtRunner* rt = p1Cfg.primary();
+        const bool dual = p1Cfg.dualInfer && g_trt2Ready && !rt;
+        p1Srv.s = std::make_unique<InferenceServer>(p1Table, rt ? rt : &g_trt, dual ? &g_trt2 : nullptr);
+        p1Srv.s->start();
+    }
+    if (p2Cfg.persistServer) {
+        TrtRunner* rt = p2Cfg.primary();
+        const bool dual = p2Cfg.dualInfer && g_trt2Ready && !rt;
+        p2Srv.s = std::make_unique<InferenceServer>(p2Table, rt ? rt : &g_trt, dual ? &g_trt2 : nullptr);
+        p2Srv.s->start();
+    }
+
+    for (int ply = 0; ply < maxPlies; ++ply) {
+        bool terminal = false;
+        bool chance = false;
+        isChanceOrTerminalPosition(pos, path, mask, terminal, chance);
+
+        if (terminal) {
+            const bool p1Won = ((pos.side == 0) == p1IsWhite);
+            return p1Won ? +1 : -1;
+        }
+
+        if (chance) {
+            TTNode* n = (((pos.side == 0) == p1IsWhite) ? p1Table : p2Table).findNodeNoInsert(pos.key);
+            if (mirroredDice && chanceIdx < mirroredDice->size()) {
+                makeRandomWithRolledDice(pos, n, (*mirroredDice)[chanceIdx]);
+            }
+            else {
+                const int rolledDice = Dice[Range(Random)];
+                if (producedDice) producedDice->push_back(rolledDice);
+                makeRandomWithRolledDice(pos, n, rolledDice);
+            }
+            ++chanceIdx;
+            continue;
+        }
+
+        const bool p1Turn = ((pos.side == 0) == p1IsWhite);
+        const AbPlayerCfg& cfg = p1Turn ? p1Cfg : p2Cfg;
+        MCTSTable& T = p1Turn ? p1Table : p2Table;
+
+        abPrepareTableForSearch(T, cfg);
+
+        float eval = 0.5f;
+        float depth = 0.0f;
+        std::vector<moveState> moves;
+        std::vector<int> pv;
+        mctsBatchedMT(T, pos, path, mask, cfg.moveTimeSec, eval, depth, moves, pv,
+            /*write=*/0, /*abort=*/0, cfg.threads, cfg.dualInfer,
+            cfg.primary(), (p1Turn ? p1Srv : p2Srv).s.get());
+        if (pv.empty()) return 0;
+        makeMove(pos, mask, pv[0]);
+    }
+
+    return 0;
+}
+
+static double abEloFromScore(double s) {
+    if (s <= 0.0) return -999.0;
+    if (s >= 1.0) return 999.0;
+    return -400.0 * std::log10(1.0 / s - 1.0);
+}
+
+static MatchStatsGeneric runAbStrengthMatch(int games, double moveTimeSec,
+    AbPlayerCfg p1Cfg, AbPlayerCfg p2Cfg) {
+    p1Cfg.moveTimeSec = moveTimeSec;
+    p2Cfg.moveTimeSec = moveTimeSec;
+
+    auto printCfg = [](const char* tag, const AbPlayerCfg& c) {
+        std::cout << tag << ": threads=" << c.threads
+            << " reuse=" << (int)c.treeReuse
+            << " dual=" << (int)c.dualInfer
+            << " oldNet=" << (int)c.oldNet
+            << " persist=" << (int)c.persistServer;
+        };
+    std::cout << "[ab] ";
+    printCfg("P1", p1Cfg);
+    std::cout << " | ";
+    printCfg("P2", p2Cfg);
+    std::cout << " | moveTime=" << moveTimeSec << "s games=" << games << std::endl;
+
+    MCTSTable p1Table(1ull << 22, 1ull << 26);
+    MCTSTable p2Table(1ull << 22, 1ull << 26);
+
+    MatchStatsGeneric st;
+    for (int g = 0; g < games; g += 2) {
+        Position startPos;
+        std::array<uint64_t, 4> path;
+        std::array<int, 64> mask;
+        chess960(startPos, path, mask);
+
+        std::vector<int> firstGameDice;
+        int r1 = playOneAbMatchGame(p1Cfg, p2Cfg, p1Table, p2Table,
+            startPos, path, mask, /*p1IsWhite=*/true, nullptr, &firstGameDice);
+        if (r1 > 0) ++st.p1Wins; else if (r1 < 0) ++st.p2Wins; else ++st.draws;
+
+        if (g + 1 < games) {
+            int r2 = playOneAbMatchGame(p1Cfg, p2Cfg, p1Table, p2Table,
+                startPos, path, mask, /*p1IsWhite=*/false, &firstGameDice, nullptr);
+            if (r2 > 0) ++st.p1Wins; else if (r2 < 0) ++st.p2Wins; else ++st.draws;
+        }
+
+        const int played = std::min(g + 2, games);
+        const int n = st.p1Wins + st.p2Wins + st.draws;
+        const double score = n ? (st.p1Wins + 0.5 * st.draws) / (double)n : 0.5;
+        std::cout << "[ab] games=" << played
+            << " W/L/D=" << st.p1Wins << '/' << st.p2Wins << '/' << st.draws
+            << " score=" << std::fixed << std::setprecision(4) << score
+            << " elo=" << std::setprecision(1) << std::showpos << abEloFromScore(score) << std::noshowpos
+            << " LOS=" << std::setprecision(2) << computeLOSPercent(st.p1Wins, st.p2Wins) << '%'
+            << std::setprecision(6) << std::endl;
+    }
+    return st;
+}
+
 int main() {
+    // Unbuffered stdout: progress lines reach redirected log files immediately
+    // (std::cout syncs with stdio, so this covers all engine output).
+    setvbuf(stdout, nullptr, _IONBF, 0);
     try {
         const std::string ptFile = "net.pt";
         const std::string emaFile = "net_ema.pt";
@@ -11108,9 +11744,22 @@ int main() {
         std::string fen;
         std::getline(std::cin, fen);
 
+        if (fen == "widen192") {
+            // Reads "srcNet.pt srcEma.pt" from the next stdin line;
+            // writes widened 10x192 net.pt and net_ema.pt into cwd.
+            std::string srcPt = "net128.pt", srcEma = "net128_ema.pt";
+            std::string cfgLine;
+            if (std::getline(std::cin, cfgLine) && !cfgLine.empty()) {
+                std::istringstream is(cfgLine);
+                is >> srcPt >> srcEma;
+            }
+            const bool ok1 = createNet192FromFile(srcPt, "net.pt");
+            const bool ok2 = createNet192FromFile(srcEma, "net_ema.pt");
+            return (ok1 && ok2) ? 0 : 1;
+        }
         if (fen == "-") {
             diagLogLine("[main] entering Training()");
-            Training(1000000);
+            Training(INT_MAX); // infinite: runs until the process is force-stopped
             diagLogLine("[main] Training() finished normally");
             return 0;
         }
@@ -11123,6 +11772,68 @@ int main() {
             std::cout << "TensorRT engine is not loaded.\n";
             return 1;
         }
+        // Second TRT runner: pipelines CPU encode/expand with GPU compute in play modes.
+        {
+            std::lock_guard<std::mutex> lk(g_trtMutex);
+            torch::NoGradGuard ng;
+            if (g_trt2.initOrCreate(planFile) && trtRefitFromTorchModel(g_trt2, emaModel)) {
+                g_trt2Ready = true;
+            }
+            else {
+                g_trt2.shutdown();
+                std::cout << "[TRT2] second runner unavailable; single-runner mode.\n";
+            }
+        }
+        if (fen == "ab") {
+            // Optional config line on stdin:
+            //   "t1 r1 d1 o1 p1  t2 r2 d2 o2 p2  moveTimeMs"
+            // t=threads, r=tree reuse, d=dual infer, o=old net (net_old.plan), p=persistent server.
+            // Defaults: P1 = final (2 threads, reuse, dual, persistent), P2 = original.
+            unsigned t1 = 2; int r1 = 1; int d1 = 1; int o1 = 0; int pp1 = 1;
+            unsigned t2 = 1; int r2 = 0; int d2 = 0; int o2 = 0; int pp2 = 0;
+            double moveMs = 400.0;
+            {
+                std::string cfgLine;
+                if (std::getline(std::cin, cfgLine) && !cfgLine.empty()) {
+                    std::istringstream is(cfgLine);
+                    is >> t1 >> r1 >> d1 >> o1 >> pp1 >> t2 >> r2 >> d2 >> o2 >> pp2 >> moveMs;
+                }
+            }
+            if (o1 || o2) {
+                if (!ensureOldRunnerReady("net_old.plan")) {
+                    std::cout << "[ab] net_old.plan not available; cannot run old-net side.\n";
+                    return 1;
+                }
+            }
+            AbPlayerCfg p1Cfg{ t1, r1 != 0, d1 != 0, o1 != 0, pp1 != 0 };
+            AbPlayerCfg p2Cfg{ t2, r2 != 0, d2 != 0, o2 != 0, pp2 != 0 };
+            MatchStatsGeneric st = runAbStrengthMatch(100000, moveMs / 1000.0, p1Cfg, p2Cfg);
+            std::cout << "[ab] final W/L/D="
+                << st.p1Wins << '/' << st.p2Wins << '/' << st.draws << std::endl;
+            std::lock_guard<std::mutex> lk(g_trtMutex);
+            g_trt.shutdown();
+            g_trtReady = false;
+            if (g_trt2Ready) { g_trt2.shutdown(); g_trt2Ready = false; }
+            return 0;
+        }
+        if (fen == "arena") {
+            // Net-vs-net gate at fixed sims: reads two plan paths from the next stdin line
+            // (default: "net.plan net_old.plan").
+            std::string n1 = "net.plan", n2 = "net_old.plan";
+            {
+                std::string cfgLine;
+                if (std::getline(std::cin, cfgLine) && !cfgLine.empty()) {
+                    std::istringstream is(cfgLine);
+                    is >> n1 >> n2;
+                }
+            }
+            arena(n1, n2);
+            std::lock_guard<std::mutex> lk(g_trtMutex);
+            g_trt.shutdown();
+            g_trtReady = false;
+            if (g_trt2Ready) { g_trt2.shutdown(); g_trt2Ready = false; }
+            return 0;
+        }
         if (fen == "match") {
             MatchStatsGeneric st = runTimedPvMatch(10000);
             std::cout << "[timed-pv-match] final p1/p2/draw="
@@ -11131,6 +11842,7 @@ int main() {
             std::lock_guard<std::mutex> lk(g_trtMutex);
             g_trt.shutdown();
             g_trtReady = false;
+            if (g_trt2Ready) { g_trt2.shutdown(); g_trt2Ready = false; }
             return 0;
         }
         if (fen == "s") {
@@ -11163,7 +11875,7 @@ int main() {
         const size_t nodePow2 = 1ull << 26;
         const size_t edgeCap = 1ull << 29;
         MCTSTable T(nodePow2, edgeCap);
-        mctsBatchedMT(T, pos, path, mask, INT_MAX, mctsEvalWhite, mctsAvgDepth, rootMoves, pvBeforeRoll, 2, 0);
+        mctsBatchedMT(T, pos, path, mask, INT_MAX, mctsEvalWhite, mctsAvgDepth, rootMoves, pvBeforeRoll, 2, 0, autoSearchThreads(), true);
         clearConsoleFull();
         std::cout << std::fixed << std::setprecision(2);
         std::cout << "depth=" << mctsAvgDepth << std::endl;
@@ -11198,6 +11910,7 @@ int main() {
             std::lock_guard<std::mutex> lk(g_trtMutex);
             g_trt.shutdown();
             g_trtReady = false;
+            if (g_trt2Ready) { g_trt2.shutdown(); g_trt2Ready = false; }
         }
 
         diagLogLine("[main] finished normally");
