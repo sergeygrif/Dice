@@ -10704,6 +10704,9 @@ void Training(int targetGames) {
     // milestone that would fall earlier than start+100k (missed ones are dropped).
     while (nextArenaAt < gamesAtProcessStart + 100000) nextArenaAt += 100000;
 
+    // Network snapshots, unlike arenas, happen at EVERY 100k-multiple reached.
+    int nextNetSaveAt = (games / 100000 + 1) * 100000;
+
     std::cout << "Starting training for " << targetGames << " games...\n";
 
     while (games < targetGames) {
@@ -10731,6 +10734,30 @@ void Training(int targetGames) {
         );
 
         games += (int)spBlk.games;
+
+        // Versioned network snapshot at every 100k-multiple of the total game
+        // counter, independent of whether an arena runs at that milestone.
+        while (games >= nextNetSaveAt) {
+            const int netVer = nextNetSaveAt / 100000;
+            const std::string vp = "net" + std::to_string(netVer);
+            try {
+                std::lock_guard<std::mutex> lkM(g_modelMutex);
+                torch::save(model, vp + ".pt");
+                torch::save(emaModel, vp + "_ema.pt");
+            }
+            catch (const std::exception& e) {
+                std::cerr << "[snapshot] save failed for " << vp << ": " << e.what() << std::endl;
+            }
+            {
+                std::lock_guard<std::mutex> lkT(g_trtMutex);
+                if (!trtSavePlanToDisk(g_trt, vp + ".plan")) {
+                    std::cerr << "[snapshot] plan save failed for " << vp << std::endl;
+                }
+            }
+            std::cout << "[snapshot] saved " << vp << ".pt, " << vp << "_ema.pt, "
+                << vp << ".plan at " << nextNetSaveAt << " games." << std::endl;
+            nextNetSaveAt += 100000;
+        }
 
         statGamesWindow += spBlk.games;
         statPlyWindow += spBlk.plies;
@@ -10836,29 +10863,8 @@ void Training(int targetGames) {
             }
 
             if (arenaOk) {
-                // Versioned snapshot of the arena candidate: net<N>.pt/_ema.pt/.plan,
-                // N = milestone in units of 100k games (300000 -> net3.*).
-                {
-                    const int netVer = nextArenaAt / 100000;
-                    const std::string vp = "net" + std::to_string(netVer);
-                    try {
-                        std::lock_guard<std::mutex> lkM(g_modelMutex);
-                        torch::save(model, vp + ".pt");
-                        torch::save(emaModel, vp + "_ema.pt");
-                    }
-                    catch (const std::exception& e) {
-                        std::cerr << "[arena] snapshot save failed: " << e.what() << std::endl;
-                    }
-                    {
-                        std::lock_guard<std::mutex> lkT(g_trtMutex);
-                        if (!trtSavePlanToDisk(g_trt, vp + ".plan")) {
-                            std::cerr << "[arena] snapshot plan save failed." << std::endl;
-                        }
-                    }
-                    std::cout << "[arena] snapshot saved: " << vp << ".pt, "
-                        << vp << "_ema.pt, " << vp << ".plan" << std::endl;
-                }
-
+                // (Network snapshot for this milestone is already written by the
+                // unconditional 100k-multiple snapshot in the self-play section.)
                 static constexpr int ARENA_GAMES = 10000;
                 std::cout << "\n[arena] start: current vs old, games=" << ARENA_GAMES
                     << ", sims=800, triggerGames=" << nextArenaAt << std::endl;
