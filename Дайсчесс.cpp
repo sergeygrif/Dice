@@ -3999,10 +3999,18 @@ static AI_FORCEINLINE void waitGroupDone(SearchWaitGroup* wg) {
     }
 }
 
+// Bounded wait: returns true if pending reached zero within the timeout.
+static bool waitGroupWaitZeroFor(SearchWaitGroup* wg, std::chrono::milliseconds timeout) {
+    if (!wg) return true;
+    std::unique_lock<std::mutex> lk(wg->m);
+    return wg->cv.wait_for(lk, timeout, [&] {
+        return wg->pending.load(std::memory_order_acquire) == 0;
+        });
+}
+
 static void waitGroupWaitZero(SearchWaitGroup* wg) {
     if (!wg) return;
     std::unique_lock<std::mutex> lk(wg->m);
-    // Diagnose (but do not break) a lost-pending-job hang: log every 60s while stuck.
     int stuckMinutes = 0;
     while (!wg->cv.wait_for(lk, std::chrono::seconds(60), [&] {
         return wg->pending.load(std::memory_order_acquire) == 0;
@@ -4012,6 +4020,22 @@ static void waitGroupWaitZero(SearchWaitGroup* wg) {
             << " min: pending=" << wg->pending.load(std::memory_order_relaxed)
             << " (likely a lost NN job; search cannot finish)" << std::endl;
     }
+}
+
+// ---- global progress heartbeat + process watchdog ----
+// Any real forward progress (a finished self-play game, an arena progress line,
+// a training loop iteration) refreshes this. The watchdog kills the process if
+// it goes stale: full state is persisted hourly, so a restart is cheap, while a
+// silent deadlock costs days.
+static std::atomic<uint64_t> g_progressHeartbeatMs{ 0 };
+
+static AI_FORCEINLINE uint64_t steadyNowMs() {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static AI_FORCEINLINE void noteTrainingProgress() {
+    g_progressHeartbeatMs.store(steadyNowMs(), std::memory_order_relaxed);
 }
 
 struct PendingNN {
@@ -7672,7 +7696,37 @@ struct SearchPool {
             }
         }
 
-        waitGroupWaitZero(&wg);
+        // Escalating wait for outstanding NN jobs. A lost/stuck job used to hang
+        // the whole training loop forever; now we log, then abort this search so
+        // the server cancels its jobs (cancel path completes the wait group).
+        {
+            using WClock = std::chrono::steady_clock;
+            const auto waitT0 = WClock::now();
+            bool escalated = false;
+
+            while (!waitGroupWaitZeroFor(&wg, std::chrono::seconds(30))) {
+                const auto secs = std::chrono::duration_cast<std::chrono::seconds>(
+                    WClock::now() - waitT0).count();
+
+                std::cerr << "[runSims] waiting for NN jobs " << secs << "s"
+                    << " pending=" << wg.pending.load(std::memory_order_relaxed)
+                    << " nnQueue=" << server.size()
+                    << " inFlight=" << g_inferInFlight.load(std::memory_order_relaxed)
+                    << " ttAbort=" << TT.abort.load(std::memory_order_relaxed)
+                    << std::endl;
+
+                if (!escalated && secs >= 60) {
+                    escalated = true;
+                    std::cerr << "[runSims] escalating: aborting this search to release stuck jobs"
+                        << std::endl;
+                    cancelJob.store(true, std::memory_order_relaxed);
+                    simsLeft.store(0, std::memory_order_relaxed);
+                    TT.abort.store(true, std::memory_order_release);
+                    cv.notify_all();
+                    cvProgress.notify_all();
+                }
+            }
+        }
 
         {
             std::lock_guard<std::mutex> lk(m);
@@ -8498,12 +8552,13 @@ static ArenaStats runArenaMatch(int games, int simsPerPos) {
     }
 
     auto onProgress = [&](int playedGames, const MatchStatsGeneric& s) {
+        noteTrainingProgress();
         if ((playedGames % 2) == 0 && (playedGames % 100) == 0) {
             const double los = computeLOSPercent(s.p1Wins, s.p2Wins);
             std::cout << "[arena] games=" << playedGames
                 << " W/L=" << s.p1Wins << "/" << s.p2Wins
                 << " score=" << std::fixed << std::setprecision(4) << s.p1Score()
-                << " LOS=" << std::setprecision(2) << los << "%\n";
+                << " LOS=" << std::setprecision(2) << los << "%" << std::endl;
         }
         };
 
@@ -10485,6 +10540,7 @@ static void runParallelSelfPlayBlock(
                     }
 
                     gamesDone.fetch_add(1, std::memory_order_relaxed);
+                    noteTrainingProgress();
                     pliesDone.fetch_add((uint64_t)std::max(0, plyCount), std::memory_order_relaxed);
                     samplesDone.fetch_add((uint64_t)std::max(0, samplesAdded), std::memory_order_relaxed);
 
@@ -10707,6 +10763,44 @@ void Training(int targetGames) {
     // Network snapshots, unlike arenas, happen at EVERY 100k-multiple reached.
     int nextNetSaveAt = (games / 100000 + 1) * 100000;
 
+    // Deadlock watchdog: if nothing progresses for STALL_LIMIT, dump diagnostics
+    // and exit(42). State is persisted hourly, so the supervisor restarts cheaply.
+    noteTrainingProgress();
+    std::atomic<bool> watchdogStop{ false };
+    std::thread watchdogTh([&] {
+        static constexpr uint64_t STALL_LIMIT_MS = 15ull * 60ull * 1000ull;
+        while (!watchdogStop.load(std::memory_order_relaxed)) {
+            for (int i = 0; i < 30 && !watchdogStop.load(std::memory_order_relaxed); ++i) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+            if (watchdogStop.load(std::memory_order_relaxed)) break;
+
+            const uint64_t last = g_progressHeartbeatMs.load(std::memory_order_relaxed);
+            const uint64_t now = steadyNowMs();
+            if (last != 0 && now > last && (now - last) > STALL_LIMIT_MS) {
+                std::ostringstream oss;
+                oss << "[watchdog] no progress for " << ((now - last) / 1000)
+                    << "s; nnInFlight=" << g_inferInFlight.load(std::memory_order_relaxed)
+                    << " failGetNode=" << g_failGetNode.load(std::memory_order_relaxed)
+                    << " failExpandWait=" << g_failExpandWait.load(std::memory_order_relaxed)
+                    << " failDepth=" << g_failDepth.load(std::memory_order_relaxed)
+                    << " -> exit(42) for supervised restart";
+                std::cerr << oss.str() << std::endl;
+                diagLogLine(oss.str());
+                std::cerr.flush();
+                std::cout.flush();
+                std::_Exit(42);
+            }
+        }
+        });
+    struct WatchdogJoin {
+        std::atomic<bool>* flag; std::thread* th;
+        ~WatchdogJoin() noexcept {
+            flag->store(true, std::memory_order_relaxed);
+            if (th->joinable()) th->join();
+        }
+    } watchdogJoin{ &watchdogStop, &watchdogTh };
+
     std::cout << "Starting training for " << targetGames << " games...\n";
 
     while (games < targetGames) {
@@ -10734,6 +10828,7 @@ void Training(int targetGames) {
         );
 
         games += (int)spBlk.games;
+        noteTrainingProgress();
 
         // Versioned network snapshot at every 100k-multiple of the total game
         // counter, independent of whether an arena runs at that milestone.
