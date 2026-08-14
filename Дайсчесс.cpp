@@ -8360,11 +8360,6 @@ static MatchStatsGeneric runUniversalMatchEngine(
     const int pairs = games / 2;
 
     std::atomic<int> nextPair{ 0 };
-    std::atomic<int> donePairs{ 0 };
-
-    std::atomic<int> p1Wins{ 0 };
-    std::atomic<int> p2Wins{ 0 };
-    std::atomic<int> draws{ 0 };
 
     std::atomic<bool> abortAll{ false };
 
@@ -8375,10 +8370,46 @@ static MatchStatsGeneric runUniversalMatchEngine(
     std::vector<std::thread> outer;
     outer.reserve(lanes.size());
 
+    // Result counters live under resM together with the report trigger, so every
+    // progress line covers EXACTLY reportEvery new games. (Reporting off a
+    // separate pair counter used to race with other lanes: a "100 games" line
+    // could show 103 decided games.)
+    std::mutex resM;
+    int w1 = 0, w2 = 0, dr = 0;
+    const int reportEvery = (progressEveryPairs > 0) ? (progressEveryPairs * 2) : 0;
+
     auto addResult = [&](int r) {
-        if (r > 0) p1Wins.fetch_add(1, std::memory_order_relaxed);
-        else if (r < 0) p2Wins.fetch_add(1, std::memory_order_relaxed);
-        else draws.fetch_add(1, std::memory_order_relaxed);
+        MatchStatsGeneric snap;
+        int total = 0;
+        bool report = false;
+        {
+            std::lock_guard<std::mutex> lk(resM);
+            if (r > 0) ++w1;
+            else if (r < 0) ++w2;
+            else ++dr;
+
+            total = w1 + w2 + dr;
+            if (reportEvery > 0 && (total % reportEvery) == 0) {
+                snap.p1Wins = w1;
+                snap.p2Wins = w2;
+                snap.draws = dr;
+                report = true;
+            }
+        }
+        if (report) {
+            std::lock_guard<std::mutex> lk(printM);
+            onProgress(total, snap);
+        }
+        };
+
+    auto snapshotNow = [&](int& outTotal) {
+        MatchStatsGeneric snap;
+        std::lock_guard<std::mutex> lk(resM);
+        snap.p1Wins = w1;
+        snap.p2Wins = w2;
+        snap.draws = dr;
+        outTotal = w1 + w2 + dr;
+        return snap;
         };
 
     for (size_t li = 0; li < lanes.size(); ++li) {
@@ -8405,18 +8436,6 @@ static MatchStatsGeneric runUniversalMatchEngine(
 
                     lane.resetForNewGame();
                     addResult(playOneOnLane(lane, startPos, path, mask, /*p1IsWhite=*/false, &firstGameDice, nullptr));
-
-                    const int dp = donePairs.fetch_add(1, std::memory_order_relaxed) + 1;
-
-                    if (progressEveryPairs > 0 && (dp % progressEveryPairs) == 0) {
-                        MatchStatsGeneric snap;
-                        snap.p1Wins = p1Wins.load(std::memory_order_relaxed);
-                        snap.p2Wins = p2Wins.load(std::memory_order_relaxed);
-                        snap.draws = draws.load(std::memory_order_relaxed);
-
-                        std::lock_guard<std::mutex> lk(printM);
-                        onProgress(dp * 2, snap);
-                    }
                 }
             }
             catch (...) {
@@ -8444,19 +8463,16 @@ static MatchStatsGeneric runUniversalMatchEngine(
         lane.resetForNewGame();
         addResult(playOneOnLane(lane, startPos, path, mask, /*p1IsWhite=*/true, nullptr, &firstGameDice));
 
-        if (progressEveryPairs > 0) {
-            MatchStatsGeneric snap;
-            snap.p1Wins = p1Wins.load(std::memory_order_relaxed);
-            snap.p2Wins = p2Wins.load(std::memory_order_relaxed);
-            snap.draws = draws.load(std::memory_order_relaxed);
-
-            onProgress(games, snap);
+        // Tail game: report only if addResult() did not already do it.
+        int tailTotal = 0;
+        MatchStatsGeneric tailSnap = snapshotNow(tailTotal);
+        if (reportEvery > 0 && (tailTotal % reportEvery) != 0) {
+            onProgress(tailTotal, tailSnap);
         }
     }
 
-    out.p1Wins = p1Wins.load(std::memory_order_relaxed);
-    out.p2Wins = p2Wins.load(std::memory_order_relaxed);
-    out.draws = draws.load(std::memory_order_relaxed);
+    int finalTotal = 0;
+    out = snapshotNow(finalTotal);
     return out;
 }
 
@@ -8826,7 +8842,8 @@ void arena(string net1, string net2) {
     const SearchParams n1Params = kDefaultSearchParams;
     const SearchParams n2Params = kDefaultSearchParams;
 
-    static constexpr int TOTAL_GAMES = 10000;
+    // Practically unlimited: an external sequential test decides when to stop.
+    static constexpr int TOTAL_GAMES = 2000000;
     static constexpr int SIMS_PER_POS = 800;
     static constexpr int MAX_PLIES = 256;
 
