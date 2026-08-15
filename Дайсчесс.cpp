@@ -8374,19 +8374,29 @@ static MatchStatsGeneric runUniversalMatchEngine(
     // progress line covers EXACTLY reportEvery new games. (Reporting off a
     // separate pair counter used to race with other lanes: a "100 games" line
     // could show 103 decided games.)
+    //
+    // Both games of a pair (same opening + dice, colors swapped) are recorded in
+    // ONE locked update, so a report can never split a pair: it always contains
+    // both games of every pair it covers, or neither. Splitting would bias the
+    // line, because the two games of a pair are strongly correlated.
     std::mutex resM;
     int w1 = 0, w2 = 0, dr = 0;
     const int reportEvery = (progressEveryPairs > 0) ? (progressEveryPairs * 2) : 0;
 
-    auto addResult = [&](int r) {
+    auto addResults = [&](int r1, bool hasSecond, int r2) {
+        auto applyOne = [&](int r) {
+            if (r > 0) ++w1;
+            else if (r < 0) ++w2;
+            else ++dr;
+            };
+
         MatchStatsGeneric snap;
         int total = 0;
         bool report = false;
         {
             std::lock_guard<std::mutex> lk(resM);
-            if (r > 0) ++w1;
-            else if (r < 0) ++w2;
-            else ++dr;
+            applyOne(r1);
+            if (hasSecond) applyOne(r2);
 
             total = w1 + w2 + dr;
             if (reportEvery > 0 && (total % reportEvery) == 0) {
@@ -8430,12 +8440,21 @@ static MatchStatsGeneric runUniversalMatchEngine(
 
                     std::vector<int> firstGameDice;
                     lane.resetForNewGame();
-                    addResult(playOneOnLane(lane, startPos, path, mask, /*p1IsWhite=*/true, nullptr, &firstGameDice));
+                    const int r1 = playOneOnLane(lane, startPos, path, mask, /*p1IsWhite=*/true, nullptr, &firstGameDice);
 
-                    if (abortAll.load(std::memory_order_relaxed)) break;
+                    if (abortAll.load(std::memory_order_relaxed)) {
+                        // Aborted mid-pair: drop this orphan game. It was played
+                        // with one color only, so counting it would bias W/L, and
+                        // an odd increment would break the pair-aligned reporting
+                        // (totals would never hit a multiple of reportEvery again).
+                        (void)r1;
+                        break;
+                    }
 
                     lane.resetForNewGame();
-                    addResult(playOneOnLane(lane, startPos, path, mask, /*p1IsWhite=*/false, &firstGameDice, nullptr));
+                    const int r2 = playOneOnLane(lane, startPos, path, mask, /*p1IsWhite=*/false, &firstGameDice, nullptr);
+
+                    addResults(r1, /*hasSecond=*/true, r2); // whole pair recorded at once
                 }
             }
             catch (...) {
@@ -8461,7 +8480,8 @@ static MatchStatsGeneric runUniversalMatchEngine(
         Lane& lane = *lanes[0];
         std::vector<int> firstGameDice;
         lane.resetForNewGame();
-        addResult(playOneOnLane(lane, startPos, path, mask, /*p1IsWhite=*/true, nullptr, &firstGameDice));
+        addResults(playOneOnLane(lane, startPos, path, mask, /*p1IsWhite=*/true, nullptr, &firstGameDice),
+            /*hasSecond=*/false, 0);
 
         // Tail game: report only if addResult() did not already do it.
         int tailTotal = 0;
