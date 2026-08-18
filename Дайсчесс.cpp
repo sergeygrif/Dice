@@ -5493,6 +5493,98 @@ static unsigned autoSearchThreads() {
     unsigned t = (hw > 2u) ? (hw - 2u) : 1u;
     return std::min(t, 2u);
 }
+// A tree only has to hold one turn's worth of search: after the dice are thrown
+// the position changes at random and everything below is about other rolls.
+// Sizing it to the allowance keeps the edge pool from filling up mid-turn and
+// keeps the table small enough to stay cache-friendly.
+static void tableSizeForTime(double sec, size_t& nodes, size_t& edges) {
+    const double sims = std::max(0.25, sec) * 35000.0 * 2.0;   // measured rate, doubled
+    size_t p = 1ull << 16;
+    while ((double)p < sims) p <<= 1;
+    nodes = p;
+    edges = p * 32;
+}
+
+// How often the adaptive budget cut a search short, and why.
+static std::atomic<long long> g_adaptStopSettled{ 0 }, g_adaptStopFree{ 0 }, g_adaptSearches{ 0 };
+static double g_gapSum = 0.0, g_wantSum = 0.0;
+static long long g_gapN = 0;
+// Correction factor per side, nudged after every move so that the average spend
+// settles on the allowance. It has to be integral: setting it to 1/spend has a
+// fixed point at the square root of the target, not at the target.
+static double g_creditP1 = 1.0, g_creditP2 = 1.0;
+static double g_probeSec = 0.0;        // time the adaptive probe itself costs
+static long long g_probeN = 0;
+static std::vector<double> g_spreadSamples(200000);
+static size_t g_spreadN = 0;
+
+// Follows the most-visited moves from p and reports where the turn ends: a
+// terminal position, or one where the dice are thrown again. Returns false if
+// the tree has not been built that far - such a line says nothing about the
+// outcome of the turn and must not be compared against another.
+static bool turnEndKey(MCTSTable& T, Position p,
+    const std::array<int, 64>& mask, uint64_t& outKey) {
+    for (int guard = 0; guard < 8; ++guard) {
+        TTNode* n = T.findNodeNoInsert(p.key);
+        if (!n || n->expanded.load(std::memory_order_acquire) != 1) return false;
+        if (n->terminal || n->chance || n->edgeCount == 0) { outKey = p.key; return true; }
+        TTEdge* e0 = T.edgePtr(n->edgeBegin);
+        makeMove(p, mask, e0[selectBestPVEdge(*n, e0)].move);
+    }
+    return false;
+}
+
+// Every position the turn can end in, gathered from the tree rather than from
+// one greedy line per root move: inside a turn the moves commute, so a single
+// root move leads to many possible endings and the best alternative may well be
+// down a line that is not that move's principal variation.
+struct TurnEnd { uint64_t key; uint64_t visits; double eval; double sum; };
+
+static void collectTurnEnds(MCTSTable& T, Position p,
+    const std::array<int, 64>& mask,
+    std::vector<TurnEnd>& out, int depth, int& budget) {
+    if (--budget < 0) return;
+    TTNode* n = T.findNodeNoInsert(p.key);
+    // Everything needed is already in the node: expansion ran genLegal once and
+    // stored both the edges and whether this is where the turn ends.
+    if (!n || n->expanded.load(std::memory_order_acquire) != 1) return;
+    if (n->terminal || n->chance || n->edgeCount == 0) {
+        const uint64_t v = n->visits.load(std::memory_order_relaxed);
+        if (!v) return;
+        for (auto& e : out) if (e.key == p.key) return;   // same position, already taken
+        out.push_back({ p.key, v, (double)nodeQ(*n),
+                        n->valueSum.load(std::memory_order_relaxed) });
+        return;
+    }
+    if (depth <= 0) return;
+    TTEdge* e0 = T.edgePtr(n->edgeBegin);
+    for (int i = 0; i < (int)n->edgeCount; ++i) {
+        if (!e0[i].visits.load(std::memory_order_relaxed)) continue;
+        Position q = p;
+        makeMove(q, mask, e0[i].move);
+        collectTurnEnds(T, q, mask, out, depth - 1, budget);
+    }
+}
+
+// First move of a sequence that takes the enemy king without giving the turn
+// away, read off the tree the search has already built. Moves inside a turn do
+// not change the side, so everything above the first chance node belongs to us.
+static int findWinInTree(MCTSTable& T, const Position& pos,
+    const std::array<int, 64>& mask, int depth) {
+    TTNode* n = T.findNodeNoInsert(pos.key);
+    if (!n || n->expanded.load(std::memory_order_acquire) != 1 || n->edgeCount == 0) return 0;
+    if (n->chance) return 0;
+    TTEdge* e0 = T.edgePtr(n->edgeBegin);
+    if (n->terminal) return e0[0].move;
+    if (depth <= 1) return 0;
+    for (int i = 0; i < (int)n->edgeCount; ++i) {
+        Position q = pos;
+        makeMove(q, mask, e0[i].move);
+        if (findWinInTree(T, q, mask, depth - 1)) return e0[i].move;
+    }
+    return 0;
+}
+
 void mctsBatchedMT(MCTSTable& T,
     Position& rootPos,
     std::array<uint64_t, 4>& path,
@@ -5507,7 +5599,12 @@ void mctsBatchedMT(MCTSTable& T,
     unsigned searchThreads = 1,
     bool dualInfer = false,
     TrtRunner* primaryRunner = nullptr,   // nullptr => g_trt
-    InferenceServer* extServer = nullptr) // persistent server (skips per-move start/stop)
+    InferenceServer* extServer = nullptr, // persistent server (skips per-move start/stop)
+    bool stopOnWin = false,               // return as soon as a win is in the tree
+    int adaptMode = 0,                    // 1 = settled leader, 2 = final-position gap
+    double adaptBaseSec = 0.0,            // the move's nominal allowance
+    const std::atomic<bool>* externalStop = nullptr, // stop the moment this is set
+    double adaptCredit = 0.0)             // unspent budget, in units of the allowance
 {
     MoveList ml;
     int term;
@@ -5732,13 +5829,322 @@ void mctsBatchedMT(MCTSTable& T,
         };
 
     bool forceExit = false;
+    int winMove = 0;
+    int winPoll = 0;
+    int adaptPoll = 0, adaptStable = 0, adaptLeader = 0;
+    std::vector<TurnEnd> prevEnds;        // previous snapshot, for the churn test
+    float qIgnored = 0.0f;
+    const auto tStart = std::chrono::steady_clock::now();
+    if (adaptMode) ++g_adaptSearches;
     while (std::chrono::steady_clock::now() < tEnd) {
         if (T.abort.load(std::memory_order_relaxed)) break;
+        // Filling the time the mouse needs: the search runs until the move on
+        // the board is confirmed, no longer and no shorter.
+        if (externalStop && externalStop->load(std::memory_order_relaxed)) break;
         auto now = std::chrono::steady_clock::now();
 
         if (abort && POS.key != rootPos.key) {
             forceExit = true;
             break;
+        }
+
+        // Once the tree contains a way to take the king this turn there is
+        // nothing left to weigh up, so stop right there.
+        if (stopOnWin && ++winPoll % 15 == 0) {
+            winMove = findWinInTree(T, rootPos, mask, 3);
+            if (winMove) break;
+        }
+
+        // Adaptive budget. Two things end the search early: a move that cuts no
+        // reachable position off (playing it postpones the decision for free),
+        // and a leader that has stopped changing. Time is worth spending on the
+        // probability of being wrong, not on the size of the gap - two equal
+        // lines cost nothing to confuse.
+        // Mode 7 is a control, not a policy: it alternates short and long
+        // searches by position parity, with the same average. If it loses too,
+        // then uneven spending is being punished by itself - short searches pay
+        // ramp-up and warm-up costs twice - and no amount of cleverness in
+        // choosing where to be short can win.
+        if (adaptMode == 7 && ++adaptPoll % 12 == 0) {
+            const double elapsed = std::chrono::duration<double>(now - tStart).count();
+            const double want = adaptBaseSec * ((rootPos.key & 1ull) ? 1.5 : 0.5);
+            if (elapsed >= want) { ++g_adaptStopSettled; break; }
+        }
+
+        // Mode 5 asks a different question from the others: not "is the choice
+        // obvious" but "is this position worth thinking about at all". A game
+        // that is already decided cannot be improved by more search, while a
+        // level, sharp one is exactly where the time belongs. Unlike the other
+        // rules this one mostly ADDS time, which matters because the tree is
+        // reused across the positions of a turn - cutting the first search
+        // short degrades every search after it.
+        if (adaptMode == 5 && ++adaptPoll % 12 == 0) {
+            const double elapsed = std::chrono::duration<double>(now - tStart).count();
+            const uint32_t rv = rootNode->visits.load(std::memory_order_relaxed);
+            if (rv > 64) {
+                const double q = (double)nodeQ(*rootNode);      // from our side
+                const double decided = std::fabs(q - 0.5) * 2.0;   // 0 level, 1 settled
+                // Linear, not squared: measured mean "decidedness" is only 0.25,
+                // so a squared term leaves almost every position looking equally
+                // sharp and the rule stops discriminating. The factor is set so
+                // that a typical position draws its nominal allowance.
+                double want = adaptBaseSec * 1.17 * (1.0 - decided);
+                want = std::max(want, adaptBaseSec * 0.3);
+                if (adaptCredit > 0.0) want *= adaptCredit;
+                g_gapSum += decided; g_wantSum += want / std::max(1e-9, adaptBaseSec); ++g_gapN;
+                if (elapsed >= want) { ++g_adaptStopSettled; break; }
+            }
+        }
+
+        if ((adaptMode == 2 || adaptMode == 3 || adaptMode == 4 || adaptMode == 6 || adaptMode == 8)
+            && ++adaptPoll % 12 == 0) {
+            const double elapsed =
+                std::chrono::duration<double>(now - tStart).count();
+            if (elapsed >= adaptBaseSec * 0.2 &&
+                rootNode->expanded.load(std::memory_order_acquire) == 1 &&
+                rootNode->edgeCount) {
+                // Group the root moves by the position the turn ends in: inside
+                // a turn the moves commute, so what is really being chosen is a
+                // final position, not a first move. The gap between the best
+                // reachable final position and the next different one says how
+                // much the decision is worth - a wide gap means the choice is
+                // already made and thinking on is waste.
+                {
+                    const auto tProbe = std::chrono::steady_clock::now();
+                    ++g_probeN;
+                    std::vector<TurnEnd> fin;
+                    int budget = 1200;
+                    collectTurnEnds(T, rootPos, mask, fin, 6, budget);
+                    // Where the line we would actually play ends up. The PV is
+                    // greedy per step, and a final position's visits are the sum
+                    // over every order of moves that reaches it, so the end of
+                    // the PV is not necessarily the most visited position.
+                    uint64_t pvEnd = 0;
+                    const bool pvResolved = turnEndKey(T, rootPos, mask, pvEnd);
+                    size_t mineIdx = fin.size();
+                    if (pvResolved)
+                        for (size_t i = 0; i < fin.size(); ++i) if (fin[i].key == pvEnd) { mineIdx = i; break; }
+
+                    // Think long whenever the comparison cannot be made: either
+                    // the end of the PV is not resolved, or nothing resolved
+                    // differs from it. Cutting the search short on either would
+                    // be guessing - but "long" still has to answer to the
+                    // budget, or a short control where nothing ever resolves
+                    // silently doubles this side's time.
+                    // Wide enough not to clip the proportionality itself: with
+                    // importance spanning about fourfold, time has to span the
+                    // same range or the rule stops being t proportional to w.
+                    const double ceiling = adaptBaseSec * 3.0 *
+                        (adaptCredit > 0.0 ? adaptCredit : 1.0);
+                    if (!(pvResolved && mineIdx < fin.size() && fin.size() >= 2)) {
+                        if (elapsed >= ceiling) {
+                            ++g_adaptStopFree;
+                            g_probeSec += std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - tProbe).count();
+                            break;
+                        }
+                    }
+                    else {
+                        // What the line is worth is decided by the best position
+                        // it rules out, not by the next most popular one.
+                        // Evaluations here come from the end positions' own
+                        // nodes, and inside a turn the side to move has not
+                        // changed, so they already read from our side.
+                        // An outcome seen five times is not evidence the way one
+                        // seen five thousand times is, so each evaluation is
+                        // pulled towards the root's until its own visits earn it
+                        // the right to stand on its own.
+                        const double qRoot = (double)nodeQ(*rootNode);
+                        const double K = 24.0;
+                        auto trusted = [&](const TurnEnd& e) {
+                            return (e.eval * (double)e.visits + qRoot * K) / ((double)e.visits + K);
+                            };
+                        double bestAlt = -1.0;
+                        uint64_t altVisits = 1;
+                        for (size_t i = 0; i < fin.size(); ++i) {
+                            if (i == mineIdx) continue;
+                            const double e = trusted(fin[i]);
+                            if (e > bestAlt) {
+                                bestAlt = e;
+                                altVisits = std::max<uint64_t>(1, fin[i].visits);
+                            }
+                        }
+                        const double gap = std::max(0.0, trusted(fin[mineIdx]) - bestAlt);
+                        const uint64_t mineVisits = std::max<uint64_t>(1, fin[mineIdx].visits);
+                        // Time allowed shrinks as the gap widens. The pivot is
+                        // the measured median gap, so a typical position gets
+                        // its nominal allowance and the budget is redistributed
+                        // rather than merely trimmed.
+                        // Pivot measured in play: comparing the line we would
+                        // play against the best position it rules out, the
+                        // typical gap is about 0.003, not the 0.03 seen when
+                        // comparing two arbitrary root moves.
+                        // Time is worth spending where the line we would play is
+                        // barely ahead of the best line it rules out. The pivot
+                        // only sets the shape; the level is held by the caller's
+                        // correction, so the average lands on the allowance
+                        // instead of drifting under it.
+                        double want = adaptBaseSec * (0.004 / std::max(gap, 0.0004));
+                        if (adaptMode == 6) {
+                            // What an error really costs: how far apart the
+                            // reachable outcomes are, weighted by how likely the
+                            // search is to pick each. Comparing only the top two
+                            // misses this - MCTS levels the top, so that gap is
+                            // nearly constant and says almost nothing.
+                            double wsum = 0.0, mean = 0.0;
+                            for (const TurnEnd& e : fin) { wsum += (double)e.visits; }
+                            if (wsum > 0.0) {
+                                for (const TurnEnd& e : fin) mean += e.eval * (double)e.visits / wsum;
+                                double var = 0.0;
+                                for (const TurnEnd& e : fin) {
+                                    const double d = e.eval - mean;
+                                    var += d * d * (double)e.visits / wsum;
+                                }
+                                const double spread = std::sqrt(std::max(0.0, var));
+                                want = adaptBaseSec * (spread / 0.0360);
+                                g_gapSum += spread; g_wantSum += want / std::max(1e-9, adaptBaseSec); ++g_gapN;
+                                // Whether adaptivity can win at all hinges on how
+                                // widely importance varies: time should go as the
+                                // importance, and that only pays if the spread of
+                                // importances is a matter of several times over.
+                                if (g_spreadN < 200000) g_spreadSamples[g_spreadN++] = spread;
+                            }
+                        }
+                        if (adaptMode == 8) {
+                            // How much the search is still learning: for every
+                            // outcome already known last time, how far the
+                            // verdict of its new visits departs from the verdict
+                            // of the old ones, weighted by how many new visits
+                            // there were. Outcomes seen for the first time
+                            // contribute nothing - there is nothing to compare
+                            // them against. While this stays large the picture
+                            // is still moving and the search should go on.
+                            double churn = 0.0, newTotal = 0.0;
+                            for (const TurnEnd& now : fin) {
+                                for (const TurnEnd& was : prevEnds) {
+                                    if (was.key != now.key) continue;
+                                    const double dv = (double)now.visits - (double)was.visits;
+                                    if (dv <= 0.0 || was.visits == 0) break;
+                                    const double avgNew = (now.sum - was.sum) / dv;
+                                    const double avgOld = was.sum / (double)was.visits;
+                                    churn += dv * std::fabs(avgNew - avgOld);
+                                    newTotal += dv;
+                                    break;
+                                }
+                            }
+                            prevEnds = fin;
+                            if (newTotal > 0.0) {
+                                const double moving = churn / newTotal;
+                                want = adaptBaseSec * (moving / 0.030);
+                                g_gapSum += moving;
+                                g_wantSum += want / std::max(1e-9, adaptBaseSec);
+                                ++g_gapN;
+                                if (g_spreadN < 200000) g_spreadSamples[g_spreadN++] = moving;
+                            }
+                            else want = ceiling;
+                        }
+                        if (adaptMode == 4) {
+                            // Visits only. The move played is the most visited
+                            // one, so how firmly it leads is the natural measure
+                            // of whether the decision can still change - and
+                            // unlike an evaluation it cannot be noisy.
+                            uint64_t topAlt = 1;
+                            for (size_t i = 0; i < fin.size(); ++i)
+                                if (i != mineIdx) topAlt = std::max(topAlt, fin[i].visits);
+                            const double lead = (double)mineVisits / (double)topAlt;
+                            // Constant fixed from measurement rather than from a
+                            // feedback loop: the loop kept trading one bias for
+                            // another and never settled, and a stable budget
+                            // matters more here than a self-tuning one.
+                            want = adaptBaseSec * (1.30 / std::max(lead, 0.5));
+                        }
+                        if (adaptMode == 3) {
+                            // Cost of being wrong times the chance of still
+                            // being wrong: a leader that has pulled away on
+                            // visits will not be overtaken, however close the
+                            // evaluations are.
+                            const double lead = (double)mineVisits / (double)altVisits;
+                            // Symmetric on purpose: a leader that has not pulled
+                            // away yet buys more time, one that has gives it
+                            // back. Capping this at 1 would only ever shave time
+                            // off and the sides would not be spending equally.
+                            want *= 1.6 / std::max(0.5, lead);
+                        }
+                        // Whatever the metric, unspent time has to come back:
+                        // a rule that only ever shaves seconds off is not a
+                        // redistribution, it is a smaller budget, and it would
+                        // lose the comparison for the wrong reason.
+                        // Closed loop on the actual spend: the caller measures
+                        // how much of the allowance is really being used and
+                        // passes back the correction. Hand-tuned constants kept
+                        // drifting below the budget, which turns redistribution
+                        // into a quiet time cut.
+                        // The floor is what actually sets the average: stops only
+                        // ever happen on small targets, the large ones never get
+                        // reached, so too low a floor quietly shrinks the budget.
+                        // The controller has to move the floor as well: stops
+                        // land on it, so leaving it fixed pins the average below
+                        // the allowance no matter what the target says.
+                        const double scale = adaptCredit > 0.0 ? adaptCredit : 1.0;
+                        want *= scale;
+                        want = std::min(std::max(want, adaptBaseSec * 0.15 * scale), ceiling);
+                        g_gapSum += gap; g_wantSum += want / std::max(1e-9, adaptBaseSec); ++g_gapN;
+                        if (elapsed >= want) {
+                            ++g_adaptStopSettled;
+                            g_probeSec += std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - tProbe).count();
+                            break;
+                        }
+                    }
+                    // Walking the tree is not free, and if it eats into the
+                    // search it would poison the very comparison it serves.
+                    g_probeSec += std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - tProbe).count();
+                }
+            }
+        }
+
+        if (adaptMode == 1 && ++adaptPoll % 12 == 0) {
+            const double elapsed =
+                std::chrono::duration<double>(now - tStart).count();
+            if (elapsed >= adaptBaseSec * 0.2 &&
+                rootNode->expanded.load(std::memory_order_acquire) == 1 &&
+                rootNode->edgeCount) {
+                // Cheap test first: who leads and by how much. Reading the
+                // edge counters costs nothing, while walking every root move's
+                // principal variation would steal real work from the workers.
+                TTEdge* e0 = T.edgePtr(rootNode->edgeBegin);
+                uint32_t v1 = 0, v2 = 0;
+                int leader = 0;
+                for (int i = 0; i < (int)rootNode->edgeCount; ++i) {
+                    uint32_t v = e0[i].visits.load(std::memory_order_relaxed);
+                    if (v > v1) { v2 = v1; v1 = v; leader = e0[i].move; }
+                    else if (v > v2) v2 = v;
+                }
+                if (leader == adaptLeader) ++adaptStable;
+                else { adaptLeader = leader; adaptStable = 0; }
+                // Settled: the same move has led for a while and the runner-up
+                // cannot catch it in the time that is left.
+                if (adaptStable >= 2 && v1 > v2 * 3 / 2) { ++g_adaptStopSettled; break; }
+
+                // Occasionally ask the expensive question too: does the leading
+                // move cut any reachable position off? If it does not, playing
+                // it postpones the decision at no cost and thinking on is waste.
+                if (adaptPoll % 75 == 0) {
+                    std::vector<moveState> snap;
+                    collectRootMoves(T, rootPos, qIgnored, snap);
+                    if (!snap.empty() && snap[0].visits) {
+                        for (auto& ms : snap) {
+                            Position p = rootPos;
+                            makeMove(p, mask, ms.move);
+                            extractBestPVUntilChance(T, p, mask, ms.pv, ms.pvKey);
+                            ms.pv.insert(ms.pv.begin(), ms.move);
+                        }
+                        computeDifForRootMoves(0, snap, T, rootPos, mask);
+                        if (!snap.empty() && snap[0].dif >= 99.0) { ++g_adaptStopFree; break; }
+                    }
+                }
+            }
         }
 
         if (write == 2) {
@@ -5805,8 +6211,29 @@ void mctsBatchedMT(MCTSTable& T,
         }
     }
 
-    computeDifForRootMoves(write, outRootMoves, T, rootPos, mask);
-    extractDifPVUntilChance(write, T, rootPos, mask, outRootMoves, outPVBeforeRoll);
+    if (winMove) {
+        // Hand the winning move back as the one the search settled on.
+        for (auto& ms : outRootMoves) if (ms.move == winMove) ms.visits = UINT32_MAX;
+        std::stable_sort(outRootMoves.begin(), outRootMoves.end(),
+            [](const moveState& a, const moveState& b) { return a.visits > b.visits; });
+    }
+
+    if (write == 0) {
+        // Playing mode wants the line the search actually settled on: the most
+        // visited move at every step. The dif ordering is a reporting device
+        // and has no business steering the move that gets played.
+        uint64_t pvKey = 0;
+        outPVBeforeRoll.clear();
+        extractBestPVUntilChance(T, rootPos, mask, outPVBeforeRoll, pvKey);
+    }
+    else {
+        computeDifForRootMoves(write, outRootMoves, T, rootPos, mask);
+        extractDifPVUntilChance(write, T, rootPos, mask, outRootMoves, outPVBeforeRoll);
+    }
+    if (winMove) {
+        outPVBeforeRoll.clear();
+        outPVBeforeRoll.push_back(winMove);
+    }
 
     (void)simOK; (void)simFail; (void)nnExp;
     if (forceExit) return;
@@ -11709,12 +12136,20 @@ struct AbPlayerCfg {
     bool oldNet = false;        // use g_trt_old (net_old.plan) instead of g_trt
     bool persistServer = false; // keep one InferenceServer per game instead of per move
     double moveTimeSec = 0.4;
+    int adaptive = 0;           // 0 = fixed, 1 = settled leader, 2 = final-position gap
+    double bankSec = 0.0;       // >0: a per-game clock both sides must live within
     const char* name = "";
 
     TrtRunner* primary() const {
         return (oldNet && g_trtOldReady) ? &g_trt_old : nullptr;
     }
 };
+
+// Time actually consumed by each side, so a match can show that the adaptive
+// player won on the same clock rather than on a bigger one.
+static double g_abTimeP1 = 0.0, g_abTimeP2 = 0.0;
+static long long g_abMovesP1 = 0, g_abMovesP2 = 0;
+static long long g_abTurnsP1 = 0, g_abTurnsP2 = 0;   // full turns, i.e. dice rolls
 
 static void abPrepareTableForSearch(MCTSTable& T, const AbPlayerCfg& cfg) {
     if (!cfg.treeReuse) { T.newGame(); return; }
@@ -11741,6 +12176,8 @@ static int playOneAbMatchGame(const AbPlayerCfg& p1Cfg,
     p1Table.newGame();
     p2Table.newGame();
     size_t chanceIdx = 0;
+    double bankP1 = 0.0, bankP2 = 0.0;    // time saved so far, spendable later
+    std::vector<int> lineP1, lineP2;      // series still to be played out
 
     // Optional per-game persistent inference servers (skip per-move start/stop/ramp costs).
     struct SrvHolder {
@@ -11782,6 +12219,10 @@ static int playOneAbMatchGame(const AbPlayerCfg& p1Cfg,
                 makeRandomWithRolledDice(pos, n, rolledDice);
             }
             ++chanceIdx;
+            // A fresh roll starts a new turn for whoever is now to move, and
+            // the tree from the previous roll is of no use to it.
+            if ((pos.side == 0) == p1IsWhite) { lineP1.clear(); ++g_abTurnsP1; p1Table.newGame(); }
+            else { lineP2.clear(); ++g_abTurnsP2; p2Table.newGame(); }
             continue;
         }
 
@@ -11791,15 +12232,82 @@ static int playOneAbMatchGame(const AbPlayerCfg& p1Cfg,
 
         abPrepareTableForSearch(T, cfg);
 
+        // One search per turn: the whole series of moves is taken from it, so
+        // the question being tested is how to spend a turn's allowance, not a
+        // position's. Later moves of the series are replayed from that line.
+        std::vector<int>& line = p1Turn ? lineP1 : lineP2;
+        if (!line.empty()) {
+            const int mv = line.front();
+            line.erase(line.begin());
+            MoveList ml; int t = 0;
+            { Position probe = pos; genLegal(probe, path, mask, ml, t); }
+            bool legal = false;
+            for (int i = 0; i < ml.n; ++i) if (ml.m[i] == mv) { legal = true; break; }
+            if (legal) { makeMove(pos, mask, mv); continue; }
+            line.clear();                    // stale line, search again
+        }
+
+        double& bank = p1Turn ? bankP1 : bankP2;
+        // The adaptive side gets a ceiling, not an allowance: how much of it is
+        // actually used is decided per position, and the average is pulled back
+        // to the nominal figure by the controller below. Tying the ceiling to
+        // saved-up time meant a hard position could only be studied after a
+        // string of easy ones, which is not what the rule is for.
+        double limit = cfg.adaptive ? cfg.moveTimeSec * 3.0 : cfg.moveTimeSec;
+        if (!cfg.adaptive) bank = 0.0;
+        if (limit < 0.02) limit = 0.02;
+        if (p1Turn) ++g_abMovesP1; else ++g_abMovesP2;
+
         float eval = 0.5f;
         float depth = 0.0f;
         std::vector<moveState> moves;
         std::vector<int> pv;
-        mctsBatchedMT(T, pos, path, mask, cfg.moveTimeSec, eval, depth, moves, pv,
+        const auto tMove = std::chrono::steady_clock::now();
+        mctsBatchedMT(T, pos, path, mask, limit, eval, depth, moves, pv,
             /*write=*/0, /*abort=*/0, cfg.threads, cfg.dualInfer,
-            cfg.primary(), (p1Turn ? p1Srv : p2Srv).s.get());
+            cfg.primary(), (p1Turn ? p1Srv : p2Srv).s.get(), /*stopOnWin=*/true,
+            cfg.adaptive, cfg.moveTimeSec, nullptr,
+            cfg.adaptive ? (p1Turn ? g_creditP1 : g_creditP2) : 0.0);
+        const double used =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - tMove).count();
+        // Savings are measured against the nominal allowance, not against the
+        // raised limit: crediting the limit feeds itself and the average drifts
+        // upwards, which would quietly hand the adaptive side more time.
+        bank += cfg.moveTimeSec - used;
+        if (cfg.adaptive && cfg.moveTimeSec > 0.0) {
+            double& cr = p1Turn ? g_creditP1 : g_creditP2;
+            const double ratio = std::max(0.2, used / cfg.moveTimeSec);
+            // Aim at what the fixed side actually spends, not at the nominal
+            // figure: starting and finishing a search costs a few percent that
+            // no policy can give back, and chasing the nominal would leave the
+            // adaptive side permanently over budget.
+            // Compare the running averages, not this one move: the effect being
+            // measured is a few Elo, and a few percent of budget imbalance is
+            // worth about as much, so the two sides have to be matched to well
+            // under a percent or the experiment measures its own error.
+            const long long om = p1Turn ? g_abMovesP2 : g_abMovesP1;
+            const double ot = p1Turn ? g_abTimeP2 : g_abTimeP1;
+            const long long mm = p1Turn ? g_abMovesP1 : g_abMovesP2;
+            const double mt = p1Turn ? g_abTimeP1 : g_abTimeP2;
+            if (om > 200 && mm > 200) {
+                const double theirs = ot / om;
+                const double mine = mt / mm;
+                cr *= std::pow(theirs / std::max(1e-6, mine), 0.02);
+                cr = std::min(3.0, std::max(0.3, cr));
+            }
+            (void)ratio;
+        }
+        if (p1Turn) g_abTimeP1 += used; else g_abTimeP2 += used;
         if (pv.empty()) return 0;
-        makeMove(pos, mask, pv[0]);
+
+        // The series of most-visited moves, all the way to the next roll.
+        uint64_t endKey = 0;
+        line.clear();
+        extractBestPVUntilChance(T, pos, mask, line, endKey);
+        if (line.empty()) line.push_back(pv[0]);
+        const int first = line.front();
+        line.erase(line.begin());
+        makeMove(pos, mask, first);
     }
 
     return 0;
@@ -11814,14 +12322,18 @@ static double abEloFromScore(double s) {
 static MatchStatsGeneric runAbStrengthMatch(int games, double moveTimeSec,
     AbPlayerCfg p1Cfg, AbPlayerCfg p2Cfg) {
     p1Cfg.moveTimeSec = moveTimeSec;
-    p2Cfg.moveTimeSec = moveTimeSec;
+    // bankSec doubles as "give P2 a different allowance", which turns the same
+    // harness into a sanity check: does more time buy strength at all here?
+    p2Cfg.moveTimeSec = p2Cfg.bankSec > 0.0 ? p2Cfg.bankSec : moveTimeSec;
 
     auto printCfg = [](const char* tag, const AbPlayerCfg& c) {
         std::cout << tag << ": threads=" << c.threads
             << " reuse=" << (int)c.treeReuse
             << " dual=" << (int)c.dualInfer
             << " oldNet=" << (int)c.oldNet
-            << " persist=" << (int)c.persistServer;
+            << " persist=" << (int)c.persistServer
+            << " adaptive=" << (int)c.adaptive
+            << " bank=" << c.bankSec << "s";
         };
     std::cout << "[ab] ";
     printCfg("P1", p1Cfg);
@@ -11829,8 +12341,12 @@ static MatchStatsGeneric runAbStrengthMatch(int games, double moveTimeSec,
     printCfg("P2", p2Cfg);
     std::cout << " | moveTime=" << moveTimeSec << "s games=" << games << std::endl;
 
-    MCTSTable p1Table(1ull << 22, 1ull << 26);
-    MCTSTable p2Table(1ull << 22, 1ull << 26);
+    size_t n1, e1, n2, e2;
+    tableSizeForTime(p1Cfg.moveTimeSec * 3.0, n1, e1);   // adaptive may triple a turn
+    tableSizeForTime(p2Cfg.moveTimeSec * 3.0, n2, e2);
+    std::cout << "[ab] tree P1=" << n1 << "n/" << e1 << "e P2=" << n2 << "n/" << e2 << "e\n";
+    MCTSTable p1Table(n1, e1);
+    MCTSTable p2Table(n2, e2);
 
     MatchStatsGeneric st;
     for (int g = 0; g < games; g += 2) {
@@ -11858,23 +12374,1618 @@ static MatchStatsGeneric runAbStrengthMatch(int games, double moveTimeSec,
             << " score=" << std::fixed << std::setprecision(4) << score
             << " elo=" << std::setprecision(1) << std::showpos << abEloFromScore(score) << std::noshowpos
             << " LOS=" << std::setprecision(2) << computeLOSPercent(st.p1Wins, st.p2Wins) << '%'
+            << std::setprecision(3)
+            << " time P1/P2=" << g_abTimeP1 << "s/" << g_abTimeP2 << "s"
+            << " perTurn=" << (g_abTurnsP1 ? g_abTimeP1 / g_abTurnsP1 : 0.0)
+            << "/" << (g_abTurnsP2 ? g_abTimeP2 / g_abTurnsP2 : 0.0)
+            << " searchesPerTurn=" << (g_abTurnsP1 ? (double)g_abMovesP1 / g_abTurnsP1 : 0.0)
+            << " earlyStops=" << g_adaptStopSettled.load() << "settled/"
+            << g_adaptStopFree.load() << "free of " << g_adaptSearches.load()
+            << " gap=" << (g_gapN ? g_gapSum / g_gapN : 0.0)
+            << [] {
+                if (g_spreadN < 500) return std::string();
+                std::vector<double> v(g_spreadSamples.begin(), g_spreadSamples.begin() + g_spreadN);
+                std::sort(v.begin(), v.end());
+                auto q = [&](double p) { return v[(size_t)(p * (v.size() - 1))]; };
+                std::ostringstream os;
+                os << std::fixed << std::setprecision(4)
+                    << " importance p10/p50/p90=" << q(0.10) << '/' << q(0.50) << '/' << q(0.90)
+                    << " ratio=" << std::setprecision(1) << (q(0.90) / std::max(1e-6, q(0.10)));
+                return os.str();
+            }()
+            << " probe=" << (g_probeN ? g_probeSec / g_probeN * 1e6 : 0.0) << "us x"
+            << g_probeN << " (" << std::setprecision(4)
+            << (g_abTimeP1 > 0.0 ? 100.0 * g_probeSec / g_abTimeP1 : 0.0) << "%)"
+            << std::setprecision(3)
             << std::setprecision(6) << std::endl;
     }
     return st;
 }
 
+// Measures what the "dif" of the best root move actually looks like in play:
+// its sign, its scale, and how often a move turns out to cut nothing off. The
+// time policy below is built on those numbers, so they are worth measuring
+// rather than guessing.
+static void difProbe(int positions, double seconds) {
+    MCTSTable T(1ull << 22, 1ull << 25);
+    Position pos;
+    std::array<uint64_t, 4> path;
+    std::array<int, 64> mask;
+    chess960(pos, path, mask);
+    int seen = 0, freeMoves = 0;
+    std::vector<double> difs;
+
+    for (int i = 0; seen < positions && i < positions * 40; ++i) {
+        bool terminal = false, chance = false;
+        isChanceOrTerminalPosition(pos, path, mask, terminal, chance);
+        if (terminal) { chess960(pos, path, mask); T.newGame(); continue; }
+        if (chance) { makeRandomWithRolledDice(pos, T.findNodeNoInsert(pos.key), Dice[Range(Random)]); continue; }
+
+        MoveList ml; int term = 0;
+        Position probe = pos;
+        genLegal(probe, path, mask, ml, term);
+
+        float eval = 0.5f, depth = 0.0f;
+        std::vector<moveState> rm;
+        std::vector<int> pv;
+        mctsBatchedMT(T, pos, path, mask, seconds, eval, depth, rm, pv, 0, 0,
+            autoSearchThreads(), true);
+        if (pv.empty()) { chess960(pos, path, mask); T.newGame(); continue; }
+
+        if (ml.n >= 2 && !rm.empty()) {
+            ++seen;
+            const moveState* best = &rm[0];
+            for (const moveState& ms : rm) if (ms.move == pv[0]) { best = &ms; break; }
+            difs.push_back(best->dif);
+            if (best->dif >= 99.0) ++freeMoves;
+            std::cout << "[dif] moves=" << ml.n
+                << " best=" << moveToStr(pv[0])
+                << " dif=" << std::fixed << std::setprecision(2) << best->dif
+                << "  all:";
+            int shown = 0;
+            for (const moveState& ms : rm) {
+                if (shown++ >= 5) break;
+                std::cout << ' ' << moveToStr(ms.move) << '/' << ms.visits << '/' << ms.dif;
+            }
+            std::cout << '\n';
+        }
+        makeMove(pos, mask, pv[0]);
+    }
+
+    std::sort(difs.begin(), difs.end());
+    std::cout << "[dif] positions=" << difs.size()
+        << " cutsNothing=" << freeMoves;
+    if (!difs.empty()) {
+        auto q = [&](double p) { return difs[(size_t)(p * (difs.size() - 1))]; };
+        std::cout << " min=" << q(0) << " p25=" << q(0.25) << " median=" << q(0.5)
+            << " p75=" << q(0.75) << " max=" << q(1);
+    }
+    std::cout << std::endl;
+}
+
+// ===================== ENGINE PLAY ON SCREEN (dicechess.com) =====================
+// Reads the board, the dice and whose turn it is straight from the browser
+// window, searches with the net and plays the moves with the mouse.
+//
+// calib.txt    "boardX boardY cellSize": physical pixels of the board's top-left
+//              corner and the size of one square. Everything else is derived
+//              from it and scaled by cellSize/139.
+// boardcal.txt learned piece shapes, rewritten automatically every time a game
+//              starts from the initial position.
+
+namespace SP {
+
+    static int BX = 404, BY = 757, CELL = 139;
+
+    static double sc() { return CELL / 139.0; }
+    static int    rel(double v) { return (int)llround(v * sc()); }
+    static int    boardW() { return 8 * CELL; }
+    static int    cellX(int f) { return BX + CELL * f; }
+    static int    cellY(int r) { return BY + CELL * r; }
+    static int    dieSize() { return rel(159); }
+    static int    dieX(int i) { return BX + boardW() / 2 + (i - 1) * rel(228) - dieSize() / 2; }
+    static int    dieY() { return BY - rel(212); }
+    static int    promoY() { return BY + boardW() + rel(84); }
+    static int    promoX(int i) { return BX + boardW() / 2 + (int)llround((i - 1.5) * rel(182)); }
+    static int    rematchX() { return BX + rel(318); }
+    static int    rematchY() { return BY + rel(1185); }
+
+    // ---------------------------------------------------------------- capture
+
+    struct Shot {
+        int x0 = 0, y0 = 0, w = 0, h = 0;
+        vector<uint32_t> px;
+        bool ok() const { return w > 0 && h > 0; }
+        // Outside the capture returns magenta, i.e. never "ink" and never "lit".
+        inline uint32_t at(int x, int y) const {
+            x -= x0; y -= y0;
+            if (x < 0 || y < 0 || x >= w || y >= h) return 0x00FF00FFu;
+            return px[(size_t)y * w + x];
+        }
+    };
+
+    static Shot grab(int x0, int y0, int x1, int y1) {
+        Shot s;
+        s.x0 = x0; s.y0 = y0; s.w = x1 - x0; s.h = y1 - y0;
+        if (s.w <= 0 || s.h <= 0) { s.w = s.h = 0; return s; }
+        s.px.resize((size_t)s.w * s.h);
+        HDC d = GetDC(0);
+        HDC m = CreateCompatibleDC(d);
+        HBITMAP b = CreateCompatibleBitmap(d, s.w, s.h);
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = s.w;
+        bi.bmiHeader.biHeight = -s.h;          // top-down
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        HGDIOBJ old = SelectObject(m, b);
+        BitBlt(m, 0, 0, s.w, s.h, d, x0, y0, SRCCOPY);
+        GetDIBits(d, b, 0, s.h, s.px.data(), &bi, DIB_RGB_COLORS);
+        SelectObject(m, old);
+        DeleteObject(b);
+        DeleteDC(m);
+        ReleaseDC(0, d);
+        return s;
+    }
+
+    // One capture holding the board, the dice, both clocks, the promotion row
+    // and the end-of-game buttons.
+    static Shot grabAll() {
+        return grab(BX - rel(90), BY - rel(470),
+            BX + boardW() + rel(250), BY + boardW() + rel(215));
+    }
+
+    // ------------------------------------------------------------- descriptor
+    // A piece is recognised by the SHAPE of its ink, not by pixel colours: the
+    // drawings on the dice are the drawings from the board, only smaller, so a
+    // bbox-normalised 6x6 occupancy grid matches both.
+
+    // g      = how much of each 6x6 bbox cell is covered by ink (per mille)
+    // centre = brightness of the ink in the middle of the drawing, rescaled to
+    //          the patch's own ink range. The middle is always fill, so this
+    //          separates a white piece from a black one, and the rescaling
+    //          keeps it working on a dimmed die where white is painted ~120.
+    struct Desc {
+        array<int, 36> g{};
+        int aspect = 0;        // 1000*w/h of the ink bbox
+        int ink = 0;
+        int centre = 128;
+    };
+
+    // "Ink" = unsaturated pixel. Wood, felt and the red dice faces are strongly
+    // saturated; the drawings are white/grey/black. Exact colour matching does
+    // not work here because a bright piece is painted (254,254,254), not white.
+    static AI_FORCEINLINE bool isInk(uint32_t v, int& lum) {
+        int B = (int)(v & 255u), G = (int)((v >> 8) & 255u), R = (int)((v >> 16) & 255u);
+        int mx = R > G ? (R > B ? R : B) : (G > B ? G : B);
+        int mn = R < G ? (R < B ? R : B) : (G < B ? G : B);
+        lum = mx;
+        return mx - mn <= 28;
+    }
+
+    static Desc describe(const Shot& s, int x0, int y0, int size, int inset) {
+        Desc d;
+        if (size <= 2 * inset + 4) return d;
+        const int n = size;
+        static thread_local vector<unsigned char> m;
+        static thread_local vector<unsigned char> lu;
+        m.assign((size_t)n * n, 0);
+        lu.assign((size_t)n * n, 0);
+        int hist[256] = { 0 };
+        int bx0 = 1 << 30, by0 = 1 << 30, bx1 = -1, by1 = -1;
+        for (int y = inset; y < n - inset; ++y) {
+            for (int x = inset; x < n - inset; ++x) {
+                int lum;
+                if (!isInk(s.at(x0 + x, y0 + y), lum)) continue;
+                m[(size_t)y * n + x] = 1;
+                lu[(size_t)y * n + x] = (unsigned char)lum;
+            }
+        }
+        // Keep only the large connected blobs. The rank digits and file letters
+        // printed in the corners of a square are ink too, and left in they drag
+        // the bounding box sideways, which is enough to turn a rook into
+        // something the learned table does not recognise.
+        {
+            static thread_local vector<int> comp, stack, sizes;
+            comp.assign((size_t)n * n, -1);
+            sizes.clear();
+            for (int y = 0; y < n; ++y) for (int x = 0; x < n; ++x) {
+                size_t p = (size_t)y * n + x;
+                if (!m[p] || comp[p] >= 0) continue;
+                int id = (int)sizes.size();
+                int cnt = 0;
+                stack.clear();
+                stack.push_back((int)p);
+                comp[p] = id;
+                while (!stack.empty()) {
+                    int q = stack.back(); stack.pop_back();
+                    ++cnt;
+                    int qy = q / n, qx = q % n;
+                    const int dx[4] = { 1,-1,0,0 }, dy[4] = { 0,0,1,-1 };
+                    for (int k = 0; k < 4; ++k) {
+                        int nx = qx + dx[k], ny = qy + dy[k];
+                        if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue;
+                        size_t r = (size_t)ny * n + nx;
+                        if (!m[r] || comp[r] >= 0) continue;
+                        comp[r] = id;
+                        stack.push_back((int)r);
+                    }
+                }
+                sizes.push_back(cnt);
+            }
+            int big = 0;
+            for (int v : sizes) big = max(big, v);
+            int keep = max(30, big / 8);
+            for (size_t p = 0; p < m.size(); ++p)
+                if (m[p] && sizes[comp[p]] < keep) m[p] = 0;
+        }
+        for (int y = 0; y < n; ++y) for (int x = 0; x < n; ++x) {
+            if (!m[(size_t)y * n + x]) continue;
+            d.ink++;
+            hist[lu[(size_t)y * n + x]]++;
+            if (x < bx0) bx0 = x;
+            if (x > bx1) bx1 = x;
+            if (y < by0) by0 = y;
+            if (y > by1) by1 = y;
+        }
+        if (d.ink == 0) return d;
+        // Brightness is rescaled to the ink's own range: on a dimmed die a
+        // white piece is painted around 120, so absolute levels are useless.
+        int lo = 0, hi = 255, acc = 0;
+        for (int v = 0; v < 256; ++v) { acc += hist[v]; if (acc >= d.ink / 20 + 1) { lo = v; break; } }
+        acc = 0;
+        for (int v = 255; v >= 0; --v) { acc += hist[v]; if (acc >= d.ink / 20 + 1) { hi = v; break; } }
+        if (hi <= lo) hi = lo + 1;
+
+        int w = bx1 - bx0 + 1, h = by1 - by0 + 1;
+        d.aspect = 1000 * w / h;
+        array<int, 36> cnt{}, tot{};
+        array<long long, 36> lsum{};
+        for (int y = by0; y <= by1; ++y) {
+            int gy = (y - by0) * 6 / h;
+            for (int x = bx0; x <= bx1; ++x) {
+                int k = gy * 6 + (x - bx0) * 6 / w;
+                tot[k]++;
+                if (!m[(size_t)y * n + x]) continue;
+                cnt[k]++;
+                int v = ((int)lu[(size_t)y * n + x] - lo) * 255 / (hi - lo);
+                lsum[k] += min(255, max(0, v));
+            }
+        }
+        for (int k = 0; k < 36; ++k) d.g[k] = tot[k] ? 1000 * cnt[k] / tot[k] : 0;
+        {
+            long long ls = 0;
+            int lc = 0;
+            for (int k : {14, 15, 20, 21}) { ls += lsum[k]; lc += cnt[k]; }
+            if (lc) d.centre = (int)(ls / lc);
+        }
+        return d;
+    }
+
+    // Absolute brightness of the ink in the middle of a square, used only for
+    // the very first orientation guess, before anything has been learned.
+    static int centreLum(const Shot& s, int cell) {
+        int side = max(8, CELL / 4);
+        int x0 = cellX(cell & 7) + CELL / 2 - side / 2;
+        int y0 = cellY(cell >> 3) + CELL / 2 - side / 2;
+        long long sum = 0;
+        int n = 0;
+        for (int y = 0; y < side; ++y) for (int x = 0; x < side; ++x) {
+            int lum;
+            if (!isInk(s.at(x0 + x, y0 + y), lum)) continue;
+            sum += lum; n++;
+        }
+        return n ? (int)(sum / n) : -1;
+    }
+
+    // Silhouette plus one brightness number. The drawings on the dice carry a
+    // thicker outline than the ones on the board, so per-cell brightness does
+    // not carry over, but the outline grows outwards and the bbox-normalised
+    // shape still matches. The centre brightness is compared against the
+    // learned value rather than a fixed threshold: on a knight the middle of
+    // the bounding box lands on the mane, so "black piece = dark centre" is
+    // simply not true, while "black knight = the centre of a black knight" is.
+    static int descDist(const Desc& a, const Desc& b) {
+        int s = 0;
+        for (int i = 0; i < 36; ++i) s += abs(a.g[i] - b.g[i]);
+        s += abs(a.aspect - b.aspect) / 2;
+        s += 8 * abs(a.centre - b.centre);
+        return s;
+    }
+
+    // ------------------------------------------------------------ calibration
+
+    // Several prototypes per class rather than one average: the two knights of
+    // a colour are drawn on squares of different shade and averaging them
+    // produces a shape that matches neither.
+    static const int MAXPROTO = 4;
+    struct Cal {
+        Desc proto[2][6][MAXPROTO];   // [0] = white drawings, [1] = black drawings
+        int  n[2][6] = { {0} };
+        int  have = 0;
+        int  emptyInk = 0;            // largest ink count seen on a known empty square
+    };
+    static Cal CAL;
+
+    static int classDist(const Desc& d, int colour, int type);
+
+    static int inkEmptyLimit() { return max(400, CAL.emptyInk * 3); }
+
+    // Prints the current shapes in the format of kBoardCal below, for pasting
+    // back into the source if the site ever changes how it draws the pieces.
+    // Nothing is written to disk: results.txt is the only file this mode keeps.
+    static void dumpCal() {
+        cout << CAL.emptyInk << '\n';
+        for (int c = 0; c < 2; ++c) for (int t = 0; t < 6; ++t) {
+            cout << c << ' ' << t << ' ' << CAL.n[c][t] << '\n';
+            for (int k = 0; k < CAL.n[c][t]; ++k) {
+                const Desc& d = CAL.proto[c][t][k];
+                cout << d.aspect << ' ' << d.ink << ' ' << d.centre;
+                for (int i = 0; i < 36; ++i) cout << ' ' << d.g[i];
+                cout << '\n';
+            }
+        }
+    }
+
+// Piece shapes learned from the initial position, baked into the binary so
+// the engine needs no calibration file. They are still relearned whenever a
+// game starts from the initial position, which keeps them in step with any
+// change to how the site draws the pieces.
+static const char* const kBoardCal =
+    "0 0 0 1 778 4247 204 0 282 900 883 226 0 0 610 1000 1000 530 0 0 "
+    "704 1000 1000 629 0 0 352 1000 990 281 0 360 961 1000 1000 941 329 954 1000 1000 "
+    "1000 1000 953 0 1 2 926 7754 212 9 668 767 139 0 0 98 960 1000 1000 732 "
+    "38 457 1000 1000 1000 1000 500 911 996 937 1000 1000 805 526 581 937 1000 1000 961 0 "
+    "509 964 1000 993 944 926 7714 213 15 659 761 114 0 0 101 967 1000 1000 722 27 "
+    "464 1000 1000 1000 1000 468 918 996 934 1000 1000 784 522 565 941 1000 1000 930 0 526 "
+    "957 1000 986 940 0 2 2 990 5244 191 0 0 470 473 0 0 0 182 913 922 "
+    "185 0 0 614 1000 1000 629 0 0 373 1000 1000 382 0 0 373 1000 1000 379 0 "
+    "570 722 817 817 722 580 981 5277 192 0 0 453 450 0 0 0 166 891 891 160 "
+    "0 0 623 1000 1000 623 0 0 388 1000 1000 388 0 0 385 1000 1000 376 0 595 "
+    "722 827 824 722 589 0 3 2 867 6964 237 607 807 870 843 825 503 229 911 1000 "
+    "1000 870 185 0 733 1000 1000 662 0 0 762 1000 1000 677 0 281 1000 1000 1000 996 "
+    "225 919 1000 1000 1000 1000 874 858 6967 237 611 781 874 829 822 585 236 933 1000 1000 "
+    "885 211 0 788 1000 1000 666 0 0 814 1000 1000 696 0 329 1000 1000 1000 1000 274 "
+    "926 1000 1000 1000 1000 917 0 4 1 1091 7227 136 150 500 360 326 465 149 608 402 "
+    "300 266 386 634 400 713 775 772 716 353 247 1000 1000 1000 1000 195 2 833 1000 1000 "
+    "772 0 0 883 1000 994 822 0 0 5 1 990 6818 164 0 0 254 204 0 0 "
+    "99 268 620 574 274 95 871 1000 1000 1000 1000 885 725 1000 1000 1000 1000 728 35 916 "
+    "1000 1000 873 24 0 638 966 962 595 0 1 0 1 778 3960 11 0 262 914 896 "
+    "208 0 0 480 1000 1000 403 0 0 553 1000 990 487 0 0 152 959 921 116 0 "
+    "256 888 1000 1000 858 226 918 1000 1000 1000 1000 918 1 1 2 936 7575 10 11 547 "
+    "656 74 0 0 104 964 1000 1000 653 13 450 1000 1000 1000 1000 388 903 944 814 1000 "
+    "1000 715 441 421 970 1000 1000 885 0 581 944 950 944 885 865 7606 9 13 576 673 "
+    "120 0 0 155 976 1000 1000 720 32 563 1000 1000 1000 1000 458 955 779 805 1000 1000 "
+    "764 119 488 1000 1000 1000 926 0 325 473 479 473 492 1 2 2 990 5263 61 0 "
+    "0 464 453 0 0 0 182 907 907 175 0 0 635 1000 1000 620 0 0 398 1000 "
+    "1000 382 0 0 404 1000 1000 376 0 604 722 820 824 722 589 990 5203 61 0 0 "
+    "470 438 0 0 0 185 907 895 166 0 0 632 1000 1000 601 0 0 401 1000 1000 "
+    "367 0 0 398 1000 1000 358 0 586 719 811 805 700 561 1 3 2 855 6394 13 "
+    "588 814 855 814 859 492 219 874 1000 1000 819 168 0 600 1000 1000 466 0 0 648 "
+    "1000 1000 522 0 298 1000 1000 1000 992 193 866 941 945 941 972 848 862 6288 6 600 "
+    "827 899 878 854 567 223 874 1000 1000 827 189 0 600 1000 1000 466 0 0 623 1000 "
+    "1000 501 0 278 1000 1000 1000 992 205 886 1000 1000 1000 1000 878 1 4 1 1072 7267 "
+    "36 205 550 351 347 505 216 580 413 330 330 361 611 425 752 836 844 769 374 215 "
+    "997 1000 1000 992 155 0 838 1000 1000 763 0 11 750 953 947 688 0 1 5 1 "
+    "990 6836 86 0 0 257 204 0 0 114 290 623 580 293 101 897 1000 1000 1000 1000 "
+    "895 742 1000 1000 1000 1000 728 29 916 1000 1000 870 24 0 623 950 947 577 0 "
+    ;
+
+    static bool loadCal() {
+        istringstream f(kBoardCal);
+        int emptyInk = 0;
+        if (!(f >> emptyInk)) return false;
+        Cal c;
+        c.emptyInk = emptyInk;
+        for (int i = 0; i < 12; ++i) {
+            int col, t, np;
+            if (!(f >> col >> t >> np)) return false;
+            if (col < 0 || col > 1 || t < 0 || t > 5 || np < 1 || np > MAXPROTO) return false;
+            c.n[col][t] = np;
+            for (int k = 0; k < np; ++k) {
+                Desc& d = c.proto[col][t][k];
+                if (!(f >> d.aspect >> d.ink >> d.centre)) return false;
+                for (int j = 0; j < 36; ++j) if (!(f >> d.g[j])) return false;
+            }
+        }
+        c.have = 1;
+        CAL = c;
+        return true;
+    }
+
+    static void loadGeometry(const char* file = "calib.txt") {
+        ifstream f(file);
+        int x, y, c;
+        if (f >> x >> y >> c && c > 40) { BX = x; BY = y; CELL = c; }
+    }
+
+    // ------------------------------------------------------------ board & dice
+
+    // Cell index on screen = row*8 + file, row 0 is the top row of the board.
+    static Desc cellDesc(const Shot& s, int cell) {
+        return describe(s, cellX(cell & 7), cellY(cell >> 3), CELL, rel(5));
+    }
+    static Desc diceDesc(const Shot& s, int i) {
+        return describe(s, dieX(i), dieY(), dieSize(), rel(16));
+    }
+
+    static int classDist(const Desc& d, int colour, int type) {
+        int best = INT_MAX;
+        for (int k = 0; k < CAL.n[colour][type]; ++k)
+            best = min(best, descDist(d, CAL.proto[colour][type][k]));
+        return best;
+    }
+
+    // 0..5 white piece, 6..11 black piece, 12 empty, -1 unrecognised.
+    static int classify(const Desc& d, int& miss, int& gap) {
+        miss = 0; gap = 0;
+        if (d.ink <= inkEmptyLimit()) return 12;
+        if (!CAL.have) return -1;
+        int best = INT_MAX, second = INT_MAX, bi = -1;
+        for (int i = 0; i < 12; ++i) {
+            int v = classDist(d, i / 6, i % 6);
+            if (v < best) { second = best; best = v; bi = i; }
+            else if (v < second) second = v;
+        }
+        miss = best;
+        gap = second - best;
+        if (best > 2200 || gap < 200) return -1;
+        return bi;
+    }
+
+    // Returns the number of squares that had to be guessed. The site sometimes
+    // leaves a piece drawn half off the board after an animation, and refusing
+    // to read the position at all would park the engine until the clock runs
+    // out; a guessed square at worst costs one refused move.
+    static int readBoard(const Shot& s, array<int, 64>& out) {
+        int doubtful = 0;
+        for (int cell = 0; cell < 64; ++cell) {
+            Desc d = cellDesc(s, cell);
+            int miss, gap;
+            int v = classify(d, miss, gap);
+            if (v >= 0) { out[cell] = v; continue; }
+            doubtful++;
+            int best = INT_MAX, bi = 12;
+            for (int i = 0; i < 12; ++i) {
+                int q = classDist(d, i / 6, i % 6);
+                if (q < best) { best = q; bi = i; }
+            }
+            out[cell] = bi;
+        }
+        return doubtful;
+    }
+
+    // The dice always show the drawings of the side to move, so their colour is
+    // known from the clocks and never has to be guessed: matching against six
+    // shapes instead of twelve roughly triples the margin, which matters here
+    // because the outline on a die is thicker than on the board.
+    // Mean brightness of a die's red face, ignoring the drawing on it. A die
+    // that has been spent, or that has no legal move right now, is drawn dimmed.
+    static int dieGlow(const Shot& s, int i) {
+        int x0 = dieX(i), y0 = dieY(), n = dieSize(), in = rel(16);
+        long long sum = 0;
+        int cnt = 0;
+        for (int y = in; y < n - in; ++y) for (int x = in; x < n - in; ++x) {
+            uint32_t v = s.at(x0 + x, y0 + y);
+            int lum;
+            if (isInk(v, lum)) continue;
+            sum += (int)(v & 255u) + (int)((v >> 8) & 255u) + (int)((v >> 16) & 255u);
+            cnt++;
+        }
+        return cnt ? (int)(sum / (3 * cnt)) : 0;
+    }
+
+    static bool readDice(const Shot& s, int colour, array<int, 3>& types, long long* totalMiss = nullptr) {
+        if (!CAL.have || colour < 0 || colour > 1) return false;
+        long long sum = 0;
+        for (int i = 0; i < 3; ++i) {
+            Desc d = diceDesc(s, i);
+            if (d.ink < 500) return false;
+            int best = INT_MAX, second = INT_MAX, bt = -1;
+            for (int t = 0; t < 6; ++t) {
+                int v = classDist(d, colour, t);
+                if (v < best) { second = best; best = v; bt = t; }
+                else if (v < second) second = v;
+            }
+            if (best > 4000 || second - best < 400) return false;
+            types[i] = bt;
+            sum += best;
+        }
+        if (totalMiss) *totalMiss = sum;
+        return true;
+    }
+
+    // Used only when joining a game in progress. The dice cannot say which
+    // colour we are - a white and a black drawing of the same piece differ by
+    // almost nothing once the shape is normalised - but the board can: our own
+    // men sit on our own side of it.
+    static bool guessOurColour(const array<int, 64>& b, int& colour) {
+        int own[2] = { 0,0 };
+        for (int cell = 40; cell < 64; ++cell) {          // bottom three rows
+            int v = b[cell];
+            if (v >= 0 && v < 12) own[v / 6]++;
+        }
+        if (own[0] + own[1] < 4) return false;
+        if (abs(own[0] - own[1]) < 3) return false;
+        colour = own[0] > own[1] ? 0 : 1;
+        return true;
+    }
+
+    // ------------------------------------------------------------------ state
+
+    static int clockLit(const Shot& s, int x0, int y0, int x1, int y1) {
+        int n = 0;
+        for (int y = y0; y < y1; ++y) for (int x = x0; x < x1; ++x) {
+            uint32_t v = s.at(x, y);
+            int B = (int)(v & 255u), G = (int)((v >> 8) & 255u), R = (int)((v >> 16) & 255u);
+            if (R > 170 && G > 165 && B > 140) n++;
+        }
+        return n;
+    }
+    static int clockTop(const Shot& s) {
+        return clockLit(s, BX + rel(946), BY - rel(180), BX + rel(1160), BY - rel(80));
+    }
+    static int clockBottom(const Shot& s) {
+        return clockLit(s, BX + rel(946), BY + rel(1160), BX + rel(1170), BY + rel(1258));
+    }
+    // The clock of the side to move is printed in bright cream, the waiting
+    // side's is dimmed. Average brightness is not enough: the active clock sits
+    // on a dark plaque, so count the pixels above the bright threshold instead.
+    static int ourTurn(const Shot& s) {
+        int a = clockBottom(s), b = clockTop(s);
+        if (a > 60 && a > 3 * b) return 1;
+        if (b > 60 && b > 3 * a) return 0;
+        return -1;
+    }
+
+    // While the site is reconnecting it prints a white "CONNECTING" banner over
+    // the top of the page and quietly ignores every click. Measured: about 2700
+    // light pixels in that strip with the banner up against about 250 without.
+    static int reconnecting(const Shot& s) {
+        int n = 0;
+        int cx = BX + boardW() / 2;
+        for (int y = BY - rel(457); y < BY - rel(327); ++y)
+            for (int x = cx - rel(260); x < cx + rel(260); ++x) {
+                uint32_t v = s.at(x, y);
+                if ((v & 255u) > 200 && ((v >> 8) & 255u) > 200 && ((v >> 16) & 255u) > 200) n++;
+            }
+        return n > 1000;
+    }
+
+    // Dumps a region to a 24-bit BMP. Used to look at the end-of-game panel:
+    // it is on screen for about a second, which is awkward to catch by hand.
+    static void saveBmp(const Shot& s, int x0, int y0, int w, int h, const char* name) {
+        if (w <= 0 || h <= 0) return;
+        const int rowBytes = (w * 3 + 3) & ~3;
+        const int dataSize = rowBytes * h;
+        ofstream f(name, ios::binary);
+        if (!f) return;
+        unsigned char hdr[54] = { 0 };
+        hdr[0] = 'B'; hdr[1] = 'M';
+        const int fileSize = 54 + dataSize;
+        memcpy(hdr + 2, &fileSize, 4);
+        const int off = 54; memcpy(hdr + 10, &off, 4);
+        const int hsz = 40;  memcpy(hdr + 14, &hsz, 4);
+        memcpy(hdr + 18, &w, 4);
+        memcpy(hdr + 22, &h, 4);
+        const short planes = 1, bpp = 24;
+        memcpy(hdr + 26, &planes, 2); memcpy(hdr + 28, &bpp, 2);
+        memcpy(hdr + 34, &dataSize, 4);
+        f.write((char*)hdr, 54);
+        vector<unsigned char> row(rowBytes, 0);
+        for (int y = h - 1; y >= 0; --y) {
+            for (int x = 0; x < w; ++x) {
+                uint32_t v = s.at(x0 + x, y0 + y);
+                row[x * 3 + 0] = (unsigned char)(v & 255u);
+                row[x * 3 + 1] = (unsigned char)((v >> 8) & 255u);
+                row[x * 3 + 2] = (unsigned char)((v >> 16) & 255u);
+            }
+            f.write((char*)row.data(), rowBytes);
+        }
+    }
+
+    // The end-of-game panel states the verdict above the board. "ВЫ ПРОИГРАЛИ"
+    // is one letter longer than "ВЫ ВЫИГРАЛИ", so the width of the white
+    // caption tells the two apart; the pixel count is logged with it so the
+    // threshold can be set from measurement.
+    // Reads the verdict off the panel's headline. Both headlines are drawn the
+    // same way - "ВЫ" in white, the verdict itself in cream (248,215,185) - so
+    // what separates them is the length of that second word: measured 279 px
+    // for ВЫИГРАЛИ against 309 px for ПРОИГРАЛИ, one letter apart.
+    // Returns 1 won, -1 lost, 0 unreadable.
+    static int verdictFromHeader(const Shot& s, int* outWidth = nullptr) {
+        const int cx = BX + boardW() / 2;
+        int x0 = 1 << 30, x1 = -1, n = 0;
+        // Just the headline. A band that reaches lower also picks up the line
+        // underneath it ("Сбитый король" / "Закончилось время"), and that line
+        // is drawn in the same cream and is the wider of the two - which is how
+        // a loss came out as 678 px instead of 309.
+        for (int y = BY + rel(265); y < BY + rel(315); ++y)
+            for (int x = cx - rel(420); x < cx + rel(420); ++x) {
+                uint32_t v = s.at(x, y);
+                const int B = (int)(v & 255u), G = (int)((v >> 8) & 255u), R = (int)((v >> 16) & 255u);
+                if (R > 230 && G > 195 && G < 232 && B > 160 && B < 205) {
+                    ++n;
+                    if (x < x0) x0 = x;
+                    if (x > x1) x1 = x;
+                }
+            }
+        const int w = (x1 >= x0) ? (x1 - x0) : 0;
+        if (outWidth) *outWidth = w;
+        if (n < 500) return 0;                       // no headline in view
+        if (w >= rel(250) && w < rel(294)) return 1;  // ВЫИГРАЛИ
+        if (w >= rel(294) && w < rel(340)) return -1; // ПРОИГРАЛИ
+        return 0;
+    }
+
+    // The end-of-game panel puts a white "Rematch" caption below the board.
+    // Is the board actually on screen? The end-of-game panel covers the middle
+    // but never the outer ranks, so the wood there is a reliable sign. Without
+    // this the engine happily clicks away at whatever page took the tab's
+    // place - it once pressed "rematch" five times into YouTube.
+    static bool boardPresent(const Shot& s) {
+        int wood = 0, total = 0;
+        for (int r = 0; r < 8; r += 7)
+            for (int y = BY + r * CELL + 4; y < BY + (r + 1) * CELL - 4; y += 4)
+                for (int x = BX + 4; x < BX + boardW() - 4; x += 4) {
+                    uint32_t v = s.at(x, y);
+                    const int B = (int)(v & 255u), G = (int)((v >> 8) & 255u), R = (int)((v >> 16) & 255u);
+                    ++total;
+                    if (R - B > 45 && R - B < 95 && R > 130 && G > 100) ++wood;
+                }
+        return total && wood * 100 / total > 25;
+    }
+
+    static int rematchReady(const Shot& s) {
+        // The panel covers the middle of the board, so the wood there gives out.
+        // Checking the caption alone was not enough: light squares under a move
+        // highlight pass for white often enough to fire on their own.
+        {
+            const int cx = BX + boardW() / 2, cy = BY + boardW() / 2;
+            int wood = 0, total = 0;
+            for (int y = cy - CELL; y < cy + CELL; y += 3)
+                for (int x = cx - CELL; x < cx + CELL; x += 3) {
+                    uint32_t v = s.at(x, y);
+                    const int B = (int)(v & 255u), G = (int)((v >> 8) & 255u), R = (int)((v >> 16) & 255u);
+                    ++total;
+                    if (R - B > 45 && R - B < 95 && R > 130) ++wood;
+                }
+            if (total && wood * 100 / total > 25) return 0;   // board still visible
+        }
+        int n = 0;
+        int x0 = rematchX() - rel(160), x1 = rematchX() + rel(160);
+        int y0 = rematchY() - rel(40), y1 = rematchY() + rel(40);
+        for (int y = y0; y < y1; ++y) for (int x = x0; x < x1; ++x) {
+            uint32_t v = s.at(x, y);
+            int B = (int)(v & 255u), G = (int)((v >> 8) & 255u), R = (int)((v >> 16) & 255u);
+            if (R > 200 && G > 200 && B > 200) n++;
+        }
+        return n > 600;
+    }
+
+    // ------------------------------------------------------------------ mouse
+
+    static void click(int x, int y) {
+        SetCursorPos(x, y);
+        Sleep(30);
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+        Sleep(35);
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+        Sleep(30);
+    }
+    static void clickCell(int cell) {
+        click(cellX(cell & 7) + CELL / 2, cellY(cell >> 3) + CELL / 2);
+    }
+
+    // Last resort when the page has stopped taking clicks: the site sometimes
+    // drops its connection and sits there showing a live board that no longer
+    // responds, and nothing short of a reload brings it back.
+    static void reloadPage() {
+        click(BX - rel(60), BY + boardW() / 2);      // focus the page
+        Sleep(300);
+        keybd_event(VK_F5, 0, 0, 0);
+        Sleep(60);
+        keybd_event(VK_F5, 0, KEYEVENTF_KEYUP, 0);
+    }
+
+    // --------------------------------------------------------- board <-> chess
+
+    // flip = 0: we play White, the board is drawn with a1 bottom-left.
+    // flip = 1: we play Black, the board is drawn with h8 bottom-left.
+    static int cellOfSq(int sq, int flip) {
+        int r = sq >> 3, f = sq & 7;
+        return flip ? (r * 8 + (7 - f)) : ((7 - r) * 8 + f);
+    }
+    static int sqOfCell(int cell, int flip) {
+        int r = cell >> 3, f = cell & 7;
+        return flip ? (r * 8 + (7 - f)) : ((7 - r) * 8 + f);
+    }
+
+    static void boardOfPos(const Position& p, int flip, array<int, 64>& out) {
+        out.fill(12);
+        for (int sq = 0; sq < 64; ++sq) {
+            uint64_t b = bit(sq);
+            int c = (p.color[0] & b) ? 0 : ((p.color[1] & b) ? 1 : -1);
+            if (c < 0) continue;
+            for (int t = 0; t < 6; ++t) if (p.piece[t] & b) { out[cellOfSq(sq, flip)] = c * 6 + t; break; }
+        }
+    }
+
+    // ---------------------------------------------------------------- learning
+
+    // The initial position is recognisable without any learned data: four full
+    // rows of ink at the edges and four empty rows in the middle.
+    static bool looksInitial(const Shot& s, array<Desc, 64>& d, int& flip) {
+        long long lumSum = 0;
+        int lumN = 0;
+        for (int cell = 0; cell < 64; ++cell) {
+            d[cell] = cellDesc(s, cell);
+            int r = cell >> 3;
+            if (r <= 1 || r >= 6) {
+                if (d[cell].ink < 1200) return false;
+                if (r >= 6) {
+                    int L = centreLum(s, cell);
+                    if (L >= 0) { lumSum += L; lumN++; }
+                }
+            }
+            else if (d[cell].ink > 400) return false;
+        }
+        if (lumN < 8) return false;
+        flip = (lumSum / lumN) > 128 ? 0 : 1;   // bright fill at the bottom = we are White
+        return true;
+    }
+
+    static void learn(const array<Desc, 64>& d, int flip) {
+        // Back rank as it appears on screen, left to right.
+        static const int normal[8] = { 3,1,2,4,5,2,1,3 };   // a..h: R N B Q K B N R
+        static const int mirror[8] = { 3,1,2,5,4,2,1,3 };   // h..a
+        const int* order = flip ? mirror : normal;
+        const int us = flip ? 1 : 0;
+        const int them = 1 - us;
+
+        Cal c;
+        // Back-rank pieces are kept as separate prototypes; the eight pawns of
+        // a colour are identical drawings and get averaged into one.
+        auto push = [&](int colour, int type, const Desc& src) {
+            int& n = c.n[colour][type];
+            if (n < MAXPROTO) c.proto[colour][type][n++] = src;
+            };
+        struct Acc { long long g[36] = { 0 }; long long centre = 0, aspect = 0, ink = 0; int n = 0; };
+        Acc pawn[2];
+        auto addPawn = [&](int colour, const Desc& src) {
+            Acc& a = pawn[colour];
+            for (int i = 0; i < 36; ++i) a.g[i] += src.g[i];
+            a.centre += src.centre; a.aspect += src.aspect; a.ink += src.ink; a.n++;
+            };
+        for (int f = 0; f < 8; ++f) {
+            push(them, order[f], d[0 * 8 + f]);   // opponent back rank (top)
+            push(us, order[f], d[7 * 8 + f]);   // our back rank (bottom)
+            addPawn(them, d[1 * 8 + f]);
+            addPawn(us, d[6 * 8 + f]);
+        }
+        for (int col = 0; col < 2; ++col) {
+            Acc& a = pawn[col];
+            if (!a.n) return;
+            Desc p;
+            for (int i = 0; i < 36; ++i) p.g[i] = (int)(a.g[i] / a.n);
+            p.centre = (int)(a.centre / a.n);
+            p.aspect = (int)(a.aspect / a.n);
+            p.ink = (int)(a.ink / a.n);
+            c.n[col][0] = 0;
+            push(col, 0, p);
+        }
+        for (int col = 0; col < 2; ++col) for (int t = 0; t < 6; ++t) if (!c.n[col][t]) return;
+
+        c.emptyInk = 0;
+        for (int cell = 16; cell < 48; ++cell) c.emptyInk = max(c.emptyInk, d[cell].ink);
+        c.have = 1;
+        CAL = c;
+    }
+
+    // ------------------------------------------------------------ diagnostics
+
+    static void dumpBoard(const array<int, 64>& b) {
+        static const char* names = "PNBRQKpnbrqk.";
+        for (int r = 0; r < 8; ++r) {
+            string line;
+            for (int f = 0; f < 8; ++f) {
+                int v = b[r * 8 + f];
+                line += (v < 0 || v > 12) ? '?' : names[v];
+                line += ' ';
+            }
+            cout << "   " << line << '\n';
+        }
+    }
+
+    static void diagnose(int seconds) {
+        loadGeometry();
+        loadCal();
+        cout << "board " << BX << ',' << BY << " cell " << CELL
+            << " | dice y " << dieY() << " x " << dieX(0) << '/' << dieX(1) << '/' << dieX(2)
+            << " size " << dieSize()
+            << " | promo y " << promoY() << " x " << promoX(0) << ".." << promoX(3)
+            << " | rematch " << rematchX() << ',' << rematchY() << '\n';
+        auto t0 = steady_clock::now();
+        while (duration_cast<chrono::seconds>(steady_clock::now() - t0).count() < seconds) {
+            Shot s = grabAll();
+            array<Desc, 64> d;
+            int flip = -1;
+            bool init = looksInitial(s, d, flip);
+            cout << "clock top=" << clockTop(s) << " bottom=" << clockBottom(s)
+                << " turn=" << ourTurn(s)
+                << " rematch=" << rematchReady(s)
+                << " initial=" << init << " flip=" << flip
+                << " cal=" << CAL.have << " emptyInk=" << CAL.emptyInk << '\n';
+            if (init) { learn(d, flip); cout << "learned from the initial position\n"; }
+            array<int, 64> b;
+            cout << "board doubtful=" << readBoard(s, b) << '\n';
+            dumpBoard(b);
+            for (int r = 0; r < 8; ++r) {
+                cout << "   ";
+                for (int f = 0; f < 8; ++f) {
+                    Desc dd = cellDesc(s, r * 8 + f);
+                    int miss, gap;
+                    classify(dd, miss, gap);
+                    cout << setw(5) << dd.ink << ' ' << setw(5) << miss << ':' << setw(5) << gap << ' ';
+                }
+                cout << '\n';
+            }
+            int dc = -1;
+            cout << "our colour guess=" << (guessOurColour(b, dc) ? dc : -1);
+            for (int c = 0; c < 2; ++c) {
+                array<int, 3> t{}; long long mm = 0;
+                bool o = readDice(s, c, t, &mm);
+                cout << " | col" << c << " ok=" << o << " miss=" << mm;
+                if (o) { cout << " ["; for (int i = 0; i < 3; ++i) cout << pieceChar(t[i]); cout << ']'; }
+            }
+            cout << " | glow " << dieGlow(s, 0) << '/' << dieGlow(s, 1) << '/' << dieGlow(s, 2);
+            for (int i = 0; i < 3; ++i) {
+                Desc dd = diceDesc(s, i);
+                cout << "\n   die#" << i << " ink=" << dd.ink << " centre=" << dd.centre << " aspect=" << dd.aspect << ":";
+                for (int c = 0; c < 2; ++c) for (int t = 0; t < 6; ++t)
+                    cout << ' ' << (c ? (char)toupper(pieceChar(t)) : pieceChar(t)) << classDist(dd, c, t);
+            }
+            for (int i = 0; i < 3; ++i) {
+                Desc dd = diceDesc(s, i);
+                int miss, gap;
+                int v = classify(dd, miss, gap);
+                cout << "  #" << i << " ink=" << dd.ink << " -> " << v
+                    << " miss=" << miss << " gap=" << gap;
+            }
+            cout << "\n---\n";
+            Sleep(1500);
+        }
+    }
+
+    // ------------------------------------------------------------------- play
+
+    struct Player {
+        array<uint64_t, 4> path;
+        array<int, 64> mask;
+        int flip = -1;
+        int us = 0;                  // 0 = white
+        int castle = 15;
+        array<int, 64> lastBoard;    // board as we left it at the end of our turn
+        int haveLast = 0;
+        // Record of the game in progress: one entry per turn holding how many
+        // moves that roll bought, plus how the game ended.
+        vector<int> series;
+        int outcome = 0;             // 1 won, -1 lost, 0 undecided (clock, most likely)
+        time_t started = 0;
+    };
+
+    // One character per finished game, in order: W won, L lost. Nothing else -
+    // the sequence is all that is needed to work out a win rate.
+    static void logGame(const Player& pl) {
+        if (pl.outcome == 0) return;
+        ofstream f("results.txt", ios::app);
+        if (f) f << (pl.outcome > 0 ? 'W' : 'L') << flush;
+    }
+
+    // Read the board until two consecutive readings agree. A couple of guessed
+    // squares are tolerated once the clean readings have been given a chance.
+    static bool stableBoard(array<int, 64>& out, Shot& outShot, int tries) {
+        array<int, 64> prev;
+        bool havePrev = false;
+        for (int i = 0; i < tries; ++i) {
+            Shot s = grabAll();
+            array<int, 64> b;
+            int doubtful = readBoard(s, b);
+            int allow = (i < tries * 2 / 3) ? 0 : 2;
+            if (doubtful <= allow) {
+                if (havePrev && b == prev) { out = b; outShot = s; return true; }
+                prev = b; havePrev = true;
+            }
+            else havePrev = false;
+            Sleep(120);
+        }
+        return false;
+    }
+
+    // Rights are only ever removed: a king or rook that left its home square
+    // never restores the right by coming back.
+    static int castleFromBoard(const array<int, 64>& b, int flip, int have) {
+        for (int c = 0; c < 2; ++c) {
+            if (b[cellOfSq(4 + 56 * c, flip)] != c * 6 + 5) have &= ~(3 << (2 * c));
+            for (int r = 0; r < 2; ++r)
+                if (b[cellOfSq(7 * r + 56 * c, flip)] != c * 6 + 3) have &= ~(1 << (r + 2 * c));
+        }
+        return have;
+    }
+
+    static void posFromBoard(Position& p, const array<int, 64>& b, int flip, int side,
+        int castle, int diceVal, uint64_t epForSide) {
+        p.color = { 0,0 };
+        p.piece = { 0,0,0,0,0,0 };
+        for (int cell = 0; cell < 64; ++cell) {
+            int v = b[cell];
+            if (v < 0 || v >= 12) continue;
+            int sq = sqOfCell(cell, flip);
+            p.color[v / 6] |= bit(sq);
+            p.piece[v % 6] |= bit(sq);
+        }
+        p.side = side;
+        p.ep1 = { 0,0 };
+        p.ep1[side] = epForSide;
+        p.ep2 = 0;
+        p.rook = { 0,7,56,63 };
+        p.castle = castle;
+        p.dice = diceVal;
+        p.key = computeKey(p);
+    }
+
+    // The site shows the three rolled faces; the engine drops faces for piece
+    // types the side to move does not own (see makeRandomWithRolledDice).
+    static int normalizeDice(const Position& p, int diceVal) {
+        uint64_t pawns = p.color[p.side] & p.piece[0];
+        int dist = 6;
+        if (pawns) dist = (p.side == 0) ? (clz64(pawns) >> 3) : (ctz64(pawns) >> 3);
+        for (int i = 0; i < 5; ++i)
+            while (dicePiece[diceVal][i] && (p.color[p.side] & p.piece[i]) == 0 && dist > dicePiece[diceVal][0])
+                diceVal = newDice[diceVal][i];
+        return diceVal;
+    }
+
+    // En passant is only claimed when the opponent's whole turn was a single
+    // double push; anything less clear leaves the right unset, which is safe.
+    static uint64_t epFromDiff(const array<int, 64>& before, const array<int, 64>& after,
+        int flip, int us) {
+        int ch[3], nch = 0;
+        for (int c = 0; c < 64; ++c) if (before[c] != after[c]) { if (nch >= 2) return 0; ch[nch++] = c; }
+        if (nch != 2) return 0;
+        const int them = 1 - us;
+        const int pawn = them * 6 + 0;
+        int fromCell = -1, toCell = -1;
+        if (before[ch[0]] == pawn && after[ch[0]] == 12 && after[ch[1]] == pawn) { fromCell = ch[0]; toCell = ch[1]; }
+        else if (before[ch[1]] == pawn && after[ch[1]] == 12 && after[ch[0]] == pawn) { fromCell = ch[1]; toCell = ch[0]; }
+        if (fromCell < 0) return 0;
+        int from = sqOfCell(fromCell, flip), to = sqOfCell(toCell, flip);
+        if ((from ^ to) != 16) return 0;
+        if ((from >> 3) != (them == 0 ? 1 : 6)) return 0;
+        return bit((from + to) / 2);
+    }
+
+    // How much of a square's picture changed between two captures. The site
+    // does not mark the squares a piece may go to, but it does tint the square
+    // of a piece it accepts as selected - and it ignores a click on a piece
+    // that has no move, which is exactly the case the engine gets wrong.
+    static int cellChange(const Shot& a, const Shot& b, int cell) {
+        int x0 = cellX(cell & 7), y0 = cellY(cell >> 3), n = 0;
+        for (int y = rel(8); y < CELL - rel(8); y += 2) for (int x = rel(8); x < CELL - rel(8); x += 2) {
+            uint32_t p = a.at(x0 + x, y0 + y), q = b.at(x0 + x, y0 + y);
+            int d = abs((int)(p & 255u) - (int)(q & 255u))
+                + abs((int)((p >> 8) & 255u) - (int)((q >> 8) & 255u))
+                + abs((int)((p >> 16) & 255u) - (int)((q >> 16) & 255u));
+            if (d > 40) n++;
+        }
+        return n;
+    }
+
+    static int g_hintBlind = 0;   // set once the site turns out not to draw hints
+    static int g_hintMiss = 0;
+
+    // Play one engine move with the mouse and wait for the site to accept it.
+    // Returns 1 = accepted, 0 = the board went somewhere we did not expect
+    // (rebuild from the screen), -1 = the site kept refusing the move,
+    // 2 = the site will not pick that piece up, pick another move,
+    // 3 = the connection dropped; wait for it and repeat the same move.
+    static int playMove(const Position& before, const Position& after, int move, int flip) {
+        int from = move & 63, to = (move >> 6) & 63, promo = (move >> 12) & 7;
+        int target = to;
+        if (before.color[before.side] & bit(to)) {
+            // Castling is encoded as "king captures its own rook"; the site
+            // wants the king dropped on c1/g1/c8/g8.
+            int rank = (to >= 56) ? 56 : 0;
+            target = rank + (to > from ? 6 : 2);
+        }
+        array<int, 64> want, had;
+        boardOfPos(after, flip, want);
+        boardOfPos(before, flip, had);
+
+        // Squares whose occupancy the move changes - the only thing worth
+        // watching. The site tints the squares of the move it just played, and
+        // a piece on a tinted square can fall short of the recognition margin,
+        // but "the square the piece left is now empty" survives any tint.
+        vector<int> watch;
+        for (int cell = 0; cell < 64; ++cell)
+            if ((want[cell] == 12) != (had[cell] == 12)) watch.push_back(cell);
+
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            if (attempt) {
+                // Drop any half-made selection before trying again.
+                click(BX - rel(60), BY + boardW() / 2);
+                Sleep(500);
+            }
+            const int fromCell = cellOfSq(from, flip), toCell = cellOfSq(target, flip);
+            // No pre-emptive click beside the board: after a completed move the
+            // site clears the selection by itself, and parking the pointer there
+            // every time only makes the cursor jump about. A stale selection is
+            // dealt with on the retry path below.
+            Shot idle = grabAll();
+
+            // Pick the piece up. A click can simply be dropped while the site is
+            // still settling, so retry before concluding the piece cannot move.
+            bool selected = false;
+            for (int k = 0; k < 3 && !selected; ++k) {
+                clickCell(fromCell);
+                Sleep(260);
+                Shot sel = grabAll();
+                selected = cellChange(idle, sel, fromCell) >= 300;
+            }
+            if (!selected) {
+                // A dropped connection looks exactly like a piece that cannot
+                // move, so ask the page which one it is before giving up on the
+                // move: the move itself is fine, the site just is not listening.
+                if (reconnecting(grabAll())) return 3;
+                if (++g_hintMiss >= 25) { g_hintBlind = 1; cout << "[play] selection unreadable, trusting the engine\n"; }
+                if (!g_hintBlind) return 2;
+            }
+            g_hintMiss = 0;
+
+            Sleep(220);
+            clickCell(toCell);
+            if (promo) { Sleep(600); click(promoX(promo - 1), promoY()); }
+
+            auto t0 = steady_clock::now();
+            int nudges = 0;
+            for (;;) {
+                Sleep(120);
+                Shot s = grabAll();
+                int hits = 0, misses = 0;
+                for (int cell : watch) {
+                    bool isEmpty = cellDesc(s, cell).ink <= inkEmptyLimit();
+                    if (isEmpty == (want[cell] == 12)) hits++;
+                    else if (isEmpty != (had[cell] == 12)) misses++;
+                }
+                // The site drops further clicks until the server has confirmed
+                // this move, so the wait has to outlast the round trip. It runs
+                // in the mouse thread while the next position is searched, so
+                // it costs no thinking time.
+                if (hits == (int)watch.size()) { Sleep(1100); return 1; }
+                // The board moved, but not where we aimed: clicking again would
+                // only make it worse, so rebuild the position from the screen.
+                if (misses) {
+                    cout << "[play] " << moveToStr(move) << ": board changed unexpectedly\n";
+                    return 0;
+                }
+                if (!g_hintBlind && hits == 0) {
+                    const bool stillHeld = cellChange(idle, s, fromCell) >= 300;
+                    // The site drops the selection when it turns a destination
+                    // down, and the square goes back to how it looked. That is a
+                    // definite "no" and needs no waiting.
+                    if (!stillHeld) return 2;
+                    // Still holding the piece after a second means the click on
+                    // the destination went missing; another one is cheaper than
+                    // starting the whole move over.
+                    if (nudges < 2 &&
+                        duration_cast<milliseconds>(steady_clock::now() - t0).count() > 900 + 1200 * nudges) {
+                        clickCell(toCell);
+                        if (promo) { Sleep(600); click(promoX(promo - 1), promoY()); }
+                        nudges++;
+                    }
+                }
+                // Waiting on the server can take a while; only give up once the
+                // position has been standing still, unchanged, for long enough.
+                if (duration_cast<milliseconds>(steady_clock::now() - t0).count() > 5000) break;
+            }
+            cout << "[play] " << moveToStr(move) << " was not accepted, retrying\n";
+        }
+        return -1;
+    }
+
+    static void run(double firstSec) {
+        // Progress goes to the console; the only file this mode writes is
+        // results.txt, one character per finished game.
+        loadGeometry();
+        loadCal();
+        START();
+        Player pl;
+        pl.path = PATH;
+        pl.mask = MASK;
+        pl.lastBoard.fill(12);
+        size_t nodeCap, edgeCap;
+        tableSizeForTime(firstSec, nodeCap, edgeCap);
+        cout << "[play] tree " << nodeCap << " nodes / " << edgeCap << " edges\n";
+        MCTSTable T(nodeCap, edgeCap);
+
+        // One inference server for the whole session. Starting and draining it
+        // per move costs real thinking time - the batches have to ramp up again
+        // every time - and a one-second search is short enough for that to hurt.
+        InferenceServer nn(T, &g_trt, g_trt2Ready ? &g_trt2 : nullptr);
+        nn.start();
+        struct Stopper {
+            InferenceServer& s;
+            ~Stopper() noexcept { try { s.stopAndDrain(); } catch (...) {} }
+        } stopper{ nn };
+
+        cout << "[play] board " << BX << ',' << BY << " cell " << CELL
+            << ", analysis " << firstSec << " s after the roll and 1 s inside a turn\n";
+
+        int idle = 0, rejects = 0, banned = 0, sawTheirTurn = 0;
+        // Survives a broken-off series: rebuilding the position from the screen
+        // still leaves us inside the same turn, which has already had its think.
+        bool longUsed = false;
+        auto lastAccepted = steady_clock::now();
+        for (;;) {
+            Shot s = grabAll();
+
+            // Nothing at all happens unless the board is in front of us.
+            if (!boardPresent(s)) {
+                if (++idle % 60 == 0) cout << "[wait] board is not on screen\n";
+                pl.flip = -1;
+                pl.haveLast = 0;
+                lastAccepted = steady_clock::now();
+                Sleep(500);
+                continue;
+            }
+
+            if (reconnecting(s)) {
+                if (++idle % 20 == 0) cout << "[play] connection lost, waiting\n";
+                lastAccepted = steady_clock::now();
+                Sleep(1000);
+                continue;
+            }
+
+            if (rematchReady(s)) {
+                int hw = 0;
+                int said = verdictFromHeader(s, &hw);
+                // Give the panel time to be readable before dismissing it -
+                // clicking rematch first throws the result away.
+                for (int wait = 0; !said && wait < 20; ++wait) {
+                    Sleep(250);
+                    Shot again = grabAll();
+                    if (!rematchReady(again)) break;      // panel gone on its own
+                    said = verdictFromHeader(again, &hw);
+                }
+                if (said) pl.outcome = said;   // the panel is the authority
+                cout << "[play] game over ("
+                    << (pl.outcome > 0 ? "won" : pl.outcome < 0 ? "lost" : "no verdict")
+                    << ", headline " << hw << "px), clicking rematch\n";
+                logGame(pl);
+                pl.series.clear();
+                pl.outcome = 0;
+                click(rematchX(), rematchY());
+                pl.flip = -1; pl.castle = 15; pl.haveLast = 0;
+                T.newGame();
+                Sleep(1200);
+                idle = 0; rejects = 0;
+                continue;
+            }
+
+            if (pl.flip < 0) {
+                array<Desc, 64> d;
+                int flip = -1;
+                if (looksInitial(s, d, flip)) {
+                    Sleep(250);
+                    Shot s2 = grabAll();
+                    array<Desc, 64> d2;
+                    int flip2 = -1;
+                    if (looksInitial(s2, d2, flip2) && flip2 == flip) {
+                        learn(d2, flip);
+                        pl.flip = flip;
+                        pl.us = flip;
+                        pl.castle = 15;
+                        pl.haveLast = 0;
+                        pl.series.clear();
+                        pl.outcome = 0;
+                        pl.started = time(nullptr);
+                        cout << "[play] new game, we play " << (pl.us ? "black" : "white") << '\n';
+                    }
+                }
+                else {
+                    // Joining a game already in progress: the dice always show
+                    // the drawings of the side to move, so when our clock is
+                    // running their colour is our colour.
+                    array<int, 64> b;
+                    int dc = -1;
+                    if (CAL.have && ourTurn(s) == 1 && (readBoard(s, b), guessOurColour(b, dc))) {
+                        pl.flip = dc;
+                        pl.us = dc;
+                        pl.castle = 15;
+                        pl.haveLast = 0;
+                        cout << "[play] joined a running game, we play "
+                            << (pl.us ? "black" : "white") << '\n';
+                        continue;
+                    }
+                    if (++idle % 40 == 0) cout << "[play] waiting for the initial position\n";
+                }
+                Sleep(250);
+                continue;
+            }
+
+            // Our turn for minutes on end with nothing going through means the
+            // page has stopped listening; only a reload gets the game back.
+            if (duration_cast<chrono::seconds>(steady_clock::now() - lastAccepted).count() > 180) {
+                cout << "[play] no move has gone through for three minutes, reloading the page\n";
+                reloadPage();
+                pl.flip = -1; pl.haveLast = 0;
+                T.newGame();
+                lastAccepted = steady_clock::now();
+                Sleep(15000);
+                continue;
+            }
+
+            if (ourTurn(s) != 1) {
+                if (ourTurn(s) == 0) { sawTheirTurn = 1; lastAccepted = steady_clock::now(); }
+                // Watch for a king going off the board while the opponent moves.
+                // The end-of-game panel appears immediately afterwards and hides
+                // the middle of the board, so by the time it is up there is no
+                // reading the verdict off the position any more.
+                if (pl.flip >= 0 && CAL.have && ++idle % 6 == 0) {
+                    array<int, 64> b;
+                    if (readBoard(s, b) == 0) {
+                        int kings[2] = { 0, 0 };
+                        for (int cell = 0; cell < 64; ++cell)
+                            if (b[cell] == 5) kings[0]++; else if (b[cell] == 11) kings[1]++;
+                        if (!kings[pl.us]) pl.outcome = -1;
+                        else if (!kings[1 - pl.us]) pl.outcome = 1;
+                    }
+                }
+                if (idle % 60 == 0)
+                    cout << "[wait] turn=" << ourTurn(s) << " clocks " << clockBottom(s)
+                    << '/' << clockTop(s) << '\n';
+                Sleep(150);
+                continue;
+            }
+
+            // Our turn: let the roll animation settle, then read everything.
+            array<int, 64> board;
+            Shot ss;
+            if (!stableBoard(board, ss, 15)) {
+                if (++idle % 8 == 0) {
+                    Shot t = grabAll();
+                    array<int, 64> b;
+                    readBoard(t, b);
+                    cout << "[wait] board unreadable\n";
+                    dumpBoard(b);
+                }
+                Sleep(200);
+                continue;
+            }
+            if (ourTurn(ss) != 1) continue;
+
+            array<int, 3> faces{}, faces2{};
+            if (!readDice(ss, pl.us, faces)) {
+                if (++idle % 8 == 0) {
+                    cout << "[wait] dice unreadable:";
+                    for (int i = 0; i < 3; ++i) {
+                        Desc dd = diceDesc(ss, i);
+                        int miss, gap;
+                        int v = classify(dd, miss, gap);
+                        cout << " #" << i << " ink=" << dd.ink << " ->" << v
+                            << " miss=" << miss << " gap=" << gap;
+                    }
+                    cout << '\n';
+                }
+                Sleep(200);
+                continue;
+            }
+            Sleep(250);
+            Shot ss2 = grabAll();
+            if (!readDice(ss2, pl.us, faces2) || faces != faces2) { Sleep(150); continue; }
+            idle = 0;
+
+            // A dimmed die is one the site will not let us use - it has either
+            // been spent already or has no legal move at the moment. Taking the
+            // whole set on faith is what makes a rebuilt position offer moves
+            // the site then refuses over and over.
+            // A lit face measures around 60, a dimmed one around 28, so the
+            // absolute floor matters: with every face dimmed there is no move
+            // to make at all and the relative test would call them all live.
+            int glow[3], best = 0, live = 0;
+            for (int i = 0; i < 3; ++i) { glow[i] = dieGlow(ss2, i); best = max(best, glow[i]); }
+            const int lit = max(45, best * 65 / 100);
+            for (int i = 0; i < 3; ++i) if (glow[i] >= lit) live++;
+            if (!live) { Sleep(400); continue; }
+
+            // At the start of our turn the whole roll is ours even if some
+            // faces are dimmed for want of a legal move, and the engine has to
+            // see all three to apply the "use as many dice as possible" rule
+            // the way the site does. Only when we did not witness the turn
+            // change - after a rebuild, mid-series - are dimmed faces spent
+            // ones that must be dropped.
+            const bool wholeRoll = sawTheirTurn != 0;
+            sawTheirTurn = 0;
+
+            pl.castle = castleFromBoard(board, pl.flip, pl.castle);
+            uint64_t ep = pl.haveLast ? epFromDiff(pl.lastBoard, board, pl.flip, pl.us) : 0ull;
+
+            string tok, tokLive;
+            for (int i = 0; i < 3; ++i) {
+                tok += pieceChar(faces[i]);
+                if (glow[i] >= lit) tokLive += pieceChar(faces[i]);
+            }
+            if (!wholeRoll) swap(tok, tokLive);   // report the set we are sure of
+
+            Position pos;
+            posFromBoard(pos, board, pl.flip, pl.us, pl.castle, diceFenToInt(tok), ep);
+            if ((pos.color[0] & pos.piece[5]) == 0 || (pos.color[1] & pos.piece[5]) == 0) {
+                // A missing king is also how a game ends, so note who lost one
+                // before backing off - searching such a position crashes the
+                // generator.
+                if ((pos.color[pl.us] & pos.piece[5]) == 0) pl.outcome = -1;
+                else pl.outcome = 1;
+                Sleep(500);
+                continue;
+            }
+            pos.dice = normalizeDice(pos, pos.dice);
+            pos.key = computeKey(pos);
+
+            // Mid-series we cannot tell a spent die from one that is merely
+            // blocked, and the difference matters: the site applies "use as
+            // many dice as possible" to everything still in the roll. So carry
+            // a second reading with only the lit faces and play moves that are
+            // legal under both - those are accepted either way.
+            const bool partial = !wholeRoll;
+            Position posLive = pos;
+            if (partial) {
+                posLive.dice = normalizeDice(posLive, diceFenToInt(tokLive));
+                posLive.key = computeKey(posLive);
+            }
+
+            cout << "[play] roll [" << tok << "] castle=" << pl.castle
+                << (ep ? " ep" : "") << (partial ? " partial +[" + tokLive + "]" : "")
+                << " glow " << glow[0] << '/' << glow[1] << '/' << glow[2] << '\n';
+
+            // The tree serves one roll. It carries over between the positions
+            // of a turn, where it is genuinely useful, and is dropped when the
+            // dice are thrown again - everything in it then describes a roll
+            // that will not happen.
+            if (wholeRoll) T.newGame();
+            else {
+                const bool aborted = T.abort.load(memory_order_relaxed);
+                const double fill = (double)T.edgeTop.load(memory_order_relaxed) / (double)T.edges.size();
+                if (aborted || fill > 0.75) T.newGame();
+            }
+
+            auto listMoves = [&](const Position& p, MoveList& ml, int& term) {
+                Position tmp = p;
+                genLegal(tmp, pl.path, pl.mask, ml, term);
+                };
+            auto holds = [](const MoveList& ml, int mv) {
+                for (int i = 0; i < ml.n; ++i) if (ml.m[i] == mv) return true;
+                return false;
+                };
+            float lastEval = 0.5f, lastDepth = 0.0f;
+            double lastSec = 0.0;
+            // Candidates for the position currently on the board, best first.
+            // Keeping the whole list means a destination the site turns down can
+            // be replaced without searching again.
+            vector<int> cand, candNext;
+            // The long think belongs to the first position of the turn that
+            // actually offers a choice: forced moves are played straight away
+            // and must not eat it, and it is spent once per turn - not once per
+            // attempt at the turn.
+            if (wholeRoll) longUsed = false;
+            auto chooseMove = [&](const Position& p, const Position& pLive,
+                vector<int>& out, int& outTerm,
+                const atomic<bool>* stopWith = nullptr) -> bool {
+                    MoveList mlAll; int termAll = 0;
+                    listMoves(p, mlAll, termAll);
+                    if (mlAll.n == 0) return false;             // dice spent, turn over
+                    MoveList mlLive = mlAll;
+                    if (partial) { int t; listMoves(pLive, mlLive, t); }
+                    outTerm = termAll;
+
+                    out.clear();
+                    for (int i = 0; i < mlAll.n; ++i)
+                        if (!partial || holds(mlLive, mlAll.m[i])) out.push_back(mlAll.m[i]);
+                    if (out.empty()) for (int i = 0; i < mlLive.n; ++i) out.push_back(mlLive.m[i]);
+                    // Nothing to think about when there is only one move.
+                    if (out.size() == 1) { lastSec = 0.0; lastDepth = 0.0f; return true; }
+
+                    // The turn's one real think is the first position with a
+                    // choice. Anything after that only exists to fill the time
+                    // the mouse spends placing the previous move, so it runs
+                    // until that move is confirmed instead of a fixed second.
+                    const double sec = stopWith ? 600.0 : firstSec;
+                    longUsed = true;
+                    const auto tSearch = steady_clock::now();
+
+                    Position root = p;
+                    vector<moveState> rm;
+                    vector<int> pv;
+                    mctsBatchedMT(T, root, pl.path, pl.mask, sec,
+                        lastEval, lastDepth, rm, pv, 0, 0, autoSearchThreads(), true,
+                        nullptr, &nn, /*stopOnWin=*/true, 0, 0.0, stopWith);
+                    lastSec = duration<double>(steady_clock::now() - tSearch).count();
+
+                    // Most-visited move first: the search returns its root moves
+                    // reordered by the dif heuristic, which is a reporting aid,
+                    // not the move to play.
+                    vector<const moveState*> byVisits;
+                    byVisits.reserve(rm.size());
+                    for (const moveState& ms : rm) byVisits.push_back(&ms);
+                    stable_sort(byVisits.begin(), byVisits.end(),
+                        [](const moveState* a, const moveState* b) {
+                            if (a->visits != b->visits) return a->visits > b->visits;
+                            return a->eval > b->eval;
+                        });
+                    vector<int> order;
+                    order.reserve(byVisits.size() + mlLive.n);
+                    for (const moveState* ms : byVisits) order.push_back(ms->move);
+                    for (int i = 0; i < mlLive.n; ++i) order.push_back(mlLive.m[i]);
+                    (void)pv;
+
+                    out.clear();
+                    for (int mv : order) {
+                        if (!holds(mlAll, mv)) continue;
+                        if (partial && !holds(mlLive, mv)) continue;
+                        if (find(out.begin(), out.end(), mv) != out.end()) continue;
+                        out.push_back(mv);
+                    }
+                    if (out.empty()) for (int i = 0; i < mlLive.n; ++i) out.push_back(mlLive.m[i]);
+                    return !out.empty();
+                };
+
+            bool broke = false;
+            int term = 0, nextTerm = 0;
+            int played = 0;               // moves this roll actually bought
+            if (chooseMove(pos, posLive, cand, term)) {
+                for (int step = 0; step < 24 && !cand.empty(); ++step) {
+                    const int move = cand.front();
+                    Position after = pos;
+                    makeMove(after, pl.mask, move);
+                    Position afterLive = posLive;
+                    if (partial) makeMove(afterLive, pl.mask, move);
+
+                    cout << "[play] " << moveToStr(move) << "  eval " << fixed << setprecision(3)
+                        << lastEval << " depth " << setprecision(1) << lastDepth
+                        << " t " << lastSec << '\n';
+
+                    // The mouse works while the next position is searched, so
+                    // the engine never sits idle waiting for the site.
+                    atomic<int> res{ -2 };
+                    atomic<bool> placed{ false };
+                    const Position beforeCopy = pos, afterCopy = after;
+                    const int mv = move, fl = pl.flip;
+                    thread mover([&res, &placed, beforeCopy, afterCopy, mv, fl] {
+                        res.store(playMove(beforeCopy, afterCopy, mv, fl));
+                        placed.store(true);
+                        });
+
+                    bool haveNext = false;
+                    candNext.clear();
+                    if (!term) haveNext = chooseMove(after, afterLive, candNext, nextTerm, &placed);
+                    mover.join();
+
+                    const int r = res.load();
+                    if (r == 3) {
+                        // Nothing about the position has changed - the site
+                        // simply was not listening. Sit out the reconnect and
+                        // play the very same move, no rereading, no reshuffling
+                        // of candidates.
+                        cout << "[play] connection lost, waiting for it to come back\n";
+                        for (int waited = 0; waited < 600; ++waited) {
+                            Sleep(1000);
+                            if (!reconnecting(grabAll())) break;
+                        }
+                        cout << "[play] connection back, repeating " << moveToStr(move) << '\n';
+                        lastAccepted = steady_clock::now();
+                        Sleep(1500);
+                        --step;              // a reconnect is not an attempt
+                        continue;
+                    }
+                    if (r == 2) {
+                        // The site does not offer this destination. Nothing has
+                        // moved, so just drop the move and take the next
+                        // candidate for the same position.
+                        cout << "[play] " << moveToStr(move) << ": the site will not pick that piece up\n";
+                        const int stuck = move & 63;
+                        cand.erase(remove_if(cand.begin(), cand.end(),
+                            [stuck](int m) { return (m & 63) == stuck; }), cand.end());
+                        continue;
+                    }
+                    if (r != 1) {
+                        if (r < 0) {
+                            banned = move;
+                            MoveList ml; int t;
+                            listMoves(pos, ml, t);
+                            array<int, 64> shown;
+                            boardOfPos(pos, pl.flip, shown);
+                            cout << "[play] refused position, dice " << diceIntToFen(pos.dice)
+                                << (partial ? " live " + diceIntToFen(posLive.dice) : "")
+                                << ", side " << (pos.side ? "black" : "white")
+                                << ", castle " << pos.castle << ", step " << step << '\n';
+                            dumpBoard(shown);
+                            cout << "[play] legal:";
+                            for (int i = 0; i < ml.n; ++i) cout << ' ' << moveToStr(ml.m[i]);
+                            cout << '\n';
+                        }
+                        broke = true;
+                        break;
+                    }
+                    banned = 0;
+                    lastAccepted = steady_clock::now();
+                    ++played;
+                    pos = after;
+                    posLive = afterLive;
+                    if (term) {                           // king captured, game over
+                        pl.outcome = 1;
+                        broke = true;
+                        break;
+                    }
+                    if (!haveNext) break;                 // dice spent, turn over
+                    cand = candNext;
+                    term = nextTerm;
+                }
+            }
+
+            if (played) pl.series.push_back(played);
+
+            if (broke) {
+                // Our model of the position disagrees with the site - almost
+                // always a misread die. Keep the colour (it cannot change
+                // inside a game) and rebuild everything else from the screen.
+                pl.haveLast = 0;
+                ++rejects;
+                if (rejects >= 3) {
+                    // Either the site lost its connection or our reading is
+                    // wrong in a way rereading will not fix; hammering it with
+                    // clicks only burns the clock.
+                    cout << "[play] " << rejects << " rejected turns in a row, waiting\n";
+                    Sleep(min(30000, 3000 * rejects));
+                }
+                else Sleep(1200);
+                continue;
+            }
+            rejects = 0;
+
+            boardOfPos(pos, pl.flip, pl.lastBoard);
+            pl.haveLast = 1;
+            pl.castle = pos.castle;
+            Sleep(300);
+        }
+    }
+
+}   // namespace SP
+
 int main() {
     // Unbuffered stdout: progress lines reach redirected log files immediately
     // (std::cout syncs with stdio, so this covers all engine output).
     setvbuf(stdout, nullptr, _IONBF, 0);
+    SetProcessDPIAware();   // screen modes work in physical pixels
     try {
         const std::string ptFile = "net.pt";
         const std::string emaFile = "net_ema.pt";
         const std::string planFile = "net.plan";
 
-        std::cout << "Enter FEN (or '960' for a random Chess960 position, '-' for Training):\n";
+        std::cout << "Enter FEN ('960' random Chess960, '-' Training, 'd' screen diagnostics,\n"
+            "a whole number of seconds = play on screen with that much analysis after the roll):\n";
         std::string fen;
         std::getline(std::cin, fen);
+        while (!fen.empty() && (fen.back() == '\r' || fen.back() == ' ')) fen.pop_back();
+
+        // Screen diagnostics need no net: print the geometry and what is read.
+        if (fen == "d") {
+            SP::diagnose(120);
+            return 0;
+        }
+        // A bare number selects the play-on-screen mode.
+        bool playMode = !fen.empty() && fen.find_first_not_of("0123456789") == std::string::npos;
+        double playSeconds = playMode ? atof(fen.c_str()) : 0.0;
+        if (playMode && playSeconds < 1.0) playSeconds = 1.0;
 
         if (fen == "widen192") {
             // Reads "srcNet.pt srcEma.pt" from the next stdin line;
@@ -11924,11 +14035,14 @@ int main() {
             unsigned t1 = 2; int r1 = 1; int d1 = 1; int o1 = 0; int pp1 = 1;
             unsigned t2 = 1; int r2 = 0; int d2 = 0; int o2 = 0; int pp2 = 0;
             double moveMs = 400.0;
+            int a1 = 0, a2 = 0;          // adaptive time management
+            double bankSec = 0.0;        // per-game clock shared by both sides
             {
                 std::string cfgLine;
                 if (std::getline(std::cin, cfgLine) && !cfgLine.empty()) {
                     std::istringstream is(cfgLine);
-                    is >> t1 >> r1 >> d1 >> o1 >> pp1 >> t2 >> r2 >> d2 >> o2 >> pp2 >> moveMs;
+                    is >> t1 >> r1 >> d1 >> o1 >> pp1 >> t2 >> r2 >> d2 >> o2 >> pp2 >> moveMs
+                        >> a1 >> a2 >> bankSec;
                 }
             }
             if (o1 || o2) {
@@ -11939,6 +14053,8 @@ int main() {
             }
             AbPlayerCfg p1Cfg{ t1, r1 != 0, d1 != 0, o1 != 0, pp1 != 0 };
             AbPlayerCfg p2Cfg{ t2, r2 != 0, d2 != 0, o2 != 0, pp2 != 0 };
+            p1Cfg.adaptive = a1; p1Cfg.bankSec = bankSec;
+            p2Cfg.adaptive = a2; p2Cfg.bankSec = bankSec;
             MatchStatsGeneric st = runAbStrengthMatch(100000, moveMs / 1000.0, p1Cfg, p2Cfg);
             std::cout << "[ab] final W/L/D="
                 << st.p1Wins << '/' << st.p2Wins << '/' << st.draws << std::endl;
@@ -11966,6 +14082,20 @@ int main() {
             if (g_trt2Ready) { g_trt2.shutdown(); g_trt2Ready = false; }
             return 0;
         }
+        if (fen == "difprobe") {
+            int n = 60; double sec = 1.0;
+            std::string cfgLine;
+            if (std::getline(std::cin, cfgLine) && !cfgLine.empty()) {
+                std::istringstream is(cfgLine);
+                is >> n >> sec;
+            }
+            difProbe(n, sec);
+            std::lock_guard<std::mutex> lk(g_trtMutex);
+            g_trt.shutdown();
+            g_trtReady = false;
+            if (g_trt2Ready) { g_trt2.shutdown(); g_trt2Ready = false; }
+            return 0;
+        }
         if (fen == "match") {
             MatchStatsGeneric st = runTimedPvMatch(10000);
             std::cout << "[timed-pv-match] final p1/p2/draw="
@@ -11975,6 +14105,10 @@ int main() {
             g_trt.shutdown();
             g_trtReady = false;
             if (g_trt2Ready) { g_trt2.shutdown(); g_trt2Ready = false; }
+            return 0;
+        }
+        if (playMode) {
+            SP::run(playSeconds);
             return 0;
         }
         if (fen == "s") {
