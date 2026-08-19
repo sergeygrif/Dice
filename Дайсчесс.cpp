@@ -13287,6 +13287,17 @@ static const char* const kBoardCal =
         // did not play, and its verdict is not ours to record. One that appears
         // after we have seen a live board is.
         if (g_results) g_results << (pl.outcome > 0 ? 'W' : 'L') << flush;
+
+        static long long total = 0, wins = 0, streak = 0;
+        ++total;
+        if (pl.outcome > 0) { ++wins; ++streak; }
+        else streak = 0;
+        if (total % 100 == 0)
+            cout << "[stats] " << total << " games, win rate "
+            << fixed << setprecision(1) << (100.0 * wins / total) << "%\n"
+            << setprecision(6);
+        if (streak >= 15)
+            cout << "[stats] winning streak of " << streak << '\n';
     }
 
     // Read the board until two consecutive readings agree. A couple of guessed
