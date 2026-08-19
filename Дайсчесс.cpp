@@ -2337,6 +2337,11 @@ static void diagLogLine(const std::string& msg) {
     if (g_diagFile.is_open()) {
         g_diagFile << line.str() << std::endl;
     }
+    // Also to stdout, so a captured run needs no second file to be complete.
+    // These lines are rare and they are the ones worth having in order with the
+    // play log: a stall report or a crash means nothing without knowing what the
+    // engine was doing in the moves before it.
+    std::cout << line.str() << std::endl;
 }
 
 static void onTerminateHandler() noexcept {
@@ -2382,7 +2387,9 @@ static LONG WINAPI topLevelExceptionFilter(EXCEPTION_POINTERS* ep) {
 #endif
 
 static void installCrashDiagnostics() {
-    diagInit("crash.log");
+    // No separate file: diagLogLine writes to stdout, and stdout is where the
+    // play log already goes. A crash record is worth having next to the moves
+    // that led to it, not in a second file that has to be lined up by hand.
     std::set_terminate(onTerminateHandler);
 
     std::signal(SIGABRT, onSignalHandler);
@@ -12714,7 +12721,7 @@ namespace SP {
 
     // Prints the current shapes in the format of kBoardCal below, for pasting
     // back into the source if the site ever changes how it draws the pieces.
-    // Nothing is written to disk: results.txt is the only file this mode keeps.
+    // Nothing is written to disk: this mode keeps no files of its own.
     static void dumpCal() {
         cout << CAL.emptyInk << '\n';
         for (int c = 0; c < 2; ++c) for (int t = 0; t < 6; ++t) {
@@ -13345,21 +13352,24 @@ static const char* const kBoardCal =
 
     // Opened fresh at the start of every run, so the file always holds the
     // results of the session in front of you and nothing older.
-    static ofstream g_results;
-
-    // One character per finished game, in order: W won, L lost. Nothing else -
-    // the sequence is all that is needed to work out a win rate.
+    // One line per finished game, into the run's only log: the verdict, the
+    // running tally and the rate. This used to be a single character in a file
+    // of its own; the file is gone, and the line carries more than the character
+    // did - a score read straight off the log needs no second place to look.
     static void logGame(const Player& pl) {
-        if (pl.outcome == 0) return;
         // A panel that was already there when we started belongs to a game we
         // did not play, and its verdict is not ours to record. One that appears
         // after we have seen a live board is.
-        if (g_results) g_results << (pl.outcome > 0 ? 'W' : 'L') << flush;
+        if (pl.outcome == 0) return;
 
         static long long total = 0, wins = 0, streak = 0;
         ++total;
         if (pl.outcome > 0) { ++wins; ++streak; }
         else streak = 0;
+        cout << "[game] " << total << ' ' << (pl.outcome > 0 ? 'W' : 'L')
+            << "  won " << wins << " lost " << (total - wins)
+            << "  rate " << fixed << setprecision(1) << (100.0 * wins / total) << "%\n"
+            << setprecision(6);
         if (total % 100 == 0)
             cout << "[stats] " << total << " games, win rate "
             << fixed << setprecision(1) << (100.0 * wins / total) << "%\n"
@@ -13624,9 +13634,9 @@ static const char* const kBoardCal =
     }
 
     static void run(double firstSec) {
-        // Progress goes to the console; the only file this mode writes is
-        // results.txt, one character per finished game, started anew each run.
-        g_results.open("results.txt", ios::trunc);
+        // This mode writes no files at all. Everything - progress, results,
+        // stalls, crashes - goes to stdout, so a run is one log and nothing
+        // else, emptied by the redirection that creates it.
         loadGeometry();
         loadCal();
         START();
@@ -13667,11 +13677,62 @@ static const char* const kBoardCal =
         // still leaves us inside the same turn, which has already had its think.
         bool longUsed = false;
         auto lastAccepted = steady_clock::now();
+        // Standing still is not the same as being stuck, and the difference is
+        // the reason. `lastAccepted` cannot tell them apart: it is refreshed
+        // whenever the opponent is to move, whenever the board is off screen and
+        // whenever the site is reconnecting, so a stall in any of those states
+        // keeps it forever young. This second clock counts only real progress -
+        // a move the site took, a game finished, a game begun - and every branch
+        // that goes round without progress says which branch it was. When the
+        // clock runs out the state that produced it is dumped whole, because a
+        // stall reported without its cause costs a rerun to diagnose.
+        auto lastProgress = steady_clock::now();
+        auto lastStallReport = steady_clock::now();
+        const char* stallWhy = "starting up";
+        long long stallPasses = 0;
         for (;;) try {
             Shot s = grabAll();
+            ++stallPasses;
+
+            // A lost connection is the site's fault and it heals itself; it is
+            // the one wait that is not worth an alarm.
+            if (!reconnecting(s)) {
+                const auto nowS = steady_clock::now();
+                const long long stuck =
+                    duration_cast<chrono::seconds>(nowS - lastProgress).count();
+                if (stuck >= 90
+                    && duration_cast<chrono::seconds>(nowS - lastStallReport).count() >= 60) {
+                    lastStallReport = nowS;
+                    ostringstream why;
+                    why << "[stall] no move has gone through for " << stuck
+                        << " s, spinning in: " << stallWhy
+                        << " (" << stallPasses << " passes)";
+                    diagLogLine(why.str());   // reaches stdout as well
+
+                    // Everything the decision rests on, in one place.
+                    array<int, 3> f{};
+                    const bool diceOk = pl.us >= 0 && readDice(s, pl.us, f);
+                    cout << "[stall] turn=" << ourTurn(s)
+                        << " clocks " << clockBottom(s) << '/' << clockTop(s)
+                        << " board=" << boardPresent(s)
+                        << " panel=" << rematchReady(s)
+                        << " flip=" << pl.flip
+                        << " castle=" << pl.castle
+                        << " ep=" << (pl.epPending ? sqName(ctz64(pl.epPending)) : "none")
+                        << " watching=" << pl.haveWatch << '\n';
+                    cout << "[stall] dice";
+                    if (diceOk) { cout << " ["; for (int i = 0; i < 3; ++i) cout << pieceChar(f[i]); cout << ']'; }
+                    else cout << " unreadable";
+                    cout << " glow " << dieGlow(s, 0) << '/' << dieGlow(s, 1) << '/' << dieGlow(s, 2) << '\n';
+                    array<int, 64> sb;
+                    cout << "[stall] board doubtful=" << readBoard(s, sb) << '\n';
+                    dumpBoard(sb);
+                }
+            }
 
             // Nothing at all happens unless the board is in front of us.
             if (!boardPresent(s)) {
+                stallWhy = "the board is not on screen";
                 if (++idle % 60 == 0) cout << "[wait] board is not on screen\n";
                 pl.flip = -1;
                 pl.haveLast = 0;
@@ -13681,6 +13742,7 @@ static const char* const kBoardCal =
             }
 
             if (reconnecting(s)) {
+                stallWhy = "the site is reconnecting";
                 if (++idle % 20 == 0) cout << "[play] connection lost, waiting\n";
                 lastAccepted = steady_clock::now();
                 Sleep(1000);
@@ -13769,6 +13831,11 @@ static const char* const kBoardCal =
                     break;
                 }
                 idle = 0; rejects = 0; havePend = 0;
+                // A game finished and another begun is progress too, even if the
+                // finished one ended without us moving.
+                lastProgress = steady_clock::now();
+                stallPasses = 0;
+                stallWhy = "a new game has just started";
                 continue;
             }
 
@@ -13819,6 +13886,7 @@ static const char* const kBoardCal =
                             << (pl.us ? "black" : "white") << '\n';
                         continue;
                     }
+                    stallWhy = "our colour has not been established";
                     if (++idle % 40 == 0) cout << "[play] waiting for the initial position\n";
                 }
                 Sleep(250);
@@ -13838,6 +13906,7 @@ static const char* const kBoardCal =
             }
 
             if (ourTurn(s) != 1) {
+                stallWhy = "waiting for the opponent to move";
                 if (ourTurn(s) == 0) { sawTheirTurn = 1; lastAccepted = steady_clock::now(); }
                 // Watch for a king going off the board while the opponent moves.
                 // The end-of-game panel appears immediately afterwards and hides
@@ -13948,6 +14017,7 @@ static const char* const kBoardCal =
             array<int, 64> board;
             Shot ss;
             if (!stableBoard(board, ss, 15)) {
+                stallWhy = "the board will not read the same way twice";
                 if (++idle % 8 == 0) {
                     Shot t = grabAll();
                     array<int, 64> b;
@@ -13958,10 +14028,11 @@ static const char* const kBoardCal =
                 Sleep(200);
                 continue;
             }
-            if (ourTurn(ss) != 1) continue;
+            if (ourTurn(ss) != 1) { stallWhy = "the turn changed while we were reading"; continue; }
 
             array<int, 3> faces{}, faces2{};
             if (!readDice(ss, pl.us, faces)) {
+                stallWhy = "the dice cannot be read";
                 if (++idle % 8 == 0) {
                     cout << "[wait] dice unreadable:";
                     for (int i = 0; i < 3; ++i) {
@@ -13978,7 +14049,11 @@ static const char* const kBoardCal =
             }
             Sleep(250);
             Shot ss2 = grabAll();
-            if (!readDice(ss2, pl.us, faces2) || faces != faces2) { Sleep(150); continue; }
+            if (!readDice(ss2, pl.us, faces2) || faces != faces2) {
+                stallWhy = "the dice will not read the same way twice";
+                Sleep(150);
+                continue;
+            }
             idle = 0;
 
             // A dimmed die is one the site will not let us use - it has either
@@ -13992,7 +14067,11 @@ static const char* const kBoardCal =
             for (int i = 0; i < 3; ++i) { glow[i] = dieGlow(ss2, i); best = max(best, glow[i]); }
             const int lit = max(45, best * 65 / 100);
             for (int i = 0; i < 3; ++i) if (glow[i] >= lit) live++;
-            if (!live) { Sleep(400); continue; }
+            if (!live) {
+                stallWhy = "every die is dim - the site is offering no move at all";
+                Sleep(400);
+                continue;
+            }
 
             // At the start of our turn the whole roll is ours even if some
             // faces are dimmed for want of a legal move, and the engine has to
@@ -14041,6 +14120,7 @@ static const char* const kBoardCal =
                 // generator.
                 if ((pos.color[pl.us] & pos.piece[5]) == 0) pl.outcome = -1;
                 else pl.outcome = 1;
+                stallWhy = "a king is missing from the board as read";
                 Sleep(500);
                 continue;
             }
@@ -14059,6 +14139,7 @@ static const char* const kBoardCal =
                     if (++noMove % 20 == 1)
                         cout << "[play] no legal move in the position as read (roll ["
                         << tok << "], ep " << (ep ? "yes" : "no") << ")\n";
+                    stallWhy = "no legal move in the position as read";
                     sawTheirTurn = wholeRoll;
                     Sleep(400);
                     continue;
@@ -14281,6 +14362,11 @@ static const char* const kBoardCal =
                     }
                     banned = 0;
                     lastAccepted = steady_clock::now();
+                    // A move the site took is the only unambiguous proof that the
+                    // whole chain - screen, reading, search, mouse - is alive.
+                    lastProgress = lastAccepted;
+                    stallPasses = 0;
+                    stallWhy = "playing normally";
                     ++played;
                     pos = after;
                     posLive = afterLive;
@@ -14303,6 +14389,7 @@ static const char* const kBoardCal =
                 // inside a game) and rebuild everything else from the screen.
                 pl.haveLast = 0;
                 ++rejects;
+                stallWhy = "the site keeps refusing the moves we offer";
                 if (rejects >= 3) {
                     // Either the site lost its connection or our reading is
                     // wrong in a way rereading will not fix; hammering it with
