@@ -13544,6 +13544,7 @@ static const char* const kBoardCal =
         // Set once a live board has been seen, so a panel that was on screen
         // from the outset is recognised as belonging to an earlier game.
         bool sawLiveBoard = false;
+        auto lastMoveAt = steady_clock::now();   // for timing the gap between moves
         // Survives a broken-off series: rebuilding the position from the screen
         // still leaves us inside the same turn, which has already had its think.
         bool longUsed = false;
@@ -13777,6 +13778,10 @@ static const char* const kBoardCal =
             // of a turn, where it is genuinely useful, and is dropped when the
             // dice are thrown again - everything in it then describes a roll
             // that will not happen.
+            // The long think belongs to the roll, not to the attempt: a series
+            // rebuilt from the screen mid-turn has already had it.
+            if (wholeRoll) longUsed = false;
+
             if (wholeRoll) T.newGame();
             else {
                 const bool aborted = T.abort.load(memory_order_relaxed);
@@ -13824,7 +13829,10 @@ static const char* const kBoardCal =
                     // choice. Anything after that only exists to fill the time
                     // the mouse spends placing the previous move, so it runs
                     // until that move is confirmed instead of a fixed second.
-                    const double sec = stopWith ? 600.0 : firstSec;
+                    // One long think per roll. A position reread mid-turn gets
+                    // only a short one, because the roll's think is spent.
+                    const double sec = stopWith ? 600.0
+                        : (longUsed ? min(2.0, firstSec) : firstSec);
                     longUsed = true;
                     const auto tSearch = steady_clock::now();
 
@@ -13875,9 +13883,12 @@ static const char* const kBoardCal =
                     Position afterLive = posLive;
                     if (partial) makeMove(afterLive, pl.mask, move);
 
+                    const auto tStep = steady_clock::now();
                     cout << "[play] " << moveToStr(move) << "  eval " << fixed << setprecision(3)
                         << lastEval << " depth " << setprecision(1) << lastDepth
-                        << " t " << lastSec << '\n';
+                        << " t " << lastSec
+                        << " gap " << duration<double>(tStep - lastMoveAt).count() << '\n';
+                    lastMoveAt = tStep;
 
                     // The mouse works while the next position is searched, so
                     // the engine never sits idle waiting for the site.
