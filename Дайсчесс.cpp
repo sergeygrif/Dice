@@ -12900,15 +12900,75 @@ static const char* const kBoardCal =
     // colour we are - a white and a black drawing of the same piece differ by
     // almost nothing once the shape is normalised - but the board can: our own
     // men sit on our own side of it.
+    // The rank label in the bottom-left corner says which way the board is
+    // drawn: "1" there means White is at the bottom, "8" means Black is. The
+    // label is a shade of the wood rather than ink, so it is found by how much
+    // it differs from the square's own colour; "1" measures about 11 px across,
+    // "8" is half again as wide. Unlike counting pieces this works in an
+    // endgame, where there may be nothing left to count.
+    static int colourFromCornerDigit(const Shot& s, int* outWidth = nullptr, int* outN = nullptr) {
+        const int x0 = BX + rel(4), y0 = BY + 7 * CELL + rel(8);
+        const int w = rel(22), h = rel(30);
+        int hist[4096] = { 0 };
+        auto bucket = [](uint32_t v) {
+            return (int)(((v >> 20) & 15) | (((v >> 12) & 15) << 4) | (((v >> 4) & 15) << 8));
+            };
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) hist[bucket(s.at(x0 + x, y0 + y))]++;
+        int bg = 0, best = -1;
+        for (int i = 0; i < 4096; ++i) if (hist[i] > best) { best = hist[i]; bg = i; }
+        // Average the pixels of the winning bucket rather than reconstructing a
+        // colour from the bucket index: the index is quantised to 16 levels, and
+        // the rounding error alone exceeds the threshold below, which made every
+        // pixel look unlike the background.
+        long long sR = 0, sG = 0, sB = 0, cnt = 0;
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                uint32_t v = s.at(x0 + x, y0 + y);
+                if (bucket(v) != bg) continue;
+                sB += (int)(v & 255u); sG += (int)((v >> 8) & 255u); sR += (int)((v >> 16) & 255u);
+                ++cnt;
+            }
+        if (!cnt) return -1;
+        const int bR = (int)(sR / cnt), bG = (int)(sG / cnt), bB = (int)(sB / cnt);
+
+        int n = 0, ax = 1 << 30, zx = -1;
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                uint32_t v = s.at(x0 + x, y0 + y);
+                const int B = (int)(v & 255u), G = (int)((v >> 8) & 255u), R = (int)((v >> 16) & 255u);
+                if (abs(R - bR) + abs(G - bG) + abs(B - bB) < 40) continue;
+                ++n;
+                if (x < ax) ax = x;
+                if (x > zx) zx = x;
+            }
+        const int width = (zx >= ax) ? (zx - ax + 1) : 0;
+        if (outWidth) *outWidth = width;
+        if (outN) *outN = n;
+        if (n < 40 || zx < ax) return -1;
+        if (width <= rel(13)) return 0;    // "1": White at the bottom
+        if (width >= rel(15)) return 1;    // "8": Black at the bottom
+        return -1;
+    }
+
     static bool guessOurColour(const array<int, 64>& b, int& colour) {
-        int own[2] = { 0,0 };
-        for (int cell = 40; cell < 64; ++cell) {          // bottom three rows
-            int v = b[cell];
-            if (v >= 0 && v < 12) own[v / 6]++;
+        // Which colour sits lower on screen, measured as the mean row of its
+        // men. Counting pieces in the bottom rows fails in an endgame - four
+        // pieces on the board and there is nothing to count - whereas the mean
+        // row still separates the sides cleanly.
+        long long sum[2] = { 0,0 };
+        int cnt[2] = { 0,0 };
+        for (int cell = 0; cell < 64; ++cell) {
+            const int v = b[cell];
+            if (v < 0 || v >= 12) continue;
+            sum[v / 6] += cell >> 3;
+            cnt[v / 6]++;
         }
-        if (own[0] + own[1] < 4) return false;
-        if (abs(own[0] - own[1]) < 3) return false;
-        colour = own[0] > own[1] ? 0 : 1;
+        if (!cnt[0] || !cnt[1]) return false;
+        const double avgWhite = (double)sum[0] / cnt[0];
+        const double avgBlack = (double)sum[1] / cnt[1];
+        if (fabs(avgWhite - avgBlack) < 1.0) return false;
+        colour = avgWhite > avgBlack ? 0 : 1;
         return true;
     }
 
@@ -13198,6 +13258,32 @@ static const char* const kBoardCal =
         }
     }
 
+    // A coarse brightness map of a rectangle, in characters. Buttons under the
+    // board have no fixed drawing to match against, so the only honest way to
+    // find them is to look at the strip and read off where the ink sits.
+    static void dumpStrip(const Shot& s, int x0, int y0, int x1, int y1, int step) {
+        cout << "strip x " << x0 << ".." << x1 << " y " << y0 << ".." << y1
+            << " step " << step << '\n';
+        cout << "      ";
+        for (int x = x0, col = 0; x < x1; x += step, ++col)
+            cout << (col % 10 == 0 ? (char)('0' + (col / 10) % 10) : ' ');
+        cout << '\n';
+        for (int y = y0; y < y1; y += step) {
+            cout << setw(5) << y << ' ';
+            for (int x = x0; x < x1; x += step) {
+                const uint32_t p = s.at(x, y);
+                const int r = (p >> 16) & 255, g = (p >> 8) & 255, b = p & 255;
+                const int lum = (r * 77 + g * 151 + b * 28) >> 8;
+                cout << " .:-=+*#%@"[min(9, lum / 26)];
+            }
+            cout << '\n';
+        }
+        cout << "      ";
+        for (int x = x0, col = 0; x < x1; x += step, ++col)
+            cout << (col % 10 == 0 ? (char)('0' + (col / 10) % 10) : ' ');
+        cout << "\n      column c is x = " << x0 << " + c*" << step << '\n';
+    }
+
     static void diagnose(int seconds) {
         loadGeometry();
         loadCal();
@@ -13232,7 +13318,10 @@ static const char* const kBoardCal =
                 cout << '\n';
             }
             int dc = -1;
-            cout << "our colour guess=" << (guessOurColour(b, dc) ? dc : -1);
+            int cdW = 0, cdN = 0;
+            const int cd = colourFromCornerDigit(s, &cdW, &cdN);
+            cout << "corner digit says=" << cd << " (w=" << cdW << " n=" << cdN << ")"
+                << " piece spread says=" << (guessOurColour(b, dc) ? dc : -1);
             for (int c = 0; c < 2; ++c) {
                 array<int, 3> t{}; long long mm = 0;
                 bool o = readDice(s, c, t, &mm);
@@ -13252,6 +13341,12 @@ static const char* const kBoardCal =
                 int v = classify(dd, miss, gap);
                 cout << "  #" << i << " ink=" << dd.ink << " -> " << v
                     << " miss=" << miss << " gap=" << gap;
+            }
+            cout << '\n';
+            {
+                const int sx0 = 0, sy0 = 1980, sx1 = 400, sy1 = 2280;
+                Shot wide = grab(sx0, sy0, sx1, sy1);
+                dumpStrip(wide, sx0, sy0, sx1, sy1, 4);
             }
             cout << "\n---\n";
             Sleep(1500);
@@ -13273,6 +13368,11 @@ static const char* const kBoardCal =
         vector<int> series;
         int outcome = 0;             // 1 won, -1 lost, 0 undecided (clock, most likely)
         time_t started = 0;
+        // En passant rights seen appearing during the opponent's turn, and the
+        // last board read while watching it.
+        uint64_t epPending = 0;
+        array<int, 64> watchBoard{};
+        int haveWatch = 0;
     };
 
     // Opened fresh at the start of every run, so the file always holds the
@@ -13364,23 +13464,67 @@ static const char* const kBoardCal =
         return diceVal;
     }
 
-    // En passant is only claimed when the opponent's whole turn was a single
-    // double push; anything less clear leaves the right unset, which is safe.
-    static uint64_t epFromDiff(const array<int, 64>& before, const array<int, 64>& after,
+    // What changed between two frames, in board coordinates. This is the only
+    // window onto the opponent's turn, so it is worth being able to read it.
+    static string stepText(const array<int, 64>& prev, const array<int, 64>& now, int flip) {
+        static const char* const kPiece = "pnbrqkPNBRQK";
+        string out;
+        for (int sq = 0; sq < 64; ++sq) {
+            const int cell = cellOfSq(sq, flip);
+            if (prev[cell] == now[cell]) continue;
+            out += ' ';
+            if (prev[cell] >= 0 && prev[cell] < 12) out += kPiece[prev[cell]];
+            out += sqName(sq);
+            out += '>';
+            if (now[cell] >= 0 && now[cell] < 12) out += kPiece[now[cell]]; else out += '.';
+        }
+        return out;
+    }
+
+    static uint64_t epFromStep(const array<int, 64>& prev, const array<int, 64>& now,
         int flip, int us) {
-        int ch[3], nch = 0;
-        for (int c = 0; c < 64; ++c) if (before[c] != after[c]) { if (nch >= 2) return 0; ch[nch++] = c; }
-        if (nch != 2) return 0;
         const int them = 1 - us;
         const int pawn = them * 6 + 0;
-        int fromCell = -1, toCell = -1;
-        if (before[ch[0]] == pawn && after[ch[0]] == 12 && after[ch[1]] == pawn) { fromCell = ch[0]; toCell = ch[1]; }
-        else if (before[ch[1]] == pawn && after[ch[1]] == 12 && after[ch[0]] == pawn) { fromCell = ch[1]; toCell = ch[0]; }
-        if (fromCell < 0) return 0;
-        int from = sqOfCell(fromCell, flip), to = sqOfCell(toCell, flip);
-        if ((from ^ to) != 16) return 0;
-        if ((from >> 3) != (them == 0 ? 1 : 6)) return 0;
-        return bit((from + to) / 2);
+        const int homeRank = (them == 0) ? 1 : 6;
+        const int landRank = (them == 0) ? 3 : 4;
+        uint64_t out = 0;
+        for (int file = 0; file < 8; ++file) {
+            const int fromSq = homeRank * 8 + file;
+            const int toSq = landRank * 8 + file;
+            const int midSq = (fromSq + toSq) / 2;
+            const int fromCell = cellOfSq(fromSq, flip);
+            const int toCell = cellOfSq(toSq, flip);
+            const int midCell = cellOfSq(midSq, flip);
+            if (prev[fromCell] != pawn || now[fromCell] != 12) continue;
+            if (prev[toCell] != 12 || now[toCell] != pawn) continue;
+            if (prev[midCell] != 12 || now[midCell] != 12) continue;   // nothing paused there
+            out |= bit(midSq);
+        }
+        return out;
+    }
+
+    static uint64_t epFromDiff(const array<int, 64>& before, const array<int, 64>& after,
+        int flip, int us) {
+        // Examined file by file rather than by counting changed squares. A turn
+        // here can hold several moves, so demanding that exactly two squares
+        // differ threw the right away whenever the opponent did anything else
+        // alongside the double push - and the rights accumulate, so three pawns
+        // pushing two squares really does create three of them.
+        const int them = 1 - us;
+        const int pawn = them * 6 + 0;
+        const int homeRank = (them == 0) ? 1 : 6;
+        const int landRank = (them == 0) ? 3 : 4;
+        uint64_t out = 0;
+        for (int file = 0; file < 8; ++file) {
+            const int fromSq = homeRank * 8 + file;
+            const int toSq = landRank * 8 + file;
+            const int fromCell = cellOfSq(fromSq, flip);
+            const int toCell = cellOfSq(toSq, flip);
+            if (before[fromCell] != pawn || after[fromCell] != 12) continue;
+            if (before[toCell] != 12 || after[toCell] != pawn) continue;
+            out |= bit((fromSq + toSq) / 2);
+        }
+        return out;
     }
 
     // How much of a square's picture changed between two captures. The site
@@ -13540,7 +13684,12 @@ static const char* const kBoardCal =
         cout << "[play] board " << BX << ',' << BY << " cell " << CELL
             << ", analysis " << firstSec << " s after the roll and 1 s inside a turn\n";
 
-        int idle = 0, rejects = 0, banned = 0, sawTheirTurn = 0;
+        int idle = 0, rejects = 0, banned = 0, sawTheirTurn = 0, noMove = 0;
+        // A board seen but not yet believed, and since when. Only a reading that
+        // stays put becomes the next watched position.
+        array<int, 64> pendBoard{};
+        int havePend = 0;
+        auto pendSince = steady_clock::now();
         // Set once a live board has been seen, so a panel that was on screen
         // from the outset is recognised as belonging to an earlier game.
         bool sawLiveBoard = false;
@@ -13549,7 +13698,7 @@ static const char* const kBoardCal =
         // still leaves us inside the same turn, which has already had its think.
         bool longUsed = false;
         auto lastAccepted = steady_clock::now();
-        for (;;) {
+        for (;;) try {
             Shot s = grabAll();
 
             // Nothing at all happens unless the board is in front of us.
@@ -13593,9 +13742,64 @@ static const char* const kBoardCal =
                 pl.outcome = 0;
                 click(rematchX(), rematchY());
                 pl.flip = -1; pl.castle = 15; pl.haveLast = 0;
+                pl.epPending = 0; pl.haveWatch = 0;
                 T.newGame();
-                Sleep(1200);
-                idle = 0; rejects = 0;
+                // Catch the board the instant the panel clears. The opponent
+                // can push a pawn two squares within a few hundred
+                // milliseconds, and a double push not seen while it happens is
+                // a right lost for good - there is nothing in the position
+                // afterwards that distinguishes it from two single steps. So
+                // no sleeping here: poll until the board reads, take that
+                // frame as the baseline, and take the colour from the corner
+                // digit at the same time, since watching needs to know which
+                // side we are.
+                // Two frames matter here and they are not the same one. The
+                // earliest readable frame is the closest we ever get to the
+                // position before the opponent touched it. The first frame that
+                // holds still is the first we can trust - taken alone, the
+                // earliest one can be a piece caught mid-slide and would put a
+                // pawn on a square it never stopped on. Keep both: the step
+                // between them is a sighting like any other, and for a game that
+                // opens with a double push it is the only one there will be.
+                array<int, 64> firstSeen{}, settling{};
+                int haveFirst = 0, haveSettling = 0, firstWait = 0;
+                auto settleSince = steady_clock::now();
+                for (int wait = 0; wait < 200; ++wait) {
+                    Shot n = grabAll();
+                    array<int, 64> b;
+                    if (!boardPresent(n) || rematchReady(n) || readBoard(n, b) != 0) {
+                        Sleep(20);
+                        continue;
+                    }
+                    const int dc = colourFromCornerDigit(n);
+                    if (dc < 0) { Sleep(20); continue; }
+                    const auto now = steady_clock::now();
+                    if (!haveFirst) { firstSeen = b; haveFirst = 1; firstWait = wait; }
+                    if (!haveSettling || b != settling) {
+                        settling = b; haveSettling = 1; settleSince = now;
+                        Sleep(20);
+                        continue;
+                    }
+                    if (duration_cast<chrono::milliseconds>(now - settleSince).count() < 200) {
+                        Sleep(20);
+                        continue;
+                    }
+                    pl.flip = dc; pl.us = dc;
+                    pl.started = time(nullptr);
+                    if (b != firstSeen) {
+                        const uint64_t got = epFromStep(firstSeen, b, pl.flip, pl.us);
+                        pl.epPending |= got;
+                        cout << "[watch]" << stepText(firstSeen, b, pl.flip) << " (opening)";
+                        if (got) cout << " -> ep " << sqName(ctz64(got));
+                        cout << '\n';
+                    }
+                    pl.watchBoard = b; pl.haveWatch = 1;
+                    cout << "[play] new game, we play " << (pl.us ? "black" : "white")
+                        << ", first frame after " << firstWait << " polls, settled after "
+                        << wait << ", turn=" << ourTurn(n) << '\n';
+                    break;
+                }
+                idle = 0; rejects = 0; havePend = 0;
                 continue;
             }
 
@@ -13623,13 +13827,25 @@ static const char* const kBoardCal =
                     // Joining a game already in progress: the dice always show
                     // the drawings of the side to move, so when our clock is
                     // running their colour is our colour.
+                    // The corner label is the primary answer; the spread of the
+                    // pieces is only a fallback if the label cannot be read.
                     array<int, 64> b;
-                    int dc = -1;
-                    if (CAL.have && ourTurn(s) == 1 && (readBoard(s, b), guessOurColour(b, dc))) {
+                    int dc = colourFromCornerDigit(s);
+                    if (dc < 0) { readBoard(s, b); if (!guessOurColour(b, dc)) dc = -1; }
+                    // Do not wait for our clock to start. Knowing the colour is
+                    // what switches on watching the opponent's turn, and a
+                    // double push made before we look is a right lost for good.
+                    if (CAL.have && dc >= 0) {
                         pl.flip = dc;
                         pl.us = dc;
                         pl.castle = 15;
                         pl.haveLast = 0;
+                        pl.epPending = 0;
+                        // Start the baseline right away rather than on the next
+                        // pass: whatever the opponent does from here on is
+                        // watchable, and a frame skipped is a right lost.
+                        pl.haveWatch = (readBoard(s, b) == 0);
+                        if (pl.haveWatch) pl.watchBoard = b;
                         cout << "[play] joined a running game, we play "
                             << (pl.us ? "black" : "white") << '\n';
                         continue;
@@ -13658,9 +13874,74 @@ static const char* const kBoardCal =
                 // The end-of-game panel appears immediately afterwards and hides
                 // the middle of the board, so by the time it is up there is no
                 // reading the verdict off the position any more.
-                if (pl.flip >= 0 && CAL.have && ++idle % 6 == 0) {
+                if (pl.flip >= 0 && CAL.have) {
+                    ++idle;
                     array<int, 64> b;
                     if (readBoard(s, b) == 0) {
+                        // Follow the turn as it is played: a double push is only
+                        // recognisable while it happens, not from the position
+                        // the turn ends in.
+                        //
+                        // But a frame is not a position until it has held still.
+                        // The site slides the piece across the board, so a frame
+                        // caught halfway through d7-d5 shows the pawn sitting on
+                        // d6 - indistinguishable, taken at face value, from a
+                        // turn that really did play d7-d6 and then d6-d5. Believe
+                        // that frame and the double push is read as two single
+                        // steps and the right is thrown away for nothing. A real
+                        // stop on the square outlasts any slide over it.
+                        if (b != pl.watchBoard) {
+                            const auto now = steady_clock::now();
+                            // A turn moves a piece or two. When most of the board
+                            // is different it is not a move at all - the site has
+                            // dealt a new game while we were busy elsewhere, and
+                            // reading a move out of that gives a king crossing
+                            // the board in one step. Start over instead.
+                            int changed = 0;
+                            for (int cell = 0; cell < 64; ++cell)
+                                if (b[cell] != pl.watchBoard[cell]) ++changed;
+                            if (pl.haveWatch && changed > 4) {
+                                cout << "[play] the board was dealt anew (" << changed
+                                    << " squares differ), starting the watch over\n";
+                                pl.watchBoard = b;
+                                pl.epPending = 0;
+                                pl.haveLast = 0;
+                                pl.castle = 15;
+                                havePend = 0;
+                                Sleep(50);
+                                continue;
+                            }
+                            if (!havePend || b != pendBoard) {
+                                // Say how long the reading we are dropping had
+                                // lasted; that number is what tells a slide
+                                // apart from a stop, so it is worth seeing.
+                                if (havePend)
+                                    cout << "[flick]" << stepText(pl.watchBoard, pendBoard, pl.flip)
+                                    << " held "
+                                    << duration_cast<chrono::milliseconds>(now - pendSince).count()
+                                    << " ms\n";
+                                pendBoard = b;
+                                havePend = 1;
+                                pendSince = now;
+                            }
+                            else if (duration_cast<chrono::milliseconds>(now - pendSince).count() >= 200) {
+                                if (pl.haveWatch) {
+                                    const uint64_t got = epFromStep(pl.watchBoard, b, pl.flip, pl.us);
+                                    pl.epPending |= got;
+                                    cout << "[watch]" << stepText(pl.watchBoard, b, pl.flip)
+                                        << " held "
+                                        << duration_cast<chrono::milliseconds>(now - pendSince).count()
+                                        << " ms";
+                                    if (got) cout << " -> ep " << sqName(ctz64(got));
+                                    cout << '\n';
+                                }
+                                pl.watchBoard = b;
+                                pl.haveWatch = 1;
+                                havePend = 0;
+                            }
+                        }
+                        else havePend = 0;
+
                         int kings[2] = { 0, 0 };
                         for (int cell = 0; cell < 64; ++cell)
                             if (b[cell] == 5) kings[0]++; else if (b[cell] == 11) kings[1]++;
@@ -13668,10 +13949,13 @@ static const char* const kBoardCal =
                         else if (!kings[1 - pl.us]) pl.outcome = 1;
                     }
                 }
-                if (idle % 60 == 0)
+                if (idle % 150 == 0)
                     cout << "[wait] turn=" << ourTurn(s) << " clocks " << clockBottom(s)
                     << '/' << clockTop(s) << '\n';
-                Sleep(150);
+                // Sample often enough to see a turn move by move. Two single
+                // pawn steps look exactly like one double push if the frame
+                // between them is missed, and they carry no en passant right.
+                Sleep(50);
                 continue;
             }
 
@@ -13735,7 +14019,27 @@ static const char* const kBoardCal =
             sawTheirTurn = 0;
 
             pl.castle = castleFromBoard(board, pl.flip, pl.castle);
-            uint64_t ep = pl.haveLast ? epFromDiff(pl.lastBoard, board, pl.flip, pl.us) : 0ull;
+            // What was actually seen happening outranks what the endpoints
+            // suggest; the endpoint comparison only fills in when the turn was
+            // not watched, and it cannot tell one double push from two singles.
+            uint64_t ep = pl.epPending;
+            // The turn can also end between two frames - the last frame watched
+            // and the board we are looking at now. That step is as much a
+            // sighting as any other, so read it the same way.
+            if (pl.haveWatch && board != pl.watchBoard) {
+                const uint64_t got = epFromStep(pl.watchBoard, board, pl.flip, pl.us);
+                ep |= got;
+                cout << "[watch]" << stepText(pl.watchBoard, board, pl.flip);
+                if (got) cout << " -> ep " << sqName(ctz64(got));
+                cout << " (turn ended)\n";
+            }
+            if (!ep && pl.haveLast) ep = epFromDiff(pl.lastBoard, board, pl.flip, pl.us);
+            pl.epPending = 0;
+            pl.haveWatch = 0;
+            // Our own turn takes a second of thinking, during which nothing is
+            // watched. A frame left half-believed from before that gap is not a
+            // frame that held still - it is one nobody looked at.
+            havePend = 0;
 
             string tok, tokLive;
             for (int i = 0; i < 3; ++i) {
@@ -13758,6 +14062,25 @@ static const char* const kBoardCal =
             pos.dice = normalizeDice(pos, pos.dice);
             pos.key = computeKey(pos);
 
+            // No guessing here: en passant rights come from what was actually
+            // seen on the board and nothing else. If the position offers no
+            // move, read again rather than invent a right - and keep the
+            // "we saw the turn change" flag, since nothing was played.
+            {
+                MoveList probeMl; int probeTerm = 0;
+                Position probe = pos;
+                genLegal(probe, pl.path, pl.mask, probeMl, probeTerm);
+                if (probeMl.n == 0) {
+                    if (++noMove % 20 == 1)
+                        cout << "[play] no legal move in the position as read (roll ["
+                        << tok << "], ep " << (ep ? "yes" : "no") << ")\n";
+                    sawTheirTurn = wholeRoll;
+                    Sleep(400);
+                    continue;
+                }
+                noMove = 0;
+            }
+
             // Mid-series we cannot tell a spent die from one that is merely
             // blocked, and the difference matters: the site applies "use as
             // many dice as possible" to everything still in the roll. So carry
@@ -13772,6 +14095,7 @@ static const char* const kBoardCal =
 
             cout << "[play] roll [" << tok << "] castle=" << pl.castle
                 << (ep ? " ep" : "") << (partial ? " partial +[" + tokLive + "]" : "")
+                << (ep ? " (watched)" : "")
                 << " glow " << glow[0] << '/' << glow[1] << '/' << glow[2] << '\n';
 
             // The tree serves one roll. It carries over between the positions
@@ -13883,6 +14207,16 @@ static const char* const kBoardCal =
                     Position afterLive = posLive;
                     if (partial) makeMove(afterLive, pl.mask, move);
 
+                    // A pawn moving diagonally onto an empty square is an en
+                    // passant capture - worth calling out, because the right to
+                    // make it is reconstructed from the screen and is the one
+                    // part of the position that cannot be seen directly.
+                    {
+                        const int mf = move & 63, mt = (move >> 6) & 63;
+                        if ((pos.piece[0] & bit(mf)) && ((mt - mf) & 7)
+                            && !(pos.color[!pos.side] & bit(mt)))
+                            cout << "[play] en passant capture\n";
+                    }
                     const auto tStep = steady_clock::now();
                     cout << "[play] " << moveToStr(move) << "  eval " << fixed << setprecision(3)
                         << lastEval << " depth " << setprecision(1) << lastDepth
@@ -13991,7 +14325,33 @@ static const char* const kBoardCal =
             boardOfPos(pos, pl.flip, pl.lastBoard);
             pl.haveLast = 1;
             pl.castle = pos.castle;
-            Sleep(300);
+            // The position our turn ends in is the one frame of the opponent's
+            // turn we never have to read off the screen - we computed it. Make
+            // it the baseline, so watching starts at the exact moment they
+            // begin rather than whenever the next grab happens to land. Without
+            // this the whole of a short turn can pass between two frames and a
+            // double push goes unseen.
+            pl.watchBoard = pl.lastBoard;
+            pl.haveWatch = 1;
+            // Just long enough for the last click to register. Every extra
+            // millisecond here is time the opponent moves unwatched.
+            Sleep(80);
+        }
+        catch (const std::exception& e) {
+            // A run is meant to last for days; one bad iteration should cost a
+            // turn, not the whole session. Rebuild from the screen and carry on.
+            cout << "[play] recovered from error: " << e.what() << '\n';
+            diagLogLine(std::string("[play] exception: ") + e.what());
+            pl.flip = -1;
+            pl.haveLast = 0;
+            Sleep(2000);
+        }
+        catch (...) {
+            cout << "[play] recovered from unknown error\n";
+            diagLogLine("[play] unknown exception");
+            pl.flip = -1;
+            pl.haveLast = 0;
+            Sleep(2000);
         }
     }
 
@@ -14002,6 +14362,9 @@ int main() {
     // (std::cout syncs with stdio, so this covers all engine output).
     setvbuf(stdout, nullptr, _IONBF, 0);
     SetProcessDPIAware();   // screen modes work in physical pixels
+    // These handlers existed but were never switched on, so a crash during a
+    // long unattended run left nothing behind to explain it.
+    installCrashDiagnostics();
     try {
         const std::string ptFile = "net.pt";
         const std::string emaFile = "net_ema.pt";
