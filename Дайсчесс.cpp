@@ -13258,32 +13258,6 @@ static const char* const kBoardCal =
         }
     }
 
-    // A coarse brightness map of a rectangle, in characters. Buttons under the
-    // board have no fixed drawing to match against, so the only honest way to
-    // find them is to look at the strip and read off where the ink sits.
-    static void dumpStrip(const Shot& s, int x0, int y0, int x1, int y1, int step) {
-        cout << "strip x " << x0 << ".." << x1 << " y " << y0 << ".." << y1
-            << " step " << step << '\n';
-        cout << "      ";
-        for (int x = x0, col = 0; x < x1; x += step, ++col)
-            cout << (col % 10 == 0 ? (char)('0' + (col / 10) % 10) : ' ');
-        cout << '\n';
-        for (int y = y0; y < y1; y += step) {
-            cout << setw(5) << y << ' ';
-            for (int x = x0; x < x1; x += step) {
-                const uint32_t p = s.at(x, y);
-                const int r = (p >> 16) & 255, g = (p >> 8) & 255, b = p & 255;
-                const int lum = (r * 77 + g * 151 + b * 28) >> 8;
-                cout << " .:-=+*#%@"[min(9, lum / 26)];
-            }
-            cout << '\n';
-        }
-        cout << "      ";
-        for (int x = x0, col = 0; x < x1; x += step, ++col)
-            cout << (col % 10 == 0 ? (char)('0' + (col / 10) % 10) : ' ');
-        cout << "\n      column c is x = " << x0 << " + c*" << step << '\n';
-    }
-
     static void diagnose(int seconds) {
         loadGeometry();
         loadCal();
@@ -13341,12 +13315,6 @@ static const char* const kBoardCal =
                 int v = classify(dd, miss, gap);
                 cout << "  #" << i << " ink=" << dd.ink << " -> " << v
                     << " miss=" << miss << " gap=" << gap;
-            }
-            cout << '\n';
-            {
-                const int sx0 = 0, sy0 = 1980, sx1 = 400, sy1 = 2280;
-                Shot wide = grab(sx0, sy0, sx1, sy1);
-                dumpStrip(wide, sx0, sy0, sx1, sy1, 4);
             }
             cout << "\n---\n";
             Sleep(1500);
@@ -13688,8 +13656,9 @@ static const char* const kBoardCal =
         // A board seen but not yet believed, and since when. Only a reading that
         // stays put becomes the next watched position.
         array<int, 64> pendBoard{};
-        int havePend = 0;
+        int havePend = 0, pendSeen = 0;
         auto pendSince = steady_clock::now();
+        auto pendLast = pendSince;
         // Set once a live board has been seen, so a panel that was on screen
         // from the outset is recognised as belonging to an earlier game.
         bool sawLiveBoard = false;
@@ -13912,32 +13881,44 @@ static const char* const kBoardCal =
                                 continue;
                             }
                             if (!havePend || b != pendBoard) {
-                                // Say how long the reading we are dropping had
-                                // lasted; that number is what tells a slide
-                                // apart from a stop, so it is worth seeing.
+                                // Report the span between the first and the LAST
+                                // reading that showed this frame, never the time
+                                // up to the reading that replaced it: the latter
+                                // includes a whole polling interval nobody
+                                // looked at, and it makes a slide caught twice
+                                // look as long-lived as a real stop. The count of
+                                // readings goes with it, since a span measured
+                                // over two samples is only as sharp as the gap
+                                // between them.
                                 if (havePend)
                                     cout << "[flick]" << stepText(pl.watchBoard, pendBoard, pl.flip)
                                     << " held "
-                                    << duration_cast<chrono::milliseconds>(now - pendSince).count()
-                                    << " ms\n";
+                                    << duration_cast<chrono::milliseconds>(pendLast - pendSince).count()
+                                    << " ms over " << pendSeen << " reads\n";
                                 pendBoard = b;
                                 havePend = 1;
                                 pendSince = now;
+                                pendLast = now;
+                                pendSeen = 1;
                             }
-                            else if (duration_cast<chrono::milliseconds>(now - pendSince).count() >= 200) {
-                                if (pl.haveWatch) {
-                                    const uint64_t got = epFromStep(pl.watchBoard, b, pl.flip, pl.us);
-                                    pl.epPending |= got;
-                                    cout << "[watch]" << stepText(pl.watchBoard, b, pl.flip)
-                                        << " held "
-                                        << duration_cast<chrono::milliseconds>(now - pendSince).count()
-                                        << " ms";
-                                    if (got) cout << " -> ep " << sqName(ctz64(got));
-                                    cout << '\n';
+                            else {
+                                pendLast = now;
+                                ++pendSeen;
+                                if (duration_cast<chrono::milliseconds>(pendLast - pendSince).count() >= 200) {
+                                    if (pl.haveWatch) {
+                                        const uint64_t got = epFromStep(pl.watchBoard, b, pl.flip, pl.us);
+                                        pl.epPending |= got;
+                                        cout << "[watch]" << stepText(pl.watchBoard, b, pl.flip)
+                                            << " held "
+                                            << duration_cast<chrono::milliseconds>(pendLast - pendSince).count()
+                                            << " ms over " << pendSeen << " reads";
+                                        if (got) cout << " -> ep " << sqName(ctz64(got));
+                                        cout << '\n';
+                                    }
+                                    pl.watchBoard = b;
+                                    pl.haveWatch = 1;
+                                    havePend = 0;
                                 }
-                                pl.watchBoard = b;
-                                pl.haveWatch = 1;
-                                havePend = 0;
                             }
                         }
                         else havePend = 0;
@@ -13955,7 +13936,11 @@ static const char* const kBoardCal =
                 // Sample often enough to see a turn move by move. Two single
                 // pawn steps look exactly like one double push if the frame
                 // between them is missed, and they carry no en passant right.
-                Sleep(50);
+                // The reading itself costs tens of milliseconds, so barely sleep
+                // at all: the finer the sampling, the tighter the bound on how
+                // long a frame really held, and that bound is the whole basis for
+                // telling a piece in flight from a piece at rest.
+                Sleep(10);
                 continue;
             }
 
@@ -14145,7 +14130,15 @@ static const char* const kBoardCal =
                     out.clear();
                     for (int i = 0; i < mlAll.n; ++i)
                         if (!partial || holds(mlLive, mlAll.m[i])) out.push_back(mlAll.m[i]);
-                    if (out.empty()) for (int i = 0; i < mlLive.n; ++i) out.push_back(mlLive.m[i]);
+                    // The two readings can agree on nothing at all: with a lit
+                    // rook and a full roll of knight-rook-knight, the one rook
+                    // move is illegal under the full set and every knight move is
+                    // illegal under the lit one. Falling back to the other
+                    // position's moves then offers the site exactly what its dim
+                    // faces already refused, and the turn loops forever. A dim
+                    // face is the site's own answer, so keep to the moves the lit
+                    // set allows.
+                    if (out.empty()) for (int i = 0; i < mlAll.n; ++i) out.push_back(mlAll.m[i]);
                     // Nothing to think about when there is only one move.
                     if (out.size() == 1) { lastSec = 0.0; lastDepth = 0.0f; return true; }
 
@@ -14192,7 +14185,7 @@ static const char* const kBoardCal =
                         if (find(out.begin(), out.end(), mv) != out.end()) continue;
                         out.push_back(mv);
                     }
-                    if (out.empty()) for (int i = 0; i < mlLive.n; ++i) out.push_back(mlLive.m[i]);
+                    if (out.empty()) for (int i = 0; i < mlAll.n; ++i) out.push_back(mlAll.m[i]);
                     return !out.empty();
                 };
 
