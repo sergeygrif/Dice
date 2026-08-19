@@ -13275,12 +13275,18 @@ static const char* const kBoardCal =
         time_t started = 0;
     };
 
+    // Opened fresh at the start of every run, so the file always holds the
+    // results of the session in front of you and nothing older.
+    static ofstream g_results;
+
     // One character per finished game, in order: W won, L lost. Nothing else -
     // the sequence is all that is needed to work out a win rate.
     static void logGame(const Player& pl) {
         if (pl.outcome == 0) return;
-        ofstream f("results.txt", ios::app);
-        if (f) f << (pl.outcome > 0 ? 'W' : 'L') << flush;
+        // A panel that was already there when we started belongs to a game we
+        // did not play, and its verdict is not ours to record. One that appears
+        // after we have seen a live board is.
+        if (g_results) g_results << (pl.outcome > 0 ? 'W' : 'L') << flush;
     }
 
     // Read the board until two consecutive readings agree. A couple of guessed
@@ -13496,7 +13502,8 @@ static const char* const kBoardCal =
 
     static void run(double firstSec) {
         // Progress goes to the console; the only file this mode writes is
-        // results.txt, one character per finished game.
+        // results.txt, one character per finished game, started anew each run.
+        g_results.open("results.txt", ios::trunc);
         loadGeometry();
         loadCal();
         START();
@@ -13523,6 +13530,9 @@ static const char* const kBoardCal =
             << ", analysis " << firstSec << " s after the roll and 1 s inside a turn\n";
 
         int idle = 0, rejects = 0, banned = 0, sawTheirTurn = 0;
+        // Set once a live board has been seen, so a panel that was on screen
+        // from the outset is recognised as belonging to an earlier game.
+        bool sawLiveBoard = false;
         // Survives a broken-off series: rebuilding the position from the screen
         // still leaves us inside the same turn, which has already had its think.
         bool longUsed = false;
@@ -13547,6 +13557,8 @@ static const char* const kBoardCal =
                 continue;
             }
 
+            if (!rematchReady(s)) sawLiveBoard = true;   // a game is actually on
+
             if (rematchReady(s)) {
                 int hw = 0;
                 int said = verdictFromHeader(s, &hw);
@@ -13561,8 +13573,10 @@ static const char* const kBoardCal =
                 if (said) pl.outcome = said;   // the panel is the authority
                 cout << "[play] game over ("
                     << (pl.outcome > 0 ? "won" : pl.outcome < 0 ? "lost" : "no verdict")
-                    << ", headline " << hw << "px), clicking rematch\n";
-                logGame(pl);
+                    << ", headline " << hw << "px)"
+                    << (sawLiveBoard ? "" : ", not our game") << ", clicking rematch\n";
+                if (sawLiveBoard) logGame(pl);
+                sawLiveBoard = false;
                 pl.series.clear();
                 pl.outcome = 0;
                 click(rematchX(), rematchY());
