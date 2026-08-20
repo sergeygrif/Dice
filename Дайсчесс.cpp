@@ -11677,81 +11677,39 @@ void Training(int targetGames) {
     std::cout << "Training completed successfully! Files net.pt, net_ema.pt, optimizer.pt, and net.plan are ready.\n";
     diagLogLine("[Training] finished normally");
 }
-vector<long long> sqKey = { 100002324,505950000,609121555,110242252,614571640,610172920,35020000,355080122,34360208,37770000,338410393,631600651,0 };
-vector<long long> diceKey = { 100001856,405160010,6571113,6831247,309371046,606462162,324110006,341110119,126520169,123350009,430810277,826600559,188800000000,285506010000,115807560000,127107610000,110310990000,220107560000,1124640000,14842670000,26427290000,5623910000,33132030000,64527490000 };
-vector<int> stabKey = { -9495531,-9561067,-10020846,-10086382,-13169399,-13169655,-13432313 };
 struct BOARDSTAT { vector<int> board; int num; int time; };
-int NUMBER(long long key, vector<long long>& v) {
-    int min, i, d, n;
-    min = INT_MAX;
-    for (i = 0; i < v.size(); i++) {
-        d = abs(v[i] % 10000 - key % 10000) + abs(v[i] / 10000 % 10000 - key / 10000 % 10000) + abs(v[i] / 100000000 - key / 100000000);
-        if (d < min) {
-            n = i;
-            min = d;
-        }
-    }
-    return n;
-}
-vector<int> S(int x1, int x2, int y1, int y2) {
-    int w, h;
-    vector<int> s;
-    HDC d, m;
-    HBITMAP b;
-    BITMAPINFO p;
-    w = x2 - x1 + 1;
-    h = y2 - y1 + 1;
-    s.resize(w * h);
-    d = GetDC(0);
-    m = CreateCompatibleDC(d);
-    b = CreateCompatibleBitmap(d, w, h);
-    p = { 40,w,-h,1,32 };
-    SelectObject(m, b);
-    BitBlt(m, 0, 0, w, h, d, x1, y1, 13369376);
-    GetDIBits(d, b, 0, h, s.data(), &p, 0);
-    DeleteObject(b);
-    DeleteObject(m);
-    DeleteObject(d);
-    return s;
-}
-vector<int> S() {
-    vector<int> s;
-    s = S(407, 1510, 550, 1865);
-    if (s[928 + 1104 * 430] == -15189205)s = {};
-    return s;
-}
-int FLIP(vector<int>& s) { return s.size() && s[8 + 1104 * 1200] == -665935; }
-int SIDE(vector<int>& s) { return s.size() && s[1038 + 1104 * 40] == -16443635 != FLIP(s); }
+// The screen readers themselves live in namespace SP further down, next to the
+// shape classifier the play mode uses; this machine sits above it, so the one
+// call it needs is announced here.
+//
+// What S() passes round is no longer a buffer of pixels but one decoded frame.
+// Every probe below used to dig into the pixels on its own, which is free when
+// a probe is three pixels and ruinous once a probe is a shape match, so the
+// screen is read once per frame and the answers travel with it:
+//
+//   [0]        flip   0 = White at the bottom of the board
+//   [1]        side   side to move, 0 = White
+//   [2..65]    board  by engine square: 0..11 piece, 12 empty
+//   [66..68]   dice   6*colour + type, +12 when the die is dimmed, -1 unread
+//   [69..71]   stab   0 bright, 1 dimmed, 2 unreadable ("still rolling")
+//   [72..]     the three dice faces, subsampled, for DIF
+//
+// An empty vector means the frame was not readable at all - which the tables
+// this replaced could never say, since they always returned a nearest guess.
+static const int F_FLIP = 0, F_SIDE = 1, F_BOARD = 2, F_DICE = 66, F_STAB = 69;
+static const int F_PATCH = 72;    // where the dice pixels start
+static const int F_STEP = 4;      // and how coarsely they are sampled
+vector<int> SPFRAME();
+vector<int> S() { return SPFRAME(); }
+int FLIP(vector<int>& s) { return s.size() ? s[F_FLIP] : 0; }
+int SIDE(vector<int>& s) { return s.size() ? s[F_SIDE] : 0; }
 vector<int> BOARD(vector<int>& s) {
-    int sq, SQ, x, y, p;
-    long long key;
-    vector<int> board;
     if (s.empty())return {};
-    for (sq = 0; sq < 64; sq++) {
-        if (FLIP(s) == 0)SQ = sq ^ 56; else SQ = sq ^ 7;
-        key = 0;
-        for (x = 0; x < 138; x++)for (y = 0; y < 138; y++) {
-            p = s[138 * (SQ % 8) + x + 1104 * (212 + 138 * (SQ / 8) + y)];
-            key += (p == -1) + 10000 * (p == -16777216) + 100000000 * (p == -8421505);
-        }
-        board.push_back(NUMBER(key, sqKey));
-    }
-    return board;
+    return vector<int>(s.begin() + F_BOARD, s.begin() + F_BOARD + 64);
 }
 vector<int> DICE(vector<int>& s) {
-    int i, x, y, p;
-    long long key;
-    vector<int> dice;
     if (s.empty())return {};
-    for (i = 0; i < 3; i++) {
-        key = 0;
-        for (x = 0; x < 158; x++)for (y = 0; y < 158; y++) {
-            p = s[248 + 228 * i + x + 1104 * y];
-            key += (p == -1) + 10000 * (p == -16777216) + 100000000 * (p == -8421505);
-        }
-        dice.push_back(NUMBER(key, diceKey));
-    }
-    return dice;
+    return vector<int>(s.begin() + F_DICE, s.begin() + F_DICE + 3);
 }
 int FROM(int sq) { return sq == 4 || sq >= 24 && sq <= 39 || sq == 60; }
 vector<int> WAY(vector<int>& b1, vector<int>& b2) {
@@ -11812,6 +11770,12 @@ void DICESET(vector<int>& s) {
         return;
     }
     v = DICE(s);
+    // A face that could not be read leaves the whole set unknown. Publishing a
+    // guess would set the engine analysing a roll that is not on the screen.
+    for (i = 0; i < 3; i++)if (v[i] < 0) {
+        POS.dice = 0;
+        return;
+    }
     for (i = 0; i < 3; i++)v[i] %= 6;
     sort(v.begin(), v.end());
     for (i = 0; i < 3; i++)t += pieceChar(v[i]);
@@ -11827,19 +11791,21 @@ void END(vector<int>& s1, vector<int>& s2, vector<int>& b1, vector<int>& b2) {
     b1 = b2;
 }
 vector<int> STAB(vector<int>& s) {
-    int i, n;
-    vector<int> stab;
     if (s.empty())return { 2,2,2 };
-    for (i = 0; i < 3; i++) {
-        n = find(stabKey.begin(), stabKey.end(), s[326 + 228 * i + 1104 * 147]) - stabKey.begin();
-        stab.push_back(n / 4 + (n == 7));
-    }
-    return stab;
+    return vector<int>(s.begin() + F_STAB, s.begin() + F_STAB + 3);
 }
+// A die that has just gone dim is a mini-move made, and while another die is
+// still playable the turn goes on - so the position it left behind has to be
+// published and analysed. The old test for "just spent" was "was unreadable,
+// is dim now", which fitted the pixel probe this replaced: its dimming
+// animation ran through colours that were in none of its seven constants. The
+// shape matcher reads the drawing straight through the tint change, so that
+// frame no longer exists and no mini-move was ever noticed. What marks the
+// spend now is the transition itself - not dim before, dim now.
 int STABMIN(vector<int>& s1, vector<int>& s2) {
     int dark, act, i;
     act = dark = 0;
-    for (i = 0; i < 3; i++)if (STAB(s2)[i] != 1)act = 1; else if (STAB(s1)[i] == 2)dark = 1;
+    for (i = 0; i < 3; i++)if (STAB(s2)[i] != 1)act = 1; else if (STAB(s1)[i] != 1)dark = 1;
     return dark && act;
 }
 int STABFULL(vector<int>& s) {
@@ -11886,6 +11852,7 @@ int DICENEXT(vector<int>& s1, vector<int>& s2) {
     if (s1.empty() || s2.empty())return 0;
     d1 = DICE(s1);
     d2 = DICE(s2);
+    for (i = 0; i < 3; i++)if (d1[i] < 0 || d2[i] < 0)return 0;
     dark = 0;
     for (i = 0; i < 3; i++) {
         dif = d2[i] - d1[i];
@@ -11900,27 +11867,30 @@ int DIF(int a, int b) {
     return abs(b % 256 - a % 256) + abs(b / 256 % 256 - a / 256 % 256) + abs(b / 65536 - a / 65536);
 }
 int DIF(vector<int>& s1, vector<int>& s2) {
-    int dif, i, x, y, n;
-    if (s1.empty() || s2.empty())return 1;
+    int dif, i;
+    if (s1.size() <= F_PATCH || s2.size() <= F_PATCH || s1.size() != s2.size())return 1;
     dif = 0;
-    for (i = 0; i < 3; i++)for (x = 0; x < 158; x++)for (y = 0; y < 158; y++) {
-        n = 248 + 228 * i + x + 1104 * y;
-        dif += DIF(s1[n], s2[n]);
-    }
-    return dif >= 10000;
+    for (i = F_PATCH; i < (int)s1.size(); i++)dif += DIF(s1[i], s2[i]);
+    // The threshold was 10000 over every pixel of the three faces; the faces
+    // are now sampled every F_STEP pixels in each direction.
+    return dif >= 10000 / (F_STEP * F_STEP);
 }
 void NEW(int& roll, int& change, vector<int>& s1, vector<int>& s2, vector<int>& b1, vector<int>& b2) {
     int stabmin, stabfull, i;
-    time_point<steady_clock> t1, t2;
+    time_point<steady_clock> t1, t2, t3;
     vector<int> b;
     vector<vector<int>> v;
     vector<BOARDSTAT> bs;
-    t1 = steady_clock::now();
+    t3 = t1 = steady_clock::now();
     v = { s1,{} };
     stabfull = stabmin = change = 0;
     for (i = 1;; i = !i) {
+        // A frame now costs a shape match on 64 squares, so this loop no longer
+        // needs to spin: without the pause it simply held a core at the stops.
+        Sleep(5);
         t2 = steady_clock::now();
         v[i] = S();
+        if (v[i].size())t3 = t2;
         change += SIDE(v[i]) != SIDE(v[!i]);
         stabmin += STABMIN(v[!i], v[i]);
         stabfull += STABFULL(v[!i], v[i]);
@@ -11930,8 +11900,39 @@ void NEW(int& roll, int& change, vector<int>& s1, vector<int>& s2, vector<int>& 
         ADD(b1, b, bs);
         if (roll || DICENEXT(s1, v[i]))s2 = v[i];
         if (roll || bs.size() && b == bs[0].board)b2 = b;
-        if (v[i].empty() && s1.size() || roll == 0 && stabmin || roll && stabfull && (t2 - t1).count() >= 300000000)return;
+        // The frame that ends the round is the new reference frame. DICENEXT
+        // above normally settles on the same one, but it needs all three faces
+        // readable at once; leaving s2 on the frame before the spend would have
+        // the next round meet the very same transition and return at once, over
+        // and over, with nothing new to publish.
+        if (roll == 0 && stabmin)s2 = v[i];
+        // The last clause is new and it is what keeps the mode audible: with
+        // nothing readable on screen and nothing read before it, none of the
+        // other three can ever fire, and this loop would turn silently for
+        // ever - which is exactly how the previous version died unnoticed.
+        if (v[i].empty() && s1.size() || roll == 0 && stabmin
+            || roll && stabfull && (t2 - t1).count() >= 300000000
+            || v[i].empty() && duration_cast<seconds>(t2 - t3).count() >= 2)return;
     }
+}
+// A waiting mode that prints nothing cannot be told from a hung one, and that
+// is how the previous version of this died unnoticed. Once a position is
+// published the search owns the console - write=2 redraws it every second - so
+// these lines only ever appear while there is nothing to analyse. The throttle
+// has to be static, not local: a round of NEW over an empty screen ends at
+// once, and a local timer would be reset before it ever ran out.
+void SAY(const char* why, vector<int>& s) {
+    static time_point<steady_clock> last;
+    static int said = 0;
+    time_point<steady_clock> now = steady_clock::now();
+    if (said && duration_cast<seconds>(now - last).count() < 20)return;
+    said = 1;
+    last = now;
+    cout << "[watch] waiting: " << why;
+    if (s.size())cout << " | flip=" << s[F_FLIP] << " side=" << s[F_SIDE]
+        << " dice " << s[F_DICE] << ',' << s[F_DICE + 1] << ',' << s[F_DICE + 2]
+        << " stab " << s[F_STAB] << s[F_STAB + 1] << s[F_STAB + 2];
+    cout << endl;
 }
 void LOAD() {
     int roll, change, side, from, to, piece;
@@ -11942,6 +11943,7 @@ void LOAD() {
         ROLL = roll;
         if (s2.empty()) {
             START(POS);
+            SAY("nothing readable on screen", s2);
             continue;
         }
         BOARDSET(b2);
@@ -11950,6 +11952,7 @@ void LOAD() {
         if (s1.empty()) {
             DICESET(s2);
             POS.key = computeKey(POS);
+            if (!POS.dice)SAY("the roll is not readable yet", s2);
             continue;
         }
         side = SIDE(s1);
@@ -11975,6 +11978,7 @@ void LOAD() {
         }
         if (change >= 2)POS.ep1[!side] = 0;
         POS.key = computeKey(POS);
+        if (!POS.dice)SAY("the roll is not readable yet", s2);
     }
 }
 void SEARCH() {
@@ -11997,6 +12001,11 @@ void SEARCH() {
             }
         }
         if (clear)T.newGame();
+        // A search with no time limit fills the edge pool sooner or later, and
+        // the abort flag latches. Without this reset every later search returns
+        // the instant it starts and the mode goes quiet for good.
+        else if (ready && (T.abort.load(memory_order_relaxed)
+            || (double)T.edgeTop.load(memory_order_relaxed) / (double)T.edges.size() > 0.75))T.newGame();
         if (ready)mctsBatchedMT(T, pos, PATH, MASK, INT_MAX, eval, depth, moves, pv, 2, 1, autoSearchThreads(), true);
     }
 }
@@ -14437,6 +14446,97 @@ static const char* const kBoardCal =
 
 }   // namespace SP
 
+// ---------------------------------------------------------- eyes of mode 's'
+// One capture, decoded into the record described above S(). Everything used
+// here belongs to SP: the same geometry out of calib.txt and the same shape
+// classifier, so what the watch mode sees is what the play mode sees.
+vector<int> SPFRAME() {
+    vector<int> f;
+    SP::Shot s = SP::grabAll();
+    // Nothing to read: the tab is showing something else, the site is
+    // reconnecting, or the end-of-game panel covers the middle of the board.
+    if (!s.ok() || !SP::boardPresent(s) || SP::reconnecting(s))return f;
+    int flip = SP::colourFromCornerDigit(s);
+    if (flip < 0)return f;
+    int turn = SP::ourTurn(s);
+    if (turn < 0)return f;
+    int side = turn ? flip : !flip;
+
+    // The clocks cannot be believed frame by frame: ninety seconds of a live
+    // game produced four false swaps, and every one of them would hand the roll
+    // to the wrong player. A change of side counts only once it has held.
+    static int held = -1, pend = -1;
+    static time_point<steady_clock> since;
+    time_point<steady_clock> now = steady_clock::now();
+    if (side == held)pend = -1;
+    else {
+        if (side != pend) {
+            pend = side;
+            since = now;
+        }
+        if (held < 0 || duration_cast<milliseconds>(now - since).count() >= 300) {
+            held = side;
+            pend = -1;
+        }
+    }
+    side = held;
+
+    // A guessed square costs at worst one reading that never gets voted in; a
+    // frame that is nearly all guesses is not a board and must not become one.
+    array<int, 64> cell{};
+    if (SP::readBoard(s, cell) > 6)return f;
+
+    f.assign(F_PATCH, 0);
+    f[F_FLIP] = flip;
+    f[F_SIDE] = side;
+    for (int sq = 0; sq < 64; sq++)f[F_BOARD + sq] = cell[SP::cellOfSq(sq, flip)];
+
+    // The dice always show the drawings of the side to move, so their colour is
+    // known from the clocks and never has to be read off the picture - where it
+    // is not there to read anyway. Matching six shapes instead of twelve also
+    // roughly triples the margin, which matters because the outline on a die is
+    // thicker than on the board.
+    int glow[3], mx = 0, i;
+    for (i = 0; i < 3; i++) {
+        glow[i] = SP::dieGlow(s, i);
+        mx = max(mx, glow[i]);
+    }
+    // A die that is spent, or that has no legal move right now, is drawn
+    // dimmed; the threshold is relative because the whole tray dims between
+    // rolls. Measured: a live face 58-62 against 28-29 for a dead one.
+    const int lit = max(45, mx * 65 / 100);
+    for (i = 0; i < 3; i++) {
+        SP::Desc d = SP::diceDesc(s, i);
+        int best = INT_MAX, second = INT_MAX, bt = -1;
+        for (int t = 0; t < 6; t++) {
+            int v = SP::classDist(d, side, t);
+            if (v < best) {
+                second = best;
+                best = v;
+                bt = t;
+            }
+            else if (v < second)second = v;
+        }
+        // Refusing to answer is the whole point: the table this replaced always
+        // returned its nearest guess, so a position got built out of rubbish.
+        if (d.ink < 500 || best > 4000 || second - best < 400) {
+            f[F_DICE + i] = -1;
+            f[F_STAB + i] = 2;
+            continue;
+        }
+        const int dim = glow[i] < lit;
+        f[F_DICE + i] = 6 * side + bt + 12 * dim;
+        f[F_STAB + i] = dim;
+    }
+
+    // The faces themselves, for DIF: it only has to tell a still tray from an
+    // animating one, so every fourth pixel in each direction is plenty.
+    const int y0 = SP::dieY(), n = SP::dieSize();
+    for (i = 0; i < 3; i++)for (int y = 0; y < n; y += F_STEP)for (int x = 0; x < n; x += F_STEP)
+        f.push_back((int)(s.at(SP::dieX(i) + x, y0 + y) & 0xFFFFFFu));
+    return f;
+}
+
 int main() {
     // Unbuffered stdout: progress lines reach redirected log files immediately
     // (std::cout syncs with stdio, so this covers all engine output).
@@ -14591,6 +14691,13 @@ int main() {
             return 0;
         }
         if (fen == "s") {
+            // The readers come from the play mode, so they need its geometry
+            // and its piece shapes loaded before the first frame.
+            SP::loadGeometry();
+            if (!SP::loadCal())
+                std::cout << "[watch] the piece shapes failed to load; nothing will be recognised\n";
+            std::cout << "[watch] board " << SP::BX << ',' << SP::BY
+                << " cell " << SP::CELL << " - watching only, no clicks\n";
             ROLL = 0;
             START(POS);
             START();
@@ -14598,6 +14705,7 @@ int main() {
             thread searchThread(SEARCH);
             loadThread.join();
             searchThread.join();
+            return 0;
         }
         Position pos;
         std::array<uint64_t, 4> path;
