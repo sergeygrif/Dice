@@ -13018,7 +13018,7 @@ static const char* const kBoardCal =
     // While the site is reconnecting it prints a white "CONNECTING" banner over
     // the top of the page and quietly ignores every click. Measured: about 2700
     // light pixels in that strip with the banner up against about 250 without.
-    static int reconnecting(const Shot& s) {
+    static int reconnecting(const Shot& s, int* outN = nullptr) {
         int n = 0;
         int cx = BX + boardW() / 2;
         for (int y = BY - rel(457); y < BY - rel(327); ++y)
@@ -13026,6 +13026,7 @@ static const char* const kBoardCal =
                 uint32_t v = s.at(x, y);
                 if ((v & 255u) > 200 && ((v >> 8) & 255u) > 200 && ((v >> 16) & 255u) > 200) n++;
             }
+        if (outN) *outN = n;
         return n > 1000;
     }
 
@@ -13100,7 +13101,7 @@ static const char* const kBoardCal =
     // but never the outer ranks, so the wood there is a reliable sign. Without
     // this the engine happily clicks away at whatever page took the tab's
     // place - it once pressed "rematch" five times into YouTube.
-    static bool boardPresent(const Shot& s) {
+    static bool boardPresent(const Shot& s, int* outPct = nullptr) {
         int wood = 0, total = 0;
         for (int r = 0; r < 8; r += 7)
             for (int y = BY + r * CELL + 4; y < BY + (r + 1) * CELL - 4; y += 4)
@@ -13110,6 +13111,7 @@ static const char* const kBoardCal =
                     ++total;
                     if (R - B > 45 && R - B < 95 && R > 130 && G > 100) ++wood;
                 }
+        if (outPct) *outPct = total ? wood * 100 / total : -1;
         return total && wood * 100 / total > 25;
     }
 
@@ -13288,8 +13290,16 @@ static const char* const kBoardCal =
             array<Desc, 64> d;
             int flip = -1;
             bool init = looksInitial(s, d, flip);
+            // These two gate every frame the watch and play modes take, and
+            // leaving them out of the diagnostics made it lie by omission: the
+            // board read perfectly here while mode 's' refused the same frame.
+            int woodPct = -1, bannerN = 0;
+            const bool present = boardPresent(s, &woodPct);
+            const bool recon = reconnecting(s, &bannerN) != 0;
             cout << "clock top=" << clockTop(s) << " bottom=" << clockBottom(s)
                 << " turn=" << ourTurn(s)
+                << " boardPresent=" << present << " (wood " << woodPct << "%, needs >25)"
+                << " reconnecting=" << recon << " (light " << bannerN << ", needs >1000)"
                 << " rematch=" << rematchReady(s)
                 << " initial=" << init << " flip=" << flip
                 << " cal=" << CAL.have << " emptyInk=" << CAL.emptyInk << '\n';
@@ -14453,9 +14463,16 @@ static const char* const kBoardCal =
 vector<int> SPFRAME() {
     vector<int> f;
     SP::Shot s = SP::grabAll();
-    // Nothing to read: the tab is showing something else, the site is
-    // reconnecting, or the end-of-game panel covers the middle of the board.
-    if (!s.ok() || !SP::boardPresent(s) || SP::reconnecting(s))return f;
+    // Nothing to read: the tab is showing something else, or the end-of-game
+    // panel covers the middle of the board.
+    //
+    // `reconnecting` is deliberately NOT consulted here. It exists so the play
+    // mode stops clicking while the site ignores clicks, and this mode never
+    // clicks; the banner sits above the board and leaves the position perfectly
+    // readable. Measured 2026-08-23: a live game with the clocks running and
+    // the dice lit scored 3618 light pixels in that strip against a threshold
+    // of 1000, so every frame was refused and the mode saw nothing at all.
+    if (!s.ok() || !SP::boardPresent(s))return f;
     int flip = SP::colourFromCornerDigit(s);
     if (flip < 0)return f;
     int turn = SP::ourTurn(s);
