@@ -11808,6 +11808,21 @@ int STABMIN(vector<int>& s1, vector<int>& s2) {
     for (i = 0; i < 3; i++)if (STAB(s2)[i] != 1)act = 1; else if (STAB(s1)[i] != 1)dark = 1;
     return dark && act;
 }
+// A tray that can be read: every face recognised, and at least one of them
+// still lit. A turn ends exactly when no die can be moved with any more, and
+// the site dims a die it will not let you move with, so between two turns all
+// three faces are dim - which is what tells the leftover tray of the turn that
+// just ended from a roll.
+//
+// This belongs to the frame the roll is read from. It used to be asked as an
+// edge over the whole round instead - "was not full before, is full now" - and
+// such an edge could be earned early in the round by a face that flickered
+// unreadable while the other player was still moving. It was then still
+// standing when the turn changed, and let the round end on that leftover tray:
+// the roll of the turn just ended was published as the roll of the new one.
+// Since the dice are read off the screen only at a turn change and counted down
+// from there, that reading then stood for the whole turn, and only restarting
+// the program - which reads the tray afresh - put it right.
 int STABFULL(vector<int>& s) {
     int w, i;
     vector<int> stab;
@@ -11819,7 +11834,6 @@ int STABFULL(vector<int>& s) {
     }
     return w;
 }
-int STABFULL(vector<int>& s1, vector<int>& s2) { return STABFULL(s2) > STABFULL(s1); }
 int PROMO(int piece, int sq) { return piece == 0 && sq / 8 == 7 || piece == 6 && sq / 8 == 0; }
 int BOARDNEXT(vector<int>& b1, vector<int>& b2) {
     int side, x, dir, i;
@@ -11875,15 +11889,18 @@ int DIF(vector<int>& s1, vector<int>& s2) {
     // are now sampled every F_STEP pixels in each direction.
     return dif >= 10000 / (F_STEP * F_STEP);
 }
-void NEW(int& roll, int& change, vector<int>& s1, vector<int>& s2, vector<int>& b1, vector<int>& b2) {
-    int stabmin, stabfull, i;
+// `want` says a turn change has already been seen and the roll it brings has
+// still not been read, so this round is looking for a roll even though the side
+// does not change in it.
+void NEW(int& roll, int& change, int want, vector<int>& s1, vector<int>& s2, vector<int>& b1, vector<int>& b2) {
+    int stabmin, i;
     time_point<steady_clock> t1, t2, t3;
     vector<int> b;
     vector<vector<int>> v;
     vector<BOARDSTAT> bs;
     t3 = t1 = steady_clock::now();
     v = { s1,{} };
-    stabfull = stabmin = change = 0;
+    stabmin = change = 0;
     for (i = 1;; i = !i) {
         // A frame now costs a shape match on 64 squares, so this loop no longer
         // needs to spin: without the pause it simply held a core at the stops.
@@ -11893,8 +11910,7 @@ void NEW(int& roll, int& change, vector<int>& s1, vector<int>& s2, vector<int>& 
         if (v[i].size())t3 = t2;
         change += SIDE(v[i]) != SIDE(v[!i]);
         stabmin += STABMIN(v[!i], v[i]);
-        stabfull += STABFULL(v[!i], v[i]);
-        roll = s1.empty() || change || v[i].empty();
+        roll = s1.empty() || change || want || v[i].empty();
         if (DIF(v[!i], v[i]))t1 = t2;
         b = BOARD(v[i]);
         ADD(b1, b, bs);
@@ -11906,12 +11922,41 @@ void NEW(int& roll, int& change, vector<int>& s1, vector<int>& s2, vector<int>& 
         // the next round meet the very same transition and return at once, over
         // and over, with nothing new to publish.
         if (roll == 0 && stabmin)s2 = v[i];
-        // The last clause is new and it is what keeps the mode audible: with
-        // nothing readable on screen and nothing read before it, none of the
-        // other three can ever fire, and this loop would turn silently for
-        // ever - which is exactly how the previous version died unnoticed.
+        // The roll is read off THIS frame, so it is this frame that has to be a
+        // roll: all three faces recognised, one of them lit, the tray standing
+        // still for 300 ms - and the tray not the one this round began with.
+        //
+        // The turn changes before the new dice are thrown, and until they are
+        // thrown the screen still carries the tray of the turn that ended. That
+        // tray is all dim, since a turn ends exactly when no die is playable any
+        // more, so the lit face is what rules it out. The DIF rules out the
+        // other way of arriving at a turn change with no roll behind it: a
+        // misread of the clocks in the middle of a turn, where the tray is lit,
+        // readable and standing still, and only the fact that the site has not
+        // repainted it says that nothing has been thrown. Neither test replaces
+        // the other - the last move of a turn repaints the tray by dimming a
+        // die, so DIF alone would take the stale tray, and a lit tray that was
+        // never repainted is exactly what a misread turn change leaves.
+        //
+        // Asked as an edge over the whole round instead - "the tray was not
+        // full and now it is" - this took the stale tray for the new roll: the
+        // edge could be earned early in the round by a face that flickered
+        // unreadable, long before the turn changed, and it was still standing
+        // when it did.
+        //
+        // The clause after it is the way out if no roll ever arrives, which a
+        // false reading of the clocks can bring about: a tray that has not
+        // moved for two seconds is not being thrown, so let the round end
+        // saying so rather than turn here in silence. The roll stays owed and
+        // the next round goes on looking for it.
+        //
+        // The last clause keeps the mode audible: with nothing readable on
+        // screen and nothing read before it, none of the others can ever fire,
+        // and this loop would turn silently for ever - which is exactly how the
+        // previous version died unnoticed.
         if (v[i].empty() && s1.size() || roll == 0 && stabmin
-            || roll && stabfull && (t2 - t1).count() >= 300000000
+            || roll && STABFULL(v[i]) && DIF(s1, v[i]) && (t2 - t1).count() >= 300000000
+            || roll && (change || want) && (t2 - t1).count() >= 2000000000
             || v[i].empty() && duration_cast<seconds>(t2 - t3).count() >= 2)return;
     }
 }
@@ -11935,14 +11980,17 @@ void SAY(const char* why, vector<int>& s) {
     cout << endl;
 }
 void LOAD() {
-    int roll, change, side, from, to, piece;
+    int roll, change, side, from, to, piece, want, fresh;
     vector<int> s1, s2, b1, b2, way;
+    want = 0;
     for (;; END(s1, s2, b1, b2)) {
-        NEW(roll, change, s1, s2, b1, b2);
+        NEW(roll, change, want, s1, s2, b1, b2);
         lock_guard<mutex> lock(posMutex);
         ROLL = roll;
+        fresh = 1;
         if (s2.empty()) {
             START(POS);
+            want = 0;
             SAY("nothing readable on screen", s2);
             continue;
         }
@@ -11974,11 +12022,32 @@ void LOAD() {
         if (change) {
             POS.ep1[side] = 0;
             POS.ep2 = 0;
-            DICESET(s2);
+        }
+        // Whichever way the turn changed, the dice it was played with are gone,
+        // and the new ones may only be taken off a tray that is a roll: all
+        // three faces read, one of them still lit, and repainted since this
+        // round began. An all dim tray is the leftover of the turn that ended,
+        // and taking it was how the old roll came to be published as the new
+        // one; a lit tray that was never repainted means the turn change itself
+        // was a misreading of the clocks.
+        //
+        // A roll that could not be read here stays owed, and the next round goes
+        // on looking for it - the dice are read from the screen at a turn change
+        // and only counted down afterwards, so a roll missed here would stay
+        // missed for the whole turn, which is what restarting the program cured.
+        // But only while nothing has been played off it: once a move has been
+        // seen the tray is no longer the whole roll, and reading it then would
+        // hand the engine a die that has already been spent.
+        if (way.size())want = 0;
+        if (change || want) {
+            fresh = STABFULL(s2) && DIF(s1, s2);
+            if (fresh)DICESET(s2); else POS.dice = 0;
+            want = !fresh;
         }
         if (change >= 2)POS.ep1[!side] = 0;
         POS.key = computeKey(POS);
-        if (!POS.dice)SAY("the roll is not readable yet", s2);
+        if (!POS.dice)SAY(fresh ? "the roll is not readable yet"
+            : "the turn has changed and the new roll has not appeared yet", s2);
     }
 }
 void SEARCH() {
@@ -12925,12 +12994,52 @@ static const char* const kBoardCal =
     static int colourFromCornerDigit(const Shot& s, int* outWidth = nullptr, int* outN = nullptr) {
         const int x0 = BX + rel(4), y0 = BY + 7 * CELL + rel(8);
         const int w = rel(22), h = rel(30);
+
+        // A piece standing on that corner square reaches into this window - the
+        // left spike of a black queen's crown on a1 is enough - and its pixels
+        // are as unlike the wood as the label is, so they stretch the width
+        // being measured. Measured on a live board: the "1" came out 22 px wide
+        // instead of 10, was read as "8", and the whole board was taken to be
+        // the other way up, which makes rubbish of the position and of the
+        // colour the dice are matched against.
+        //
+        // Two things tell the label from a drawing. A drawing is ink, that is
+        // unsaturated, while the label is a shade of the wood; and the corner
+        // square is a dark one in both orientations - a1 and h8 are the same
+        // colour - so its label is painted LIGHTER than the square, while ink
+        // and the wood darkened by it are not. The pixels where a drawing is
+        // blended into the wood are neither ink nor of its brightness, so the
+        // ink is grown by one pixel before it is dropped. Measured on the same
+        // frame: 91 label pixels left, 9 px wide, read as "1".
+        vector<unsigned char> ink((size_t)w * h, 0), drop((size_t)w * h, 0);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                int lum;
+                if (isInk(s.at(x0 + x, y0 + y), lum)) ink[(size_t)y * w + x] = 1;
+            }
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                if (!ink[(size_t)y * w + x]) continue;
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int nx = x + dx, ny = y + dy;
+                        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                        drop[(size_t)ny * w + nx] = 1;
+                    }
+            }
+
         int hist[4096] = { 0 };
         auto bucket = [](uint32_t v) {
             return (int)(((v >> 20) & 15) | (((v >> 12) & 15) << 4) | (((v >> 4) & 15) << 8));
             };
+        // The wood is never ink, so leaving the drawing out of the histogram as
+        // well keeps a piece that covers most of the window from being taken
+        // for the colour of the square.
         for (int y = 0; y < h; ++y)
-            for (int x = 0; x < w; ++x) hist[bucket(s.at(x0 + x, y0 + y))]++;
+            for (int x = 0; x < w; ++x) {
+                if (drop[(size_t)y * w + x]) continue;
+                hist[bucket(s.at(x0 + x, y0 + y))]++;
+            }
         int bg = 0, best = -1;
         for (int i = 0; i < 4096; ++i) if (hist[i] > best) { best = hist[i]; bg = i; }
         // Average the pixels of the winning bucket rather than reconstructing a
@@ -12940,6 +13049,7 @@ static const char* const kBoardCal =
         long long sR = 0, sG = 0, sB = 0, cnt = 0;
         for (int y = 0; y < h; ++y)
             for (int x = 0; x < w; ++x) {
+                if (drop[(size_t)y * w + x]) continue;
                 uint32_t v = s.at(x0 + x, y0 + y);
                 if (bucket(v) != bg) continue;
                 sB += (int)(v & 255u); sG += (int)((v >> 8) & 255u); sR += (int)((v >> 16) & 255u);
@@ -12951,9 +13061,11 @@ static const char* const kBoardCal =
         int n = 0, ax = 1 << 30, zx = -1;
         for (int y = 0; y < h; ++y)
             for (int x = 0; x < w; ++x) {
+                if (drop[(size_t)y * w + x]) continue;
                 uint32_t v = s.at(x0 + x, y0 + y);
                 const int B = (int)(v & 255u), G = (int)((v >> 8) & 255u), R = (int)((v >> 16) & 255u);
                 if (abs(R - bR) + abs(G - bG) + abs(B - bB) < 40) continue;
+                if (R + G + B <= bR + bG + bB) continue;
                 ++n;
                 if (x < ax) ax = x;
                 if (x > zx) zx = x;
