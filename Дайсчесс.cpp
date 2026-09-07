@@ -2400,8 +2400,9 @@ static void installCrashDiagnostics() {
 #if defined(_WIN32)
     SetUnhandledExceptionFilter(topLevelExceptionFilter);
 #endif
-
-    diagLogLine("[diag] crash diagnostics installed");
+    // Nothing is announced here. The banner only said the handlers were in,
+    // which the handlers themselves say the moment they have anything to
+    // report; the reporting is untouched.
 }
 
 static void cudaCheck(cudaError_t e, const char* expr, const char* file, int line) {
@@ -14666,6 +14667,818 @@ vector<int> SPFRAME() {
     return f;
 }
 
+// ------------------------------------------------------ mode 'a': reviewing
+// Walks a finished game back to its first position with the left arrow, then
+// forward one mini-move at a time with the right arrow, and measures what each
+// mini-move that was played actually cost against the move the engine would
+// have made in the same position.
+//
+// The reading and the thinking are kept apart: the whole record is walked off
+// the page first, in one quick pass, and only then analysed. Ten seconds a
+// mini-move is the best part of an hour over a normal game, and a page that
+// scrolls, reconnects or gets clicked in the meantime takes the reading with
+// it; read whole and printed as it goes, a misreading shows itself before an
+// hour has been spent on top of it. The arrows are pressed exactly as asked -
+// left back to the start, right to step on - only all of them before the search
+// rather than one between each pair of searches.
+namespace RV {
+
+    using SP::Shot;
+
+    // The opening position by engine square (a1 = 0). This is what tells the
+    // rewind it has arrived: the left arrow simply stops doing anything at the
+    // first move, and "the board stopped changing" on its own would fire on any
+    // frame that failed to read as well.
+    static const int kStartSq[64] = {
+        3,1,2,4,5,2,1,3,
+        0,0,0,0,0,0,0,0,
+        12,12,12,12,12,12,12,12,
+        12,12,12,12,12,12,12,12,
+        12,12,12,12,12,12,12,12,
+        12,12,12,12,12,12,12,12,
+        6,6,6,6,6,6,6,6,
+        9,7,8,10,11,8,7,9
+    };
+
+    // One position of the record as it was read off the screen. The tray is
+    // kept under both colours because a die's colour cannot be read from its
+    // picture - the drawings are the same - and which side is to move is only
+    // known later, once the record has been replayed up to this point.
+    //
+    // `pix` is the tray as pixels, and it is what says the record has moved on.
+    // A turn that buys nothing leaves the board untouched: measured on a live
+    // review, the first right arrow of the game changed not one pixel of the
+    // board and the whole of the tray, because Black had rolled bishop, king
+    // and queen and every one of them was walled in behind its own pawns.
+    struct Step {
+        array<int, 64> board{};                        // by screen cell, as readBoard gives it
+        int face[2][3] = { {-1,-1,-1},{-1,-1,-1} };    // the tray read as White's, as Black's
+        int glow[3] = { 0,0,0 };
+        vector<int> pix;                               // the three faces, subsampled
+    };
+
+    static const int kPixStep = 6;
+
+    // Has the tray been repainted? Measured on the site with this sampling: a
+    // new roll scores 120 and a die going dim 21, against 0 for a tray nobody
+    // has touched. Anything above 12 is a repaint.
+    static bool trayMoved(const vector<int>& a, const vector<int>& b) {
+        if (a.empty() || a.size() != b.size()) return true;
+        long long sum = 0;
+        for (size_t i = 0; i < a.size(); ++i) {
+            const int p = a[i], q = b[i];
+            sum += abs((p & 255) - (q & 255))
+                + abs(((p >> 8) & 255) - ((q >> 8) & 255))
+                + abs(((p >> 16) & 255) - ((q >> 16) & 255));
+        }
+        return (double)sum / (double)a.size() > 12.0;
+    }
+
+    static string num2(double v) {
+        ostringstream o;
+        o << fixed << setprecision(2) << v;
+        return o.str();
+    }
+
+    // Half a point out of a hundred. Below it the move that was played and the
+    // move that beat it are the same move as far as the search can tell, and
+    // naming the second one would only be reporting its own noise.
+    static const double kShowLoss = 0.5;
+
+    // Have the dice been thrown again, as against merely dimmed? A die that has
+    // been spent keeps its drawing and only loses its light, so what says the
+    // roll is a new one is the drawings. Pixels will not do here: measured on
+    // the site, a die going dim moves 21 of them against 120 for a new roll,
+    // and taking the dimming for a new position invented a turn out of nothing
+    // in the middle of every other one. A face that could not be read says
+    // nothing either way and is not allowed to count as a change.
+    static bool facesChanged(const Step& a, const Step& b) {
+        for (int c = 0; c < 2; ++c) for (int i = 0; i < 3; ++i) {
+            if (a.face[c][i] < 0 || b.face[c][i] < 0) continue;
+            if (a.face[c][i] != b.face[c][i]) return true;
+        }
+        return false;
+    }
+
+    // SendInput rather than keybd_event: the arrows are extended keys, and a
+    // browser is the one thing that reliably notices the difference.
+    static void tap(WORD vk) {
+        INPUT in{};
+        in.type = INPUT_KEYBOARD;
+        in.ki.wVk = vk;
+        in.ki.wScan = (WORD)MapVirtualKey(vk, MAPVK_VK_TO_VSC);
+        in.ki.dwFlags = KEYEVENTF_EXTENDEDKEY;
+        SendInput(1, &in, sizeof(INPUT));
+        Sleep(25);
+        in.ki.dwFlags = KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP;
+        SendInput(1, &in, sizeof(INPUT));
+    }
+
+    // Same six shapes as the play mode matches, tried under both colours at
+    // once so the die is described only three times instead of six.
+    static void readTray(const Shot& s, Step& st) {
+        for (int i = 0; i < 3; ++i) {
+            st.glow[i] = SP::dieGlow(s, i);
+            SP::Desc d = SP::diceDesc(s, i);
+            for (int colour = 0; colour < 2; ++colour) {
+                int best = INT_MAX, second = INT_MAX, bt = -1;
+                for (int t = 0; t < 6; ++t) {
+                    int v = SP::classDist(d, colour, t);
+                    if (v < best) { second = best; best = v; bt = t; }
+                    else if (v < second) second = v;
+                }
+                st.face[colour][i] = (d.ink < 500 || best > 4000 || second - best < 400) ? -1 : bt;
+            }
+        }
+        const int y0 = SP::dieY(), n = SP::dieSize();
+        st.pix.clear();
+        for (int i = 0; i < 3; ++i)
+            for (int y = 0; y < n; y += kPixStep)
+                for (int x = 0; x < n; x += kPixStep)
+                    st.pix.push_back((int)(s.at(SP::dieX(i) + x, y0 + y) & 0xFFFFFFu));
+    }
+
+    static int trayRollOf(const Step& st, int side) {
+        for (int i = 0; i < 3; ++i) if (st.face[side][i] < 0) return 0;
+        string t;
+        for (int i = 0; i < 3; ++i) t += pieceChar(st.face[side][i]);
+        return diceFenToInt(t);
+    }
+
+    static bool isStart(const array<int, 64>& cells, int flip) {
+        for (int sq = 0; sq < 64; ++sq)
+            if (cells[SP::cellOfSq(sq, flip)] != kStartSq[sq]) return false;
+        return true;
+    }
+
+    // The next position of the record, once the site has finished drawing it:
+    // read twice at least 200 ms apart with the same answer. The site slides a
+    // piece across the board, and a frame caught mid-slide shows it standing
+    // on a square it never stood on - measured at about 100 ms in the play
+    // mode against 280 ms and more for a real stop.
+    //
+    // What counts as having moved on is the board OR a fresh roll on the tray.
+    // Waiting for the board alone is what stopped the very first attempt on a
+    // real game after two mini-moves: the turn that followed bought nothing -
+    // Black had rolled bishop, king and queen and every one of them was walled
+    // in behind its own pawns - so the record stepped on with a new roll and an
+    // untouched board, and the walk sat there until it timed out.
+    //
+    // The hold is on the picture of the tray as well as on the board, and it is
+    // long because the site repaints the tray a good deal later than it moves
+    // the piece. At 200 ms the frame was taken with the tray of the turn that
+    // had just ended still on it, so every roll was read one turn late and the
+    // repaint that followed came out as a position of its own.
+    static bool settled(Step& out, const Step* prev, int msLimit) {
+        Step cand, now;
+        bool have = false;
+        auto t0 = steady_clock::now();
+        auto since = t0;
+        while (duration_cast<milliseconds>(steady_clock::now() - t0).count() < msLimit) {
+            Shot s = SP::grabAll();
+            if (!s.ok() || !SP::boardPresent(s) || SP::readBoard(s, now.board) > 2) {
+                have = false;
+                Sleep(40);
+                continue;
+            }
+            readTray(s, now);
+            // The arrow has not landed yet.
+            if (prev && now.board == prev->board && !facesChanged(now, *prev)) {
+                have = false;
+                Sleep(40);
+                continue;
+            }
+            const auto t = steady_clock::now();
+            if (have && now.board == cand.board && !trayMoved(now.pix, cand.pix)) {
+                if (duration_cast<milliseconds>(t - since).count() >= 400) {
+                    out = now;
+                    return true;
+                }
+            }
+            else { cand = now; have = true; since = t; }
+            Sleep(40);
+        }
+        return false;
+    }
+
+    static bool rewind(int flip) {
+        array<int, 64> prev{}, b{};
+        int same = 0;
+        bool havePrev = false;
+        for (int i = 0; i < 1500; ++i) {
+            Shot s = SP::grabAll();
+            if (s.ok() && SP::boardPresent(s) && SP::readBoard(s, b) <= 2) {
+                if (isStart(b, flip)) return true;
+                if (havePrev && b == prev) { if (++same >= 30) return false; }
+                else { same = 0; prev = b; havePrev = true; }
+            }
+            tap(VK_LEFT);
+            Sleep(70);
+        }
+        return false;
+    }
+
+    static bool record(vector<Step>& steps) {
+        Step first;
+        if (!settled(first, nullptr, 4000)) return false;
+        steps.push_back(first);
+        for (int i = 0; i < 1500; ++i) {
+            Step n;
+            bool got = false;
+            // Not every entry in the record shows on the board or on the tray.
+            // An offer of a draw is one of them - it goes into the record and
+            // changes nothing that can be seen from here - and one arrow that
+            // brought nothing used to end the walk on the spot, which lost the
+            // rest of a game at the point where the draw was offered. So the
+            // arrow is pressed again, and the record has only run out when a
+            // whole run of presses brings nothing.
+            for (int k = 0; k < 8 && !got; ++k) {
+                tap(VK_RIGHT);
+                got = settled(n, &steps.back(), k ? 1200 : 3000);
+            }
+            if (!got) break;
+            steps.push_back(n);
+        }
+        return steps.size() > 1;
+    }
+
+    // Which colour made the move between two boards: the man that APPEARS on
+    // the square moved to. What vanishes cannot tell them apart - a capture
+    // takes a man of the other colour off the board as well.
+    static int mover(const array<int, 64>& a, const array<int, 64>& b) {
+        int cnt[2] = { 0,0 };
+        for (int c = 0; c < 64; ++c) if (a[c] != b[c] && b[c] >= 0 && b[c] < 12) cnt[b[c] / 6]++;
+        if (cnt[0] && !cnt[1]) return 0;
+        if (cnt[1] && !cnt[0]) return 1;
+        return -1;
+    }
+
+    static void listMoves(const Position& p, MoveList& ml, int& term) {
+        Position tmp = p;
+        genLegal(tmp, PATH, MASK, ml, term);
+    }
+
+    // The legal move that turns this position into the one on the next frame.
+    // `slack` counts the squares allowed to disagree: exact first, and one
+    // misread square tolerated only if it still leaves a single answer.
+    static int findMove(const Position& p, const array<int, 64>& want, int flip,
+        const MoveList& ml, int slack, int& outSlack) {
+        int hit = -1, hits = 0;
+        outSlack = 0;
+        for (int allow = 0; allow <= slack; ++allow) {
+            hit = -1; hits = 0;
+            for (int i = 0; i < ml.n; ++i) {
+                Position after = p;
+                makeMove(after, MASK, ml.m[i]);
+                array<int, 64> b;
+                SP::boardOfPos(after, flip, b);
+                int bad = 0;
+                for (int c = 0; c < 64 && bad <= allow; ++c) if (b[c] != want[c]) bad++;
+                if (bad > allow) continue;
+                if (hit < 0) hit = ml.m[i];
+                hits++;
+            }
+            if (hits >= 1) { outSlack = allow; return hit; }
+        }
+        return -1;
+    }
+
+    // The roll a turn was played with, worked out from the record itself.
+    //
+    // The tray on screen is the obvious source and normally the right one, but
+    // it is one reading of three small drawings, and a single misread face
+    // silently rewrites the whole turn - the dice are set once at a turn change
+    // and only counted down from there. The record says more than the tray
+    // does: the site's "use as many dice as possible" rule makes the legal
+    // moves depend on the whole set, so a turn only replays under the roll it
+    // was really played with, and trying all 56 rolls usually leaves one.
+    //
+    // `len` comes back as the number of steps ahead that belong to this turn,
+    // and the answer is 0 when nothing fits at all.
+    static int turnRoll(const Position& before, const vector<Step>& steps, int at,
+        int side, int flip, int tray, int slack, int& len) {
+        int run = 0;
+        while (at + run + 1 < (int)steps.size() && run < 3
+            && mover(steps[at + run].board, steps[at + run + 1].board) == side) run++;
+        if (run == 0) return 0;
+        // The record may simply stop in the middle of a turn, in which case
+        // there is no telling whether the turn was over.
+        const bool truncated = (at + run + 1 >= (int)steps.size());
+
+        // Does this roll buy exactly these `want` moves and then stop?
+        auto fits = [&](int d, int want) {
+            Position p = before;
+            makeRandomWithRolledDice(p, nullptr, d);
+            for (int j = 0; j < want; ++j) {
+                MoveList ml;
+                int term = 0, sl = 0;
+                listMoves(p, ml, term);
+                // A decided position is no reason to stop looking: taking the
+                // king is how a game ends here, and that move is in the list.
+                if (ml.n == 0) return false;
+                const int mv = findMove(p, steps[at + j + 1].board, flip, ml, slack, sl);
+                if (mv < 0) return false;
+                // Nothing can follow a move that ends the game, and the
+                // position it leaves has no king for the generator to look at.
+                if (term) return j + 1 == want;
+                makeMove(p, MASK, mv);
+            }
+            // The record may simply stop in the middle of a turn, and then
+            // there is no telling whether the turn was over.
+            if (want == run && truncated) return true;
+            // Otherwise the turn has to end exactly here: a roll that still
+            // offers a move is not the roll that was played, because the site
+            // will not let a turn stop while a die can still be used.
+            MoveList ml;
+            int term = 0;
+            listMoves(p, ml, term);
+            return term || ml.n == 0;
+            };
+
+        // Longest first: a run of three moves by one colour is one turn of
+        // three unless no roll can pay for them. The shorter readings exist for
+        // the turn that bought nothing at all - the other side's roll left it
+        // no legal move, so it passed without touching the board and the run
+        // carries straight on into the next turn of the same colour.
+        //
+        // The tray is asked at every length before any other roll is asked at
+        // any length. It is direct evidence and the run length is not: with the
+        // order the other way round, a turn of two followed by a pass and a
+        // third move was read as one turn of three whenever some other roll
+        // happened to pay for all three - which the self-check caught doing on
+        // 97 of 2984 turns.
+        if (tray) for (int want = run; want >= 1; --want)
+            if (fits(tray, want)) { len = want; return tray; }
+
+        for (int want = run; want >= 1; --want)
+            for (int i = 0; i < 6; ++i) for (int j = i; j < 6; ++j) for (int k = j; k < 6; ++k) {
+                string t;
+                t += pieceChar(i);
+                t += pieceChar(j);
+                t += pieceChar(k);
+                const int d = diceFenToInt(t);
+                if (d != tray && fits(d, want)) { len = want; return d; }
+            }
+        return 0;
+    }
+
+    // Put the men back where the screen has them, keeping everything the
+    // replay knows and the picture does not - side, dice, castling, en passant.
+    // Used after a square had to be forgiven, so one misread frame costs one
+    // mini-move instead of the rest of the game.
+    static void resyncBoard(Position& p, const array<int, 64>& cells, int flip) {
+        p.color = { 0,0 };
+        p.piece = { 0,0,0,0,0,0 };
+        for (int cell = 0; cell < 64; ++cell) {
+            const int v = cells[cell];
+            if (v < 0 || v >= 12) continue;
+            const int sq = SP::sqOfCell(cell, flip);
+            p.color[v / 6] |= bit(sq);
+            p.piece[v % 6] |= bit(sq);
+        }
+        p.key = computeKey(p);
+    }
+
+    // One mini-move of the replayed game: the position it was made in and the
+    // move itself. Kept so that the game is worked out whole before a second
+    // of thinking is spent on it - the count of mini-moves heads the report,
+    // and a record that cannot be read should say so before, not after, a
+    // quarter of an hour of searching.
+    struct Mini {
+        Position before;
+        int move = 0;
+        bool decisive = false;    // takes a king: nothing to weigh it against
+    };
+    struct Turn {
+        int side = 0;
+        int roll = 0;             // 0 = never found out
+        vector<Mini> moves;       // empty when the roll bought nothing
+    };
+    static bool replay(const vector<Step>&, int, vector<Turn>&, long long&);
+
+    // ---------------------------------------------------------- self-check
+    // No screen and no net: play random games, write down the record the site
+    // would have kept of them - which is all the screen ever gives the review -
+    // and hand it to the very same replay() the mode runs on, to see whether it
+    // recovers the rolls, the turn lengths and the moves it was never told.
+    //
+    // The record is modelled as the site keeps it, entry by entry: every throw
+    // of the dice gets one of its own, where the board stands still and only
+    // the tray changes, and a turn that buys nothing then consists of that
+    // entry and nothing else. Both colours of the tray are filled with the same
+    // drawings, because that is what the classifier sees - the shapes are the
+    // same and only the colour it is matched against differs. Without all this
+    // the test could not have caught what a real game did: a stale tray read
+    // under the wrong side looked like a turn that bought nothing, and two
+    // turns were invented out of it.
+    static void selftest(int games) {
+        START();
+        mt19937 rng(20260907u);
+        long long turns[2] = { 0,0 }, minis = 0, badRoll[2] = { 0,0 }, badLen[2] = { 0,0 };
+        long long badMove = 0, giveUp[2] = { 0,0 }, failed[2] = { 0,0 }, shortGame = 0;
+        long long ghost[2] = { 0,0 };
+        for (int g = 0; g < games; ++g) {
+            const bool withTray = (g & 1) != 0;
+            array<int, 64> cells;
+            for (int sq = 0; sq < 64; ++sq) cells[SP::cellOfSq(sq, 0)] = kStartSq[sq];
+            Position pos;
+            SP::posFromBoard(pos, cells, 0, 1, 15, 0, 0);
+
+            vector<Step> steps;
+            vector<int> rolls, lens, played;
+            // Counted only once a later turn has moved: a throw that bought
+            // nothing and is never followed by a move leaves the record ending
+            // on entries that say nothing, and the replay has no way of telling
+            // - nor any reason to care - whether they were turns.
+            long long barren = 0, pending = 0;
+            { Step st; st.board = cells; steps.push_back(st); }
+
+            int face[3] = { 0,0,0 };
+            auto tray = [&](Step& st) {
+                if (!withTray) return;
+                for (int k = 0; k < 3; ++k) st.face[0][k] = st.face[1][k] = face[k];
+                };
+
+            bool over = false;
+            for (int t = 0; t < 40 && !over && steps.size() < 140; ++t) {
+                string tok;
+                for (int k = 0; k < 3; ++k) { face[k] = (int)(rng() % 6); tok += pieceChar(face[k]); }
+                makeRandomWithRolledDice(pos, nullptr, diceFenToInt(tok));
+                // The entry the throw itself makes: same board, new tray.
+                {
+                    Step st;
+                    st.board = steps.back().board;
+                    tray(st);
+                    steps.push_back(st);
+                }
+                const int wasDice = pos.dice;
+                int len = 0;
+                for (;;) {
+                    MoveList ml;
+                    int term = 0;
+                    listMoves(pos, ml, term);
+                    if (term) { over = true; break; }
+                    if (ml.n == 0) break;
+                    const int mv = ml.m[rng() % (unsigned)ml.n];
+                    makeMove(pos, MASK, mv);
+                    played.push_back(mv);
+                    Step st;
+                    SP::boardOfPos(pos, 0, st.board);
+                    tray(st);          // the drawings do not change as dice are spent
+                    steps.push_back(st);
+                    ++len;
+                }
+                if (len) {
+                    rolls.push_back(wasDice);
+                    lens.push_back(len);
+                    barren += pending;
+                    pending = 0;
+                }
+                else ++pending;
+            }
+
+            vector<Turn> got;
+            long long forg = 0;
+            if (!replay(steps, 0, got, forg)) ++failed[withTray];
+            size_t ri = 0, pi = 0;
+            long long sawBarren = 0;
+            for (const Turn& t : got) {
+                if (t.moves.empty()) { ++sawBarren; continue; }
+                ++turns[withTray];
+                if (ri < rolls.size()) {
+                    if (t.roll != rolls[ri]) ++badRoll[withTray];
+                    if ((int)t.moves.size() != lens[ri]) ++badLen[withTray];
+                    ++ri;
+                }
+                for (const Mini& m : t.moves) {
+                    if (pi < played.size() && m.move != played[pi]) ++badMove;
+                    ++pi;
+                    ++minis;
+                }
+            }
+            // A turn invented out of nothing is as wrong as a move misread, and
+            // it is the mistake a real game caught this test not looking for.
+            if (sawBarren != barren) ghost[withTray] += llabs(sawBarren - barren);
+            if (pi != played.size()) { ++giveUp[withTray]; shortGame += (long long)(played.size() - pi); }
+        }
+        cout << "[selftest] " << games << " games, " << minis << " mini-moves replayed\n";
+        for (int t = 0; t < 2; ++t)
+            cout << "[selftest] " << (t ? "with the tray:    " : "boards only:      ")
+            << turns[t] << " turns, wrong roll " << badRoll[t]
+            << ", wrong turn length " << badLen[t]
+            << ", turns bought-nothing miscounted " << ghost[t]
+            << ", replay gave up " << failed[t]
+            << ", games cut short " << giveUp[t] << '\n';
+        cout << "[selftest] wrong move " << badMove
+            << ", mini-moves lost to a cut-short game " << shortGame << '\n';
+    }
+
+    // Walk the record and rebuild the game from it. No searching here.
+    static bool replay(const vector<Step>& steps, int flip, vector<Turn>& out,
+        long long& forgiven) {
+        Position pos;
+        SP::posFromBoard(pos, steps[0].board, flip, 1, 15, 0, 0);
+        int i = 0;
+        while (i + 1 < (int)steps.size()) {
+            int side = !pos.side;
+
+            // The record keeps an entry of its own for every throw of the dice:
+            // the board stands still and the tray changes. A turn that buys
+            // nothing has only such an entry and no moves at all, and from the
+            // tray the two look identical - so what tells them apart is who
+            // moves when the board moves again. If it is the side to move, the
+            // entry is only where the new roll was written down; if it is the
+            // other side, then the side to move never moved and its turn went
+            // for nothing.
+            //
+            // Reading the tray instead of looking ahead invented two turns at
+            // the end of a real game: a stale tray that happened to leave the
+            // side to move nothing was taken for a turn that bought nothing,
+            // and the side then being wrong, the next real move needed a second
+            // invented turn to put it right.
+            if (steps[i].board == steps[i + 1].board) {
+                int j = i + 1;
+                while (j + 1 < (int)steps.size()
+                    && steps[j].board == steps[j + 1].board) ++j;
+                const int next = (j + 1 < (int)steps.size())
+                    ? mover(steps[j].board, steps[j + 1].board) : -1;
+                // A record that ends on entries with nothing after them says
+                // nothing about whose turns they were.
+                if (next < 0) break;
+
+                // One entry per throw, so a run of them with the board standing
+                // still is one throw for every turn that bought nothing, plus
+                // the throw of the turn that moves next.
+                int passes = (j - i) - 1;
+                // Each pass hands the move to the other side, so the record's
+                // own parity says when an entry went unseen: two rolls of the
+                // same three drawings look alike from here, and that is the one
+                // thing the walk cannot tell apart.
+                if (((side + passes) & 1) != (next & 1)) ++passes;
+
+                for (int q = 0; q < passes; ++q) {
+                    // The roll is on whichever of these entries shows a tray
+                    // that leaves the side to move nothing to do.
+                    int roll = 0;
+                    for (int k = i; k <= j && !roll; ++k) {
+                        const int tr = trayRollOf(steps[k], side);
+                        if (!tr) continue;
+                        Position probe = pos;
+                        makeRandomWithRolledDice(probe, nullptr, tr);
+                        MoveList ml;
+                        int term = 0;
+                        listMoves(probe, ml, term);
+                        if (term || ml.n == 0) roll = tr;
+                    }
+                    makeRandomWithRolledDice(pos, nullptr, roll);
+                    Turn t;
+                    t.side = side;
+                    t.roll = pos.dice;
+                    out.push_back(t);
+                    side = !side;
+                }
+                i = j;      // the last of the run carries the roll still to come
+                continue;
+            }
+
+            const int m = mover(steps[i].board, steps[i + 1].board);
+            if (m < 0) {
+                cout << "step " << i + 1 << ": cannot tell which side moved -"
+                    << SP::stepText(steps[i].board, steps[i + 1].board, flip) << endl;
+                return false;
+            }
+            if (m != side) {
+                // The same side moves twice running with no entry between, so
+                // the other one passed and the record did not say so.
+                makeRandomWithRolledDice(pos, nullptr, 0);
+                Turn t;
+                t.side = side;
+                out.push_back(t);
+                side = m;
+            }
+
+            int len = 0;
+            const int tray = trayRollOf(steps[i], side);
+            int roll = turnRoll(pos, steps, i, side, flip, tray, 0, len);
+            // A square that was read wrong makes every roll look wrong, and
+            // that would cost the rest of the game rather than one move.
+            if (!roll) roll = turnRoll(pos, steps, i, side, flip, tray, 1, len);
+            if (!roll) {
+                cout << "step " << i + 1 << ": no roll accounts for what was played"
+                    << (tray ? " (the tray reads [" + diceIntToFen(tray) + "])"
+                        : string(" (the tray is unreadable)"))
+                    << " -" << SP::stepText(steps[i].board, steps[i + 1].board, flip) << endl;
+                return false;
+            }
+            makeRandomWithRolledDice(pos, nullptr, roll);
+            Turn t;
+            t.side = side;
+            t.roll = pos.dice;
+
+            for (int j = 0; j < len; ++j, ++i) {
+                MoveList ml;
+                int term = 0;
+                listMoves(pos, ml, term);
+                if (ml.n == 0) break;
+                int slack = 0;
+                const int played = findMove(pos, steps[i + 1].board, flip, ml, 1, slack);
+                if (played < 0) {
+                    cout << "step " << i + 1 << ": no legal move leads to the next position -"
+                        << SP::stepText(steps[i].board, steps[i + 1].board, flip) << endl;
+                    out.push_back(t);
+                    return false;
+                }
+                Mini mn;
+                mn.before = pos;
+                mn.move = played;
+                mn.decisive = (term != 0);
+                t.moves.push_back(mn);
+                if (term) { ++i; out.push_back(t); return true; }   // the king is gone
+                makeMove(pos, MASK, played);
+                if (slack) {
+                    ++forgiven;
+                    resyncBoard(pos, steps[i + 1].board, flip);
+                }
+            }
+            out.push_back(t);
+        }
+        return true;
+    }
+
+    static void run(double sec) {
+        SP::loadGeometry();
+        if (!SP::loadCal()) {
+            cout << "the piece shapes failed to load; nothing can be recognised\n";
+            return;
+        }
+        START();
+
+        Shot s0 = SP::grabAll();
+        if (!s0.ok() || !SP::boardPresent(s0)) {
+            cout << "there is no board on screen\n";
+            return;
+        }
+        const int flip = SP::colourFromCornerDigit(s0);
+        if (flip < 0) {
+            cout << "the board's orientation is not readable\n";
+            return;
+        }
+
+        // The page has to hold the keyboard before it will take an arrow, and
+        // the only safe place to click is beside the board.
+        SP::click(SP::BX - SP::rel(60), SP::BY + SP::boardW() / 2);
+        Sleep(300);
+
+        if (!rewind(flip))
+            cout << "the left arrow stopped short of the opening position;"
+            " reading from where it stopped\n";
+
+        vector<Step> steps;
+        if (!record(steps)) {
+            cout << "the right arrow moved nothing: there is no record to read\n";
+            return;
+        }
+        if (!isStart(steps[0].board, flip))
+            cout << "the record does not begin at the opening position;"
+            " castling rights are assumed intact\n";
+
+        // Whole game first, thinking afterwards: the header counts the
+        // mini-moves, and a record that will not read should say so before the
+        // searching starts rather than after.
+        vector<Turn> turns;
+        long long forgiven = 0;
+        replay(steps, flip, turns, forgiven);
+        if (turns.empty()) {
+            cout << "nothing could be read out of the record\n";
+            return;
+        }
+        long long n[2] = { 0,0 };
+        for (const Turn& t : turns) n[t.side] += (long long)t.moves.size();
+        cout << (n[0] + n[1]) << " moves(" << n[0] << '+' << n[1] << ")\n";
+        if (forgiven) cout << forgiven
+            << " positions were taken from the picture after a square disagreed\n";
+
+        // The first mini-move of a turn is searched from an empty tree and the
+        // rest of the turn inherits what it builds, so it is the one worth the
+        // time - six times the allowance, which at the default ten seconds is
+        // the minute it is meant to be. Six times rather than a flat minute so
+        // that the number entered still means something: a run at one second a
+        // mini-move is for seeing that the mode works at all, and a fixed
+        // minute would make that run as long as the real one.
+        const double kFirstSec = 6.0 * sec;
+        size_t nodeCap, edgeCap;
+        tableSizeForTime(kFirstSec, nodeCap, edgeCap);
+        // Sized for the minute but capped at what this machine can hold: at 16
+        // bytes an edge the uncapped figure comes to four gigabytes. These are
+        // the sizes the watch mode has run on for months, about 1.4 GB, and a
+        // turn that outgrows them is caught below and started afresh.
+        nodeCap = min(nodeCap, (size_t)1 << 23);
+        edgeCap = min(edgeCap, (size_t)1 << 26);
+        MCTSTable T(nodeCap, edgeCap);
+
+        // One inference server for the whole review: starting and draining it
+        // per search costs real thinking time, because the batches have to ramp
+        // up again every time.
+        InferenceServer nn(T, &g_trt, g_trt2Ready ? &g_trt2 : nullptr);
+        nn.start();
+        struct Stopper {
+            InferenceServer& s;
+            ~Stopper() noexcept { try { s.stopAndDrain(); } catch (...) {} }
+        } stopper{ nn };
+
+        double loss[2] = { 0,0 };
+        // Said after the report rather than in the middle of it: a line broken
+        // by a complaint is a line that cannot be read straight down.
+        vector<string> gripes;
+
+        for (size_t ti = 0; ti < turns.size(); ++ti) {
+            const Turn& t = turns[ti];
+            // The label is four characters whether the number has one digit or
+            // two, so that the rolls line up down the page.
+            string label = to_string(ti + 1) + ".";
+            while (label.size() < 4) label += ' ';
+            cout << label << (t.roll ? diceIntToFen(t.roll) : string("-")) << flush;
+
+            // Empty at the start of a full move: everything the tree holds
+            // below the root belongs to the roll before this one.
+            T.newGame();
+            // The long think belongs to the first position of the turn that
+            // offers a choice. A forced move is not searched at all, so it
+            // leaves the tree as empty as it found it and must not spend it.
+            bool longUsed = false;
+
+            for (size_t mi = 0; mi < t.moves.size(); ++mi) {
+                const Mini& m = t.moves[mi];
+                // The move goes up before it is judged, so the line keeps
+                // moving through the seconds the search is about to take.
+                cout << ' ' << moveToStr(m.move) << flush;
+
+                MoveList ml;
+                int term = 0;
+                listMoves(m.before, ml, term);
+                // Nothing to weigh up: the only move there was, or the one that
+                // ends the game.
+                if (ml.n <= 1 || m.decisive) continue;
+
+                const double useSec = longUsed ? sec : kFirstSec;
+                longUsed = true;
+                // A search with no room left in the edge pool latches the abort
+                // flag, and every search after it returns the instant it
+                // starts. The turn's own tree is worth keeping when it fits and
+                // worth nothing at all when it does not.
+                if (mi) {
+                    const bool aborted = T.abort.load(memory_order_relaxed);
+                    const double fill = (double)T.edgeTop.load(memory_order_relaxed)
+                        / (double)T.edges.size();
+                    if (aborted || fill > 0.75) T.newGame();
+                }
+                Position root = m.before;
+                float eval = 0.5f, depth = 0.0f;
+                vector<moveState> rm;
+                vector<int> pv;
+                mctsBatchedMT(T, root, PATH, MASK, useSec, eval, depth, rm, pv,
+                    0, 0, autoSearchThreads(), true, nullptr, &nn, false);
+
+                // Every eval comes back from White's side of the board, so a
+                // mini-move is turned round to face whoever made it. The one to
+                // beat is the best-scoring move of them all, and a move nobody
+                // looked at has no eval to compare at all.
+                const moveState* best = nullptr;
+                const moveState* got = nullptr;
+                double evBest = 0.0;
+                for (const moveState& ms : rm) {
+                    if (ms.move == m.move) got = &ms;
+                    if (ms.eval < 0.0f) continue;
+                    const double e = t.side ? 1.0 - ms.eval : ms.eval;
+                    if (!best || e > evBest) { best = &ms; evBest = e; }
+                }
+                if (!best || !got || got->eval < 0.0f) {
+                    gripes.push_back(moveToStr(m.move)
+                        + ": the search never looked at it, so it counts as no loss");
+                    continue;
+                }
+                const double evGot = t.side ? 1.0 - got->eval : got->eval;
+                // In hundredths of the game: the evals are winning chances
+                // between 0 and 1, and a whole point of loss is one per cent of
+                // the game thrown away.
+                double err = 100.0 * (evBest - evGot);
+                if (err < 0.0) err = 0.0;
+                loss[t.side] += err;
+                // The move that beat it, and by how much. Under half a point
+                // the search cannot tell the two apart anyway.
+                if (err >= kShowLoss)
+                    cout << '(' << moveToStr(best->move) << ' ' << num2(err) << ')' << flush;
+            }
+            cout << endl;
+        }
+
+        cout << "white " << num2(n[0] ? loss[0] / n[0] : 0.0) << '\n'
+            << "black " << num2(n[1] ? loss[1] / n[1] : 0.0) << endl;
+        for (const string& g : gripes) cout << g << '\n';
+    }
+
+}   // namespace RV
+
 int main() {
     // Unbuffered stdout: progress lines reach redirected log files immediately
     // (std::cout syncs with stdio, so this covers all engine output).
@@ -14679,8 +15492,7 @@ int main() {
         const std::string emaFile = "net_ema.pt";
         const std::string planFile = "net.plan";
 
-        std::cout << "Enter FEN ('960' random Chess960, '-' Training, 'd' screen diagnostics,\n"
-            "a whole number of seconds = play on screen with that much analysis after the roll):\n";
+        std::cout << "Enter FEN or '960' or '-' training or 's' move analise or 'a' game analise.\n";
         std::string fen;
         std::getline(std::cin, fen);
         while (!fen.empty() && (fen.back() == '\r' || fen.back() == ' ')) fen.pop_back();
@@ -14690,10 +15502,31 @@ int main() {
             SP::diagnose(120);
             return 0;
         }
+        if (fen == "atest") {
+            initDiceTable();
+            initEpMaskAndNewDice();
+            initZobrist();
+            initLeaperAttacks();
+#if defined(_MSC_VER) || defined(__x86_64__) || defined(__i386)
+            g_usePext = shouldUsePextPolicy() && (HAVE_PEXT_INTRIN != 0);
+#else
+            g_usePext = false;
+#endif
+            if (g_usePext) initSlidersPext(); else initSlidersMagics();
+            RV::selftest(200);
+            return 0;
+        }
         // A bare number selects the play-on-screen mode.
         bool playMode = !fen.empty() && fen.find_first_not_of("0123456789") == std::string::npos;
         double playSeconds = playMode ? atof(fen.c_str()) : 0.0;
         if (playMode && playSeconds < 1.0) playSeconds = 1.0;
+
+        // 'a' or 'aN' reviews the finished game on screen. The digits test keeps
+        // this clear of "ab" and "arena", which also begin with an a.
+        bool reviewMode = !fen.empty() && fen[0] == 'a'
+            && fen.find_first_not_of("0123456789", 1) == std::string::npos;
+        double reviewSeconds = (reviewMode && fen.size() > 1) ? atof(fen.c_str() + 1) : 10.0;
+        if (reviewMode && reviewSeconds < 0.1) reviewSeconds = 10.0;
 
         if (fen == "widen192") {
             // Reads "srcNet.pt srcEma.pt" from the next stdin line;
@@ -14817,6 +15650,19 @@ int main() {
         }
         if (playMode) {
             SP::run(playSeconds);
+            return 0;
+        }
+        if (reviewMode) {
+            RV::run(reviewSeconds);
+            {
+                std::lock_guard<std::mutex> lk(g_trtMutex);
+                g_trt.shutdown();
+                g_trtReady = false;
+                if (g_trt2Ready) { g_trt2.shutdown(); g_trt2Ready = false; }
+            }
+            // The report is the last thing on the screen and it is no use if
+            // the window takes it away with it.
+            std::cin.get();
             return 0;
         }
         if (fen == "s") {
