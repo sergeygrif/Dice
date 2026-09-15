@@ -5233,11 +5233,13 @@ static bool runOneSim(MCTSTable& T,
             return false;
         }
 
-        // Depth guard
+        // Depth guard: an over-long simulation is not discarded,
+        // it is scored as a draw (0.5) and backed up along the path
         if (tr.n >= MCTS_MAX_DEPTH - 2) {
             g_failDepth.fetch_add(1, std::memory_order_relaxed);
-            rollbackVirtualLoss(tr);
-            return false;
+            backprop(nullptr, 0.5f, tr, &T);
+            if (diag) diag->depth = decisionDepth;
+            return true;
         }
 
         TTNode* node = T.getNode(pos.key);
