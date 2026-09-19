@@ -13113,7 +13113,9 @@ static const char* const kBoardCal =
         for (int y = y0; y < y1; ++y) for (int x = x0; x < x1; ++x) {
             uint32_t v = s.at(x, y);
             int B = (int)(v & 255u), G = (int)((v >> 8) & 255u), R = (int)((v >> 16) & 255u);
-            if (R > 170 && G > 165 && B > 140) n++;
+            const bool cream = R > 170 && G > 165 && B > 140;
+            const bool red = R > 170 && R > 2 * G && R > 2 * B;
+            if (cream || red) n++;
         }
         return n;
     }
@@ -13123,9 +13125,11 @@ static const char* const kBoardCal =
     static int clockBottom(const Shot& s) {
         return clockLit(s, BX + rel(946), BY + rel(1160), BX + rel(1170), BY + rel(1258));
     }
-    // The clock of the side to move is printed in bright cream, the waiting
-    // side's is dimmed. Average brightness is not enough: the active clock sits
-    // on a dark plaque, so count the pixels above the bright threshold instead.
+    // The active clock is bright cream, or red below 20 seconds; the waiting
+    // clock is dimmed. Count both active colours: ignoring red makes SPFRAME
+    // reject every frame during time trouble, including any newly rolled dice.
+    // Average brightness is not enough because the active clock has a dark
+    // plaque. The red threshold also excludes the dimmed waiting clock.
     static int ourTurn(const Shot& s) {
         int a = clockBottom(s), b = clockTop(s);
         if (a > 60 && a > 3 * b) return 1;
