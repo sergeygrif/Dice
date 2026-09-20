@@ -15314,6 +15314,21 @@ namespace RV {
         return true;
     }
 
+    // Root-move PVs include their first move. Different move orders can reach
+    // the same position despite different search averages. Replay the lines:
+    // pvKey alone is insufficient because every winning line uses the key 0.
+    static bool samePvPosition(const Position& root, const moveState& a,
+        const moveState& b, const array<int, 64>& mask) {
+        if (a.pv.empty() || b.pv.empty()) return false;
+        Position pa = root, pb = root;
+        for (int move : a.pv) makeMove(pa, mask, move);
+        for (int move : b.pv) makeMove(pb, mask, move);
+        return pa.color == pb.color && pa.piece == pb.piece
+            && pa.side == pb.side && pa.dice == pb.dice
+            && pa.castle == pb.castle && pa.rook == pb.rook
+            && pa.ep1 == pb.ep1 && pa.ep2 == pb.ep2;
+    }
+
     static void run(double sec) {
         SP::loadGeometry();
         if (!SP::loadCal()) {
@@ -15472,6 +15487,16 @@ namespace RV {
                 // the game thrown away.
                 double err = 100.0 * (evBest - evGot);
                 if (err < 0.0) err = 0.0;
+                if (err > 0.0) {
+                    for (const moveState& ms : rm) {
+                        if (ms.eval < 0.0f) continue;
+                        const double e = t.side ? 1.0 - ms.eval : ms.eval;
+                        if (e == evBest && samePvPosition(root, *got, ms, MASK)) {
+                            err = 0.0;
+                            break;
+                        }
+                    }
+                }
                 loss[t.side] += err;
                 // The move that beat it, and by how much. Under half a point
                 // the search cannot tell the two apart anyway.
