@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <algorithm>
 #include <clocale>
@@ -15314,19 +15315,50 @@ namespace RV {
         return true;
     }
 
-    // Root-move PVs include their first move. Different move orders can reach
-    // the same position despite different search averages. Replay the lines:
-    // pvKey alone is insufficient because every winning line uses the key 0.
-    static bool samePvPosition(const Position& root, const moveState& a,
-        const moveState& b, const array<int, 64>& mask) {
-        if (a.pv.empty() || b.pv.empty()) return false;
-        Position pa = root, pb = root;
-        for (int move : a.pv) makeMove(pa, mask, move);
-        for (int move : b.pv) makeMove(pb, mask, move);
-        return pa.color == pb.color && pa.piece == pb.piece
-            && pa.side == pb.side && pa.dice == pb.dice
-            && pa.castle == pb.castle && pa.rook == pb.rook
-            && pa.ep1 == pb.ep1 && pa.ep2 == pb.ep2;
+    static bool reachesBestPvPosition(MCTSTable& T, const Position& root,
+        int move, const vector<moveState>& rootMoves, double evBest,
+        const array<int, 64>& mask) {
+        // Every tied best move contributes its PV endpoint. Replay the actual
+        // moves because pvKey is 0 for all winning lines, even different ones.
+        unordered_set<uint64_t> targets;
+        for (const moveState& ms : rootMoves) {
+            if (ms.eval < 0.0f || ms.pv.empty()) continue;
+            const double e = root.side ? 1.0 - ms.eval : ms.eval;
+            if (e != evBest) continue;
+            Position end = root;
+            for (int pvMove : ms.pv) makeMove(end, mask, pvMove);
+            targets.insert(end.key);
+        }
+        if (targets.empty()) return false;
+        auto isTarget = [&](const Position& p) {
+            return targets.find(p.key) != targets.end();
+        };
+
+        Position start = root;
+        makeMove(start, mask, move);
+        // Each stored move spends a die, so at most two remain after the first.
+        // No move generation, rerolls, or arbitrary traversal limit are needed.
+        vector<Position> pending{ start };
+        while (!pending.empty()) {
+            Position p = pending.back();
+            pending.pop_back();
+            // A stored edge can reach a target whose node is not expanded yet.
+            if (isTarget(p)) return true;
+            TTNode* n = T.findNodeNoInsert(p.key);
+            if (!n || n->expanded.load(memory_order_acquire) != 1
+                || n->chance || n->edgeCount == 0) continue;
+            const TTEdge* edges = T.edgePtr(n->edgeBegin);
+            for (int i = 0; i < n->edgeCount; ++i) {
+                Position next = p;
+                makeMove(next, mask, edges[i].move);
+                // A terminal node still holds the final king-capture edge.
+                if (n->terminal) {
+                    if (isTarget(next)) return true;
+                }
+                else pending.push_back(next);
+            }
+        }
+        return false;
     }
 
     static void run(double sec) {
@@ -15487,16 +15519,8 @@ namespace RV {
                 // the game thrown away.
                 double err = 100.0 * (evBest - evGot);
                 if (err < 0.0) err = 0.0;
-                if (err > 0.0) {
-                    for (const moveState& ms : rm) {
-                        if (ms.eval < 0.0f) continue;
-                        const double e = t.side ? 1.0 - ms.eval : ms.eval;
-                        if (e == evBest && samePvPosition(root, *got, ms, MASK)) {
-                            err = 0.0;
-                            break;
-                        }
-                    }
-                }
+                if (err > 0.0 && reachesBestPvPosition(T, root, got->move, rm, evBest, MASK))
+                    err = 0.0;
                 loss[t.side] += err;
                 // The move that beat it, and by how much. Under half a point
                 // the search cannot tell the two apart anyway.
