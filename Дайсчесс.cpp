@@ -5459,6 +5459,61 @@ double computeDifForRootMoves(int write, vector<moveState>& rootMoves, MCTSTable
     return rootMoves[0].dif;
 }
 void Dif(double dif) { if (dif > -100)cout << showpos << setprecision(2) << "dif=" << dif << noshowpos << setprecision(6); }
+// Final position of a line played from rootPos, keyed like pvKey (0 once the king is taken), and its
+// evaluation for the side to move at rootPos: inside a turn the side to move does not change.
+// A position the search has not reached yet takes the evaluation of the deepest searched one on the line.
+double lineEndEval(MCTSTable& T, const Position& rootPos, const array<int, 64>& mask, const vector<int>& line, uint64_t& key) {
+    Position pos = rootPos;
+    double eval = -1;
+    for (size_t i = 0;; i++) {
+        TTNode* n = T.findNodeNoInsert(pos.key);
+        if (n && n->visits.load(memory_order_relaxed))eval = nodeQ(*n);
+        if (n && n->expanded.load(memory_order_acquire) == 1 && n->terminal) {
+            key = 0;
+            return 1;
+        }
+        if (i == line.size()) {
+            key = pos.key;
+            return eval;
+        }
+        makeMove(pos, mask, line[i]);
+    }
+}
+// dif=100*(PV's final position - the best evaluated other final position) and the line to that position.
+// The lines leave the PV at one of its moves and go on with the most visited moves.
+void DifPV(MCTSTable& T, const Position& rootPos, array<int, 64>& mask, const vector<int>& pv) {
+    uint64_t pvKey, key;
+    double pvEval = lineEndEval(T, rootPos, mask, pv, pvKey), bestEval = 0;
+    vector<int> line, tail, best;
+    Position pos = rootPos;
+    for (int m : pv) {
+        TTNode* n = T.findNodeNoInsert(pos.key);
+        if (!n || n->expanded.load(memory_order_acquire) != 1 || n->terminal)break;
+        TTEdge* e0 = T.edgePtr(n->edgeBegin);
+        for (int i = 0; i < n->edgeCount; i++) {
+            if (!e0[i].visits.load(memory_order_relaxed))continue;
+            Position p = pos;
+            makeMove(p, mask, e0[i].move);
+            extractBestPVUntilChance(T, p, mask, tail, key);
+            vector<int> alt = line;
+            alt.push_back(e0[i].move);
+            alt.insert(alt.end(), tail.begin(), tail.end());
+            double eval = lineEndEval(T, rootPos, mask, alt, key);
+            if (key != pvKey && (best.empty() || eval > bestEval)) {
+                best = alt;
+                bestEval = eval;
+            }
+        }
+        line.push_back(m);
+        makeMove(pos, mask, m);
+    }
+    if (best.empty()) {
+        cout << "dif=+100";
+        return;
+    }
+    cout << "dif=" << showpos << setprecision(2) << 100 * (pvEval - bestEval) << noshowpos << setprecision(6);
+    for (int m : best)cout << ' ' << moveToStr(m);
+}
 void collectRootMoves(MCTSTable& T, const Position& rootPos, float& outQSideToMove, vector<moveState>& outMoves);
 void extractDifPVUntilChance(int write, MCTSTable& T, Position& rootPos, array<int, 64>& mask, vector<moveState>& rootMoves, vector<int>& outPV) {
     outPV.clear();
@@ -5808,7 +5863,7 @@ void mctsBatchedMT(MCTSTable& T,
         }
 
         std::vector<int> pvNow;
-        double dif = computeDifForRootMoves(write, rootMovesNow, T, rootPos, mask);
+        computeDifForRootMoves(write, rootMovesNow, T, rootPos, mask);
         extractDifPVUntilChance(write, T, rootPos, mask, rootMovesNow, pvNow);
 
         clearConsoleFull();
@@ -5822,7 +5877,7 @@ void mctsBatchedMT(MCTSTable& T,
         }
 
         cout << endl;
-        Dif(dif);
+        DifPV(T, rootPos, mask, pvNow);
 
         std::cout << '\n';
         for (const auto& ms : rootMovesNow) {
@@ -15775,7 +15830,7 @@ int main() {
 
         if (rootMoves.size()) {
             cout << endl;
-            Dif(rootMoves[0].dif);
+            DifPV(T, pos, mask, pvBeforeRoll);
         }
         cout << endl;
         for (const auto& ms : rootMoves) {
