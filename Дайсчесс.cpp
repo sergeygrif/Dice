@@ -5462,7 +5462,6 @@ ms.dif=d;
 }
 stable_sort(rootMoves.begin(),rootMoves.end(),[](const moveState& a,const moveState& b){return a.alt0<b.alt0||a.alt0==b.alt0&&a.dif>b.dif;});
 }
-void Dif(double dif) { if (dif > -100)cout << showpos << setprecision(2) << "dif=" << dif << noshowpos << setprecision(6); }
 // Final position of a line played from rootPos, keyed like pvKey (0 once the king is taken), and its
 // evaluation for the side to move at rootPos: inside a turn the side to move does not change.
 // A position the search has not reached yet takes the evaluation of the deepest searched one on the line.
@@ -5483,7 +5482,7 @@ double lineEndEval(MCTSTable& T, const Position& rootPos, const array<int, 64>& 
         makeMove(pos, mask, line[i]);
     }
 }
-// dif=100*(PV's final position - the best evaluated other final position) and the line to that position.
+// 100*(PV's final position - the best evaluated other final position) and the line to that position.
 // The lines leave the PV at one of its moves and go on with the most visited moves.
 void DifPV(MCTSTable& T, const Position& rootPos, array<int, 64>& mask, const vector<int>& pv) {
     uint64_t pvKey, key;
@@ -5512,10 +5511,10 @@ void DifPV(MCTSTable& T, const Position& rootPos, array<int, 64>& mask, const ve
         makeMove(pos, mask, m);
     }
     if (best.empty()) {
-        cout << "dif=+100";
+        cout << "+100";
         return;
     }
-    cout << "dif=" << showpos << setprecision(2) << 100 * (pvEval - bestEval) << noshowpos << setprecision(6);
+    cout << showpos << setprecision(2) << 100 * (pvEval - bestEval) << noshowpos << setprecision(6);
     for (int m : best)cout << ' ' << moveToStr(m);
 }
 void collectRootMoves(MCTSTable& T, const Position& rootPos, float& outQSideToMove, vector<moveState>& outMoves);
@@ -5551,6 +5550,29 @@ int getMaxVisitsLen(vector<moveState>& rootMoves) {
     int maxLen = 0;
     for (moveState& ms : rootMoves)maxLen = max(maxLen, int(to_string(ms.visits).size()));
     return maxLen;
+}
+// e2e4 +5.48 g1f3 0.619852 470889 0.576104 in columns: move, dif, alt, eval, visits, prior.
+void printRootMoves(vector<moveState>& rootMoves) {
+    vector<string> difs;
+    size_t moveLen = 0, difLen = 0;
+    for (moveState& ms : rootMoves) {
+        ostringstream s;
+        if (ms.dif > -100) {
+            s << fixed << showpos << setprecision(2) << ms.dif << noshowpos;
+            if (ms.alt)s << ' ' << moveToStr(ms.alt);
+        }
+        difs.push_back(s.str());
+        moveLen = max(moveLen, moveToStr(ms.move).size());
+        difLen = max(difLen, difs.back().size());
+    }
+    int visitsLen = getMaxVisitsLen(rootMoves);
+    for (size_t i = 0; i < rootMoves.size(); i++) {
+        moveState& ms = rootMoves[i];
+        string m = moveToStr(ms.move);
+        cout << m << string(moveLen - m.size() + 1, ' ');
+        if (difLen)cout << difs[i] << string(difLen - difs[i].size() + 1, ' ');
+        cout << ms.eval << ' ' << ms.visits << string(1 + visitsLen - (int)to_string(ms.visits).size(), ' ') << ms.prior << '\n';
+    }
 }
 mutex posMutex;
 int ROLL;
@@ -5872,9 +5894,9 @@ void mctsBatchedMT(MCTSTable& T,
 
         clearConsoleFull();
         std::cout << std::fixed << std::setprecision(2);
-        std::cout << "depth=" << avgDepthNow << '\n';
+        std::cout << avgDepthNow << '\n';
         std::cout << std::fixed << std::setprecision(6);
-        std::cout << "eval=" << mctsEvalWhiteNow << '\n';
+        std::cout << mctsEvalWhiteNow << '\n';
         for (size_t i = 0; i < pvNow.size(); ++i) {
             if (i) std::cout << ' ';
             std::cout << moveToStr(pvNow[i]);
@@ -5884,20 +5906,7 @@ void mctsBatchedMT(MCTSTable& T,
         DifPV(T, rootPos, mask, pvNow);
 
         std::cout << '\n';
-        for (const auto& ms : rootMovesNow) {
-            int d = (int)std::to_string(ms.visits).size();
-            int spacesBeforePrior = 1 + (getMaxVisitsLen(rootMovesNow) - d);
-
-            std::cout
-                << moveToStr(ms.move)
-                << " eval " << ms.eval
-                << " visits " << ms.visits
-                << std::string(spacesBeforePrior, ' ')
-                << "prior " << ms.prior
-                << ' ';
-            Dif(ms.dif);
-            cout << '\n';
-        }
+        printRootMoves(rootMovesNow);
         std::cout.flush();
         };
 
@@ -15823,9 +15832,9 @@ int main() {
         mctsBatchedMT(T, pos, path, mask, INT_MAX, mctsEvalWhite, mctsAvgDepth, rootMoves, pvBeforeRoll, 2, 0, autoSearchThreads(), true);
         clearConsoleFull();
         std::cout << std::fixed << std::setprecision(2);
-        std::cout << "depth=" << mctsAvgDepth << std::endl;
+        std::cout << mctsAvgDepth << std::endl;
         std::cout << std::fixed << std::setprecision(6);
-        std::cout << "eval=" << mctsEvalWhite << std::endl;
+        std::cout << mctsEvalWhite << std::endl;
 
         for (size_t i = 0; i < pvBeforeRoll.size(); ++i) {
             if (i) std::cout << ' ';
@@ -15837,20 +15846,8 @@ int main() {
             DifPV(T, pos, mask, pvBeforeRoll);
         }
         cout << endl;
-        for (const auto& ms : rootMoves) {
-            int d = (int)std::to_string(ms.visits).size();
-            int spacesBeforePrior = 1 + (getMaxVisitsLen(rootMoves) - d);
-
-            std::cout
-                << moveToStr(ms.move)
-                << " eval " << ms.eval
-                << " visits " << ms.visits
-                << std::string(spacesBeforePrior, ' ')
-                << "prior " << ms.prior
-                << ' ';
-            Dif(ms.dif);
-            cout << endl;
-        }
+        printRootMoves(rootMoves);
+        cout.flush();
         {
             std::lock_guard<std::mutex> lk(g_trtMutex);
             g_trt.shutdown();
