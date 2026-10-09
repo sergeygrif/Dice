@@ -5439,25 +5439,28 @@ int Alternative(moveState& cur, moveState& alt, MCTSTable& T, Position& rootPos,
     for (int m : alt.pv)if (m != cur.move)line.push_back(m);
     return terminalAwareKeyAfterLine(T, rootPos, mask, line) != alt.pvKey;
 }
-void computeDifForRootMoves(int write, vector<moveState>& rootMoves, MCTSTable& T, Position& rootPos, array<int, 64>& mask) {
-    auto toSidePerspective = [&rootPos](double eval) {return rootPos.side == 0 ? eval : 1 - eval; };
-    if (rootMoves.empty())return;
-    stable_sort(rootMoves.begin(), rootMoves.end(), [](const moveState& a, const moveState& b) {return a.pvKey == 0 && b.pvKey; });
-    if (rootMoves[0].visits == 0 || rootMoves[0].pvKey == 0) {
-        for (moveState& ms : rootMoves)ms.dif = -100;
-        rootMoves[0].dif = 100;
-        return;
-    }
-    for (moveState& ms : rootMoves) {
-        ms.dif = -100;
-        if (Alternative(ms, rootMoves[0], T, rootPos, mask) || write == 0 && ms.pvKey != rootMoves[0].pvKey) {
-            ms.dif = 100;
-            continue;
-        }
-        for (moveState& alt : rootMoves)if (Alternative(ms, alt, T, rootPos, mask) && alt.visits)ms.dif = max(ms.dif, toSidePerspective(alt.eval));
-    }
-    stable_sort(rootMoves.begin(), rootMoves.end(), [](const moveState& a, const moveState& b) {return a.dif < b.dif; });
-    for (moveState& ms : rootMoves)if (ms.dif >= 0 && ms.dif <= 1)ms.dif = 100 * (toSidePerspective(ms.eval) - ms.dif); else ms.dif *= -1;
+void computeDifForRootMoves(int write,vector<moveState>& rootMoves,MCTSTable& T,Position& rootPos,array<int,64>& mask){
+double d;
+auto toSidePerspective=[&rootPos](double eval){return rootPos.side==0?eval:1-eval;};
+for(moveState& ms:rootMoves){
+if(ms.visits==0||write==0&&ms.pvKey!=rootMoves[0].pvKey){
+ms.alt0=1;
+ms.alt=0;
+ms.dif=-100;
+continue;
+}
+ms.alt0=Alternative(ms,rootMoves[0],T,rootPos,mask);
+ms.alt=0;
+ms.dif=100;
+for(moveState& alt:rootMoves)if(alt.visits&&Alternative(ms,alt,T,rootPos,mask)){
+d=100*(toSidePerspective(ms.eval)-toSidePerspective(alt.eval));
+if(d<ms.dif){
+ms.alt=alt.move;
+ms.dif=d;
+}
+}
+}
+stable_sort(rootMoves.begin(),rootMoves.end(),[](const moveState& a,const moveState& b){return a.alt0<b.alt0||a.alt0==b.alt0&&a.dif>b.dif;});
 }
 void Dif(double dif) { if (dif > -100)cout << showpos << setprecision(2) << "dif=" << dif << noshowpos << setprecision(6); }
 // Final position of a line played from rootPos, keyed like pvKey (0 once the king is taken), and its
