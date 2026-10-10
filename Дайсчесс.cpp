@@ -5413,31 +5413,28 @@ void extractBestPVUntilChance(MCTSTable& T, Position& rootPos, array<int, 64>& m
         makeMove(pos, mask, m);
     }
 }
-uint64_t terminalAwareKeyAfterLine(MCTSTable& T, Position& rootPos, array<int, 64>& mask, vector<int>& line) {
-    Position pos = rootPos;
-    for (int m : line) {
-        TTNode* n = T.findNodeNoInsert(pos.key);
-        if (!n || n->expanded.load(memory_order_acquire) != 1)return pos.key;
-        if (n->terminal)return 0;
-        bool found = false;
-        TTEdge* e0 = T.edgePtr(n->edgeBegin);
-        for (int i = 0; i < n->edgeCount; i++)if (e0[i].move == m) {
-            found = true;
-            break;
-        }
-        if (!found)return pos.key;
-        makeMove(pos, mask, m);
-    }
+// Whether the tree from pos up to the chance nodes holds a position keyed like pvKey (0 once the king is taken).
+// Every stored edge is followed: it can lead to a position whose node is not expanded yet.
+// Each move spends a die, so the walk ends after at most three moves.
+bool treeHasKeyUntilChance(MCTSTable& T, const Position& pos, const array<int, 64>& mask, uint64_t key) {
+    if (pos.key == key)return true;
     TTNode* n = T.findNodeNoInsert(pos.key);
-    if (!n || n->expanded.load(memory_order_acquire) != 1 || !n->terminal)return pos.key;
-    return 0;
+    if (!n || n->expanded.load(memory_order_acquire) != 1 || n->edgeCount == 0)return false;
+    if (n->terminal)return key == 0;
+    TTEdge* e0 = T.edgePtr(n->edgeBegin);
+    for (int i = 0; i < n->edgeCount; i++) {
+        Position p = pos;
+        makeMove(p, mask, e0[i].move);
+        if (treeHasKeyUntilChance(T, p, mask, key))return true;
+    }
+    return false;
 }
+// alt is an alternative to cur if no position in the tree after cur has alt's pvKey.
 int Alternative(moveState& cur, moveState& alt, MCTSTable& T, Position& rootPos, array<int, 64>& mask) {
     if (alt.pvKey == cur.pvKey)return 0;
-    vector<int> line;
-    line.push_back(cur.move);
-    for (int m : alt.pv)if (m != cur.move)line.push_back(m);
-    return terminalAwareKeyAfterLine(T, rootPos, mask, line) != alt.pvKey;
+    Position pos = rootPos;
+    makeMove(pos, mask, cur.move);
+    return !treeHasKeyUntilChance(T, pos, mask, alt.pvKey);
 }
 void computeDifForRootMoves(int write,vector<moveState>& rootMoves,MCTSTable& T,Position& rootPos,array<int,64>& mask){
 double d;
