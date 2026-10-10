@@ -5490,7 +5490,8 @@ double lineEndEval(MCTSTable& T, const Position& rootPos, const array<int, 64>& 
         makeMove(pos, mask, line[i]);
     }
 }
-// 100*(PV's final position - the best evaluated other final position) and the line to that position.
+// The line to the best evaluated final position other than the PV's and, on the next line,
+// 100*(PV's final position - that position).
 // The lines leave the PV at one of its moves and go on with the most visited moves.
 void DifPV(MCTSTable& T, const Position& rootPos, array<int, 64>& mask, const vector<int>& pv) {
     uint64_t pvKey, key;
@@ -5522,8 +5523,8 @@ void DifPV(MCTSTable& T, const Position& rootPos, array<int, 64>& mask, const ve
         cout << "+100";
         return;
     }
-    cout << showpos << setprecision(2) << 100 * (pvEval - bestEval) << noshowpos << setprecision(6);
-    for (int m : best)cout << ' ' << moveToStr(m);
+    for (size_t i = 0; i < best.size(); i++)cout << (i ? " " : "") << moveToStr(best[i]);
+    cout << '\n' << showpos << setprecision(2) << 100 * (pvEval - bestEval) << noshowpos << setprecision(6);
 }
 void collectRootMoves(MCTSTable& T, const Position& rootPos, float& outQSideToMove, vector<moveState>& outMoves);
 void extractDifPVUntilChance(int write, MCTSTable& T, Position& rootPos, array<int, 64>& mask, vector<moveState>& rootMoves, vector<int>& outPV) {
@@ -5913,7 +5914,7 @@ void mctsBatchedMT(MCTSTable& T,
         cout << endl;
         DifPV(T, rootPos, mask, pvNow);
 
-        std::cout << "\n\n";
+        std::cout << '\n';
         printRootMoves(rootMovesNow);
         std::cout.flush();
         };
@@ -15853,7 +15854,7 @@ int main() {
             cout << endl;
             DifPV(T, pos, mask, pvBeforeRoll);
         }
-        cout << endl << endl;
+        cout << endl;
         printRootMoves(rootMoves);
         cout.flush();
         {
