@@ -293,6 +293,7 @@ struct moveState {
     double dif;
     int alt;
     int alt0;
+    double dif0;
 };
 
 
@@ -5439,25 +5440,30 @@ int Alternative(moveState& cur, moveState& alt, MCTSTable& T, Position& rootPos,
 void computeDifForRootMoves(int write,vector<moveState>& rootMoves,MCTSTable& T,Position& rootPos,array<int,64>& mask){
 double d;
 auto toSidePerspective=[&rootPos](double eval){return rootPos.side==0?eval:1-eval;};
+// Moves spend the same dice if they leave the same dice: all of them are played from rootPos.
+auto diceLeft=[&rootPos,&mask](int move){Position p=rootPos;makeMove(p,mask,move);return p.dice;};
 for(moveState& ms:rootMoves){
 if(ms.visits==0||write==0&&ms.pvKey!=rootMoves[0].pvKey){
 ms.alt0=1;
+ms.dif0=-100;
 ms.alt=0;
 ms.dif=-100;
 continue;
 }
 ms.alt0=Alternative(ms,rootMoves[0],T,rootPos,mask);
+ms.dif0=100;
 ms.alt=0;
 ms.dif=100;
 for(moveState& alt:rootMoves)if(alt.visits&&Alternative(ms,alt,T,rootPos,mask)){
 d=100*(toSidePerspective(ms.eval)-toSidePerspective(alt.eval));
-if(d<ms.dif){
+ms.dif0=min(ms.dif0,d);
+if(d<ms.dif&&diceLeft(alt.move)==diceLeft(ms.move)){
 ms.alt=alt.move;
 ms.dif=d;
 }
 }
 }
-stable_sort(rootMoves.begin(),rootMoves.end(),[](const moveState& a,const moveState& b){return a.alt0<b.alt0||a.alt0==b.alt0&&a.dif>b.dif;});
+stable_sort(rootMoves.begin(),rootMoves.end(),[](const moveState& a,const moveState& b){return a.alt0<b.alt0||a.alt0==b.alt0&&a.dif0>b.dif0;});
 }
 // Final position of a line played from rootPos, keyed like pvKey (0 once the king is taken), and its
 // evaluation for the side to move at rootPos: inside a turn the side to move does not change.
@@ -5902,7 +5908,7 @@ void mctsBatchedMT(MCTSTable& T,
         cout << endl;
         DifPV(T, rootPos, mask, pvNow);
 
-        std::cout << '\n';
+        std::cout << "\n\n";
         printRootMoves(rootMovesNow);
         std::cout.flush();
         };
@@ -15842,7 +15848,7 @@ int main() {
             cout << endl;
             DifPV(T, pos, mask, pvBeforeRoll);
         }
-        cout << endl;
+        cout << endl << endl;
         printRootMoves(rootMoves);
         cout.flush();
         {
