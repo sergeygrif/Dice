@@ -5440,8 +5440,13 @@ int Alternative(moveState& cur, moveState& alt, MCTSTable& T, Position& rootPos,
 void computeDifForRootMoves(int write,vector<moveState>& rootMoves,MCTSTable& T,Position& rootPos,array<int,64>& mask){
 double d;
 auto toSidePerspective=[&rootPos](double eval){return rootPos.side==0?eval:1-eval;};
-// Moves spend the same dice if they leave the same dice: all of them are played from rootPos.
-auto diceLeft=[&rootPos,&mask](int move){Position p=rootPos;makeMove(p,mask,move);return p.dice;};
+// Dice left after a move from rootPos, read off the pieces on from and to: the moving piece spends its die,
+// and castling, the king onto its own rook, spends the rook's die as well. Equal leftovers mean equal spending.
+auto diceLeft=[&rootPos](int move){
+int from=move&63,to=move>>6&63,dice=newDice[rootPos.dice][Piece(rootPos,from)];
+if(rootPos.color[rootPos.side]&bit(to))dice=newDice[dice][Piece(rootPos,to)];
+return dice;
+};
 for(moveState& ms:rootMoves){
 if(ms.visits==0||write==0&&ms.pvKey!=rootMoves[0].pvKey){
 ms.alt0=1;
